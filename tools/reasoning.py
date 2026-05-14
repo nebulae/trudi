@@ -12,6 +12,7 @@ _INPUT_BUDGET = _MODEL_CONTEXT - _COMPLETION_RESERVE  # 6144 tokens for input
 mcp = FastMCP("reasoning")
 
 FOUNDATION_SEC_URL = os.environ.get("FOUNDATION_SEC_URL") or "http://localhost:8000"
+HF_TOKEN = os.environ.get("HF_TOKEN") or ""
 MODEL = "fdtn-ai/Foundation-Sec-8B-Reasoning"
 
 _EMPTY_DIRECTIVES: dict = {
@@ -88,11 +89,16 @@ def _cap_lines(text: str, max_lines: int) -> str:
     return "".join(lines[:max_lines]) + f"\n[... {omitted} lines omitted for brevity]\n"
 
 
+def _auth_headers() -> dict:
+    """Return Authorization header when HF_TOKEN is set, empty dict otherwise."""
+    return {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+
 def _health_check() -> bool:
     """GET /health with a 3s timeout — fail fast rather than waiting 120s."""
     try:
         import httpx
-        r = httpx.get(f"{FOUNDATION_SEC_URL}/health", timeout=3)
+        r = httpx.get(f"{FOUNDATION_SEC_URL}/health", timeout=3, headers=_auth_headers())
         return r.status_code == 200
     except Exception:
         return False
@@ -106,6 +112,7 @@ def _token_count(messages: list[dict]) -> int:
         r = httpx.post(
             f"{FOUNDATION_SEC_URL}/tokenize",
             json={"model": MODEL, "messages": messages},
+            headers=_auth_headers(),
             timeout=5,
         )
         if r.status_code == 200:
@@ -175,6 +182,7 @@ def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "") -
                 ],
                 "max_tokens": max_tokens,
             },
+            headers=_auth_headers(),
             timeout=120,
         )
         resp.raise_for_status()
