@@ -108,22 +108,33 @@ def vol_info(image: str) -> dict:
 @mcp.tool()
 def vol_symbol_check(image: str) -> dict:
     """
-    Pre-flight check: scan the memory image for kernel PDB GUIDs and verify
-    whether the exact matching symbol files are in Volatility 3's cache.
+    Pre-flight check: verify Volatility 3 symbol files are ready for this image.
 
-    Scans the image in 2 MB chunks searching for RSDS CodeView debug entries
-    near ntkrnlmp.pdb / ntoskrnl.pdb strings — no Volatility subprocess.
-    Returns the kernel GUID(s) found in the image and whether each is cached.
+    Fast path (returns immediately): if any kernel symbols are already cached,
+    returns symbols_ready=True without touching the image file.
 
-    If symbols_ready is False, call vol_info once (requires internet) to
-    trigger the download for this specific build, then retry memory plugins.
+    Slow path (scans image): if the cache is empty, scans the image from the
+    end to extract the kernel GUID so you know exactly which file to download.
+    Call vol_info once to trigger the download, then retry.
     """
     symbols_dir = vol3_symbols()
+    all_cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
+    all_cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
 
-    # Scan the image for kernel PDB GUIDs
+    # Fast path — symbols present, no need to read the image
+    if all_cached:
+        return {
+            "success": True,
+            "image": image,
+            "symbols_ready": True,
+            "cached_symbol_count": len(all_cached),
+            "cached_guids": [os.path.basename(p) for p in all_cached],
+            "scan_performed": False,
+            "note": "Symbol cache is populated — Volatility should proceed without downloading.",
+        }
+
+    # Slow path — cache empty, scan image to identify the required GUID
     guids_found = _scan_image_for_kernel_guid(image)
-
-    # Check whether each found GUID exists in the cache
     for entry in guids_found:
         if "error" in entry:
             continue
@@ -132,24 +143,18 @@ def vol_symbol_check(image: str) -> dict:
         )
         entry["cached"] = os.path.exists(cache_path)
 
-    # Also list everything already in cache for reference
-    all_cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
-    all_cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
-
-    symbols_ready = any(e.get("cached") for e in guids_found)
-
     return {
         "success": True,
         "image": image,
-        "symbols_dir": symbols_dir,
+        "symbols_ready": False,
+        "cached_symbol_count": 0,
         "kernel_guids_in_image": guids_found,
-        "symbols_ready": symbols_ready,
-        "all_cached_guids": [os.path.basename(p) for p in all_cached],
+        "scan_performed": True,
         "note": (
-            "symbols_ready=True means the exact symbol file for this kernel build "
-            "is cached. If False, call vol_info once to download it (requires internet)."
+            "Symbol cache is empty. Call vol_info once to download symbols "
+            f"for GUID {guids_found[0]['guid']} (requires internet)."
             if guids_found and "error" not in guids_found[0]
-            else "No kernel PDB found in image — image may be unreadable or non-Windows."
+            else "Symbol cache is empty and no kernel PDB found in image scan."
         ),
     }
 
