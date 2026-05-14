@@ -1,12 +1,82 @@
 """Volatility 3 plugin wrappers — Windows, Linux, and cross-platform."""
 import os
 import glob
+import struct
 from typing import Optional, Any
 from fastmcp import FastMCP, Context
 from core import run, run_with_progress, vol3_bin, vol3_symbols
 
 mcp = FastMCP("volatility")
 VOL = vol3_bin()
+
+
+# ── Symbol GUID scanner ───────────────────────────────────────────────────────
+
+def _format_guid(b: bytes) -> str:
+    """Format 16 raw GUID bytes into Volatility's cache filename format.
+
+    Volatility cache filenames use: Data1(4B LE) + Data2(2B LE) + Data3(2B LE)
+    + Data4(8B as-is), all uppercase hex, no dashes.
+    Example: 31C51B7D1C2545A88F69E13FC73E6894
+    """
+    d1, d2, d3 = struct.unpack_from("<IHH", b, 0)
+    return f"{d1:08X}{d2:04X}{d3:04X}{b[8:16].hex().upper()}"
+
+
+def _scan_image_for_kernel_guid(image_path: str) -> list[dict]:
+    """Scan a memory image for kernel PDB GUIDs without invoking Volatility.
+
+    Searches for RSDS CodeView debug entries by locating the kernel PDB
+    filename strings (ntkrnlmp.pdb, ntoskrnl.pdb) and reading the 24 bytes
+    that precede them (RSDS signature + 16-byte GUID + 4-byte age).
+
+    Reads in 2 MB chunks with overlap so entries split across boundaries
+    are not missed. Deduplicates by GUID+age.
+    """
+    TARGETS = [b"ntkrnlmp.pdb", b"ntoskrnl.pdb", b"ntkrpamp.pdb"]
+    CHUNK = 2 * 1024 * 1024
+    OVERLAP = 64
+
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    try:
+        file_size = os.path.getsize(image_path)
+        with open(image_path, "rb") as f:
+            prev = b""
+            offset = 0
+            while offset < file_size:
+                chunk = f.read(CHUNK)
+                if not chunk:
+                    break
+                data = prev + chunk
+                for target in TARGETS:
+                    start = 0
+                    while True:
+                        idx = data.find(target, start)
+                        if idx < 0:
+                            break
+                        # RSDS (4) + GUID (16) + Age (4) = exactly 24 bytes before name
+                        if idx >= 24 and data[idx - 24: idx - 20] == b"RSDS":
+                            guid_bytes = data[idx - 20: idx - 4]
+                            age = struct.unpack_from("<I", data, idx - 4)[0]
+                            guid_str = _format_guid(guid_bytes)
+                            key = f"{guid_str}-{age}"
+                            if key not in seen:
+                                seen.add(key)
+                                results.append({
+                                    "pdb_name": target.decode(),
+                                    "guid": guid_str,
+                                    "age": age,
+                                    "vol_filename": f"{guid_str}-{age}.json.xz",
+                                })
+                        start = idx + 1
+                prev = data[-OVERLAP:]
+                offset += len(chunk)
+    except OSError as e:
+        return [{"error": str(e)}]
+
+    return results
 
 
 def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = 300) -> dict:
@@ -33,28 +103,48 @@ def vol_info(image: str) -> dict:
 @mcp.tool()
 def vol_symbol_check(image: str) -> dict:
     """
-    Pre-flight check: inspect the Volatility 3 symbol cache — no Volatility
-    invocation, instant return. Does NOT run any vol plugin.
+    Pre-flight check: scan the memory image for kernel PDB GUIDs and verify
+    whether the exact matching symbol files are in Volatility 3's cache.
 
-    Reports how many kernel symbol files are cached and where. If
-    symbols_ready is False, call vol_info once (requires internet) to trigger
-    the download for this specific kernel build, then retry memory plugins.
+    Scans the image in 2 MB chunks searching for RSDS CodeView debug entries
+    near ntkrnlmp.pdb / ntoskrnl.pdb strings — no Volatility subprocess.
+    Returns the kernel GUID(s) found in the image and whether each is cached.
+
+    If symbols_ready is False, call vol_info once (requires internet) to
+    trigger the download for this specific build, then retry memory plugins.
     """
     symbols_dir = vol3_symbols()
-    cached_guids = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
-    cached_guids += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
+
+    # Scan the image for kernel PDB GUIDs
+    guids_found = _scan_image_for_kernel_guid(image)
+
+    # Check whether each found GUID exists in the cache
+    for entry in guids_found:
+        if "error" in entry:
+            continue
+        cache_path = os.path.join(
+            symbols_dir, "windows", entry["pdb_name"], entry["vol_filename"]
+        )
+        entry["cached"] = os.path.exists(cache_path)
+
+    # Also list everything already in cache for reference
+    all_cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
+    all_cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
+
+    symbols_ready = any(e.get("cached") for e in guids_found)
 
     return {
         "success": True,
         "image": image,
         "symbols_dir": symbols_dir,
-        "cached_symbol_count": len(cached_guids),
-        "cached_guids": [os.path.basename(p) for p in cached_guids],
-        "symbols_ready": len(cached_guids) > 0,
+        "kernel_guids_in_image": guids_found,
+        "symbols_ready": symbols_ready,
+        "all_cached_guids": [os.path.basename(p) for p in all_cached],
         "note": (
-            "symbols_ready=True means at least one kernel symbol file is cached. "
-            "If a vol scan still times out, the cached GUID may not match this "
-            "specific kernel build — call vol_info once to trigger a fresh download."
+            "symbols_ready=True means the exact symbol file for this kernel build "
+            "is cached. If False, call vol_info once to download it (requires internet)."
+            if guids_found and "error" not in guids_found[0]
+            else "No kernel PDB found in image — image may be unreadable or non-Windows."
         ),
     }
 
