@@ -1,7 +1,6 @@
 """Volatility 3 plugin wrappers — Windows, Linux, and cross-platform."""
 import os
 import glob
-import struct
 from typing import Optional, Any
 from fastmcp import FastMCP, Context
 from core import run, run_with_progress, vol3_bin, vol3_symbols
@@ -10,78 +9,6 @@ mcp = FastMCP("volatility")
 VOL = vol3_bin()
 
 
-# ── Symbol GUID scanner ───────────────────────────────────────────────────────
-
-def _format_guid(b: bytes) -> str:
-    """Format 16 raw GUID bytes into Volatility's cache filename format.
-
-    Volatility cache filenames use: Data1(4B LE) + Data2(2B LE) + Data3(2B LE)
-    + Data4(8B as-is), all uppercase hex, no dashes.
-    Example: 31C51B7D1C2545A88F69E13FC73E6894
-    """
-    d1, d2, d3 = struct.unpack_from("<IHH", b, 0)
-    return f"{d1:08X}{d2:04X}{d3:04X}{b[8:16].hex().upper()}"
-
-
-def _scan_image_for_kernel_guid(image_path: str) -> list[dict]:
-    """Scan a memory image for kernel PDB GUIDs without invoking Volatility.
-
-    Searches for RSDS CodeView debug entries by locating the kernel PDB
-    filename strings (ntkrnlmp.pdb, ntoskrnl.pdb) and reading the 24 bytes
-    that precede them (RSDS signature + 16-byte GUID + 4-byte age).
-
-    Scans from the END of the file — the Windows kernel is loaded at high
-    physical addresses so it appears near the end of a sequential memory dump.
-    Stops as soon as the first kernel GUID is found. Deduplicates by GUID+age.
-    """
-    TARGETS = [b"ntkrnlmp.pdb", b"ntoskrnl.pdb", b"ntkrpamp.pdb"]
-    CHUNK = 2 * 1024 * 1024
-    OVERLAP = 64
-
-    results: list[dict] = []
-    seen: set[str] = set()
-
-    try:
-        file_size = os.path.getsize(image_path)
-        with open(image_path, "rb") as f:
-            pos = file_size
-            tail = b""
-            while pos > 0:
-                read_start = max(0, pos - CHUNK)
-                f.seek(read_start)
-                chunk = f.read(pos - read_start)
-                if not chunk:
-                    break
-                # tail holds the start of the previous chunk (for cross-boundary matches)
-                data = chunk + tail
-                for target in TARGETS:
-                    start = 0
-                    while True:
-                        idx = data.find(target, start)
-                        if idx < 0:
-                            break
-                        if idx >= 24 and data[idx - 24: idx - 20] == b"RSDS":
-                            guid_bytes = data[idx - 20: idx - 4]
-                            age = struct.unpack_from("<I", data, idx - 4)[0]
-                            guid_str = _format_guid(guid_bytes)
-                            key = f"{guid_str}-{age}"
-                            if key not in seen:
-                                seen.add(key)
-                                results.append({
-                                    "pdb_name": target.decode(),
-                                    "guid": guid_str,
-                                    "age": age,
-                                    "vol_filename": f"{guid_str}-{age}.json.xz",
-                                })
-                        start = idx + 1
-                if results:
-                    break  # found the kernel — stop scanning
-                tail = data[:OVERLAP]
-                pos = read_start
-    except OSError as e:
-        return [{"error": str(e)}]
-
-    return results
 
 
 def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = 300) -> dict:
@@ -108,53 +35,26 @@ def vol_info(image: str) -> dict:
 @mcp.tool()
 def vol_symbol_check(image: str) -> dict:
     """
-    Pre-flight check: verify Volatility 3 symbol files are ready for this image.
+    Pre-flight check: verify Volatility 3 symbol files are cached.
+    Returns instantly — pure filesystem check, no image I/O.
 
-    Fast path (returns immediately): if any kernel symbols are already cached,
-    returns symbols_ready=True without touching the image file.
-
-    Slow path (scans image): if the cache is empty, scans the image from the
-    end to extract the kernel GUID so you know exactly which file to download.
-    Call vol_info once to trigger the download, then retry.
+    If symbols_ready is False, call vol_info once (requires internet) to
+    trigger the download for this kernel build, then retry memory plugins.
     """
     symbols_dir = vol3_symbols()
-    all_cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
-    all_cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
-
-    # Fast path — symbols present, no need to read the image
-    if all_cached:
-        return {
-            "success": True,
-            "image": image,
-            "symbols_ready": True,
-            "cached_symbol_count": len(all_cached),
-            "cached_guids": [os.path.basename(p) for p in all_cached],
-            "scan_performed": False,
-            "note": "Symbol cache is populated — Volatility should proceed without downloading.",
-        }
-
-    # Slow path — cache empty, scan image to identify the required GUID
-    guids_found = _scan_image_for_kernel_guid(image)
-    for entry in guids_found:
-        if "error" in entry:
-            continue
-        cache_path = os.path.join(
-            symbols_dir, "windows", entry["pdb_name"], entry["vol_filename"]
-        )
-        entry["cached"] = os.path.exists(cache_path)
+    cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
+    cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
 
     return {
         "success": True,
         "image": image,
-        "symbols_ready": False,
-        "cached_symbol_count": 0,
-        "kernel_guids_in_image": guids_found,
-        "scan_performed": True,
+        "symbols_ready": len(cached) > 0,
+        "cached_symbol_count": len(cached),
+        "cached_guids": [os.path.basename(p) for p in cached],
         "note": (
-            "Symbol cache is empty. Call vol_info once to download symbols "
-            f"for GUID {guids_found[0]['guid']} (requires internet)."
-            if guids_found and "error" not in guids_found[0]
-            else "Symbol cache is empty and no kernel PDB found in image scan."
+            "Symbol cache is populated — proceed with memory plugins."
+            if cached else
+            "Symbol cache is empty — call vol_info once to download symbols (requires internet)."
         ),
     }
 
