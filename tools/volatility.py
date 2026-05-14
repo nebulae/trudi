@@ -33,39 +33,28 @@ def vol_info(image: str) -> dict:
 @mcp.tool()
 def vol_symbol_check(image: str) -> dict:
     """
-    Pre-flight check: verify Volatility 3 symbol files are cached for this image.
-    Runs windows.banners (no symbols required) to identify the kernel build, then
-    checks whether the matching .json.xz file exists in the symbol cache.
+    Pre-flight check: inspect the Volatility 3 symbol cache — no Volatility
+    invocation, instant return. Does NOT run any vol plugin.
 
-    Call this before the first memory plugin on any new image. If symbols_ready is
-    False, the kernel PDB must be downloaded before scanning plugins will succeed.
-    Download symbols by running:
-        python3 -c "
-        from volatility3.framework import contexts, automagic, interfaces
-        ctx = contexts.Context()
-        automagic.run(['/path/to/image.img'], ctx)
-        "
-    Or allow the first vol_info run to trigger the download (requires internet).
+    Reports how many kernel symbol files are cached and where. If
+    symbols_ready is False, call vol_info once (requires internet) to trigger
+    the download for this specific kernel build, then retry memory plugins.
     """
-    # Step 1: identify kernel via banners (no symbols needed, very fast)
-    banner_result = _vol(image, "windows.banners", timeout=60)
-
     symbols_dir = vol3_symbols()
     cached_guids = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
     cached_guids += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
 
     return {
         "success": True,
+        "image": image,
         "symbols_dir": symbols_dir,
         "cached_symbol_count": len(cached_guids),
         "cached_guids": [os.path.basename(p) for p in cached_guids],
-        "banner_output": banner_result.get("stdout", "")[:500],
-        "banner_success": banner_result.get("success", False),
         "symbols_ready": len(cached_guids) > 0,
         "note": (
             "symbols_ready=True means at least one kernel symbol file is cached. "
-            "If the first vol scan still times out, the cached GUID may not match "
-            "this specific kernel build. Run vol_info to trigger download."
+            "If a vol scan still times out, the cached GUID may not match this "
+            "specific kernel build — call vol_info once to trigger a fresh download."
         ),
     }
 
