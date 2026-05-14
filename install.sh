@@ -99,7 +99,8 @@ if "$CLAUDE_BIN" mcp list 2>/dev/null | grep -q "trudi-sift"; then
     "$CLAUDE_BIN" mcp remove trudi-sift 2>/dev/null || true
 fi
 
-"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global
+"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope user 2>/dev/null || \
+"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global 2>/dev/null || true
 ok "Registered trudi-sift MCP server (global scope)"
 
 # ── 6. Verify ─────────────────────────────────────────────────────────────────
