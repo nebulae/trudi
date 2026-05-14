@@ -94,14 +94,35 @@ def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
 
+_HF_WARMUP_TIMEOUT = 120  # seconds to wait for HF cold start
+_HF_POLL_INTERVAL = 5     # seconds between polls
+
+
 def _health_check() -> bool:
-    """GET /health with a 3s timeout — fail fast rather than waiting 120s."""
-    try:
-        import httpx
-        r = httpx.get(f"{FOUNDATION_SEC_URL}/health", timeout=3, headers=_auth_headers())
-        return r.status_code == 200
-    except Exception:
-        return False
+    """Check if Foundation-Sec server is healthy.
+
+    Local (no HF_TOKEN): 3s fail-fast — if it's not up, it's not running.
+    HF endpoint (HF_TOKEN set): poll up to 120s to ride out cold start after
+    scale-to-zero pause.
+    """
+    import httpx
+    import time
+    timeout = _HF_WARMUP_TIMEOUT if HF_TOKEN else 3
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            r = httpx.get(
+                f"{FOUNDATION_SEC_URL}/health",
+                headers=_auth_headers(),
+                timeout=min(10, timeout),
+            )
+            if r.status_code == 200:
+                return True
+        except Exception:
+            pass
+        if not HF_TOKEN or time.monotonic() >= deadline:
+            return False
+        time.sleep(_HF_POLL_INTERVAL)
 
 
 def _token_count(messages: list[dict]) -> int:
