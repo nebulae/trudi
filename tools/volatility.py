@@ -33,7 +33,7 @@ def vol_info(image: str) -> dict:
 
 
 @mcp.tool()
-def vol_symbol_check(image: str) -> dict:
+def vol_symbol_check(memory_image: str) -> dict:
     """
     Pre-flight check: verify Volatility 3 symbol files are cached.
     Returns instantly — pure filesystem check, no image I/O.
@@ -47,7 +47,7 @@ def vol_symbol_check(image: str) -> dict:
 
     return {
         "success": True,
-        "image": image,
+        "image": memory_image,
         "symbols_ready": len(cached) > 0,
         "cached_symbol_count": len(cached),
         "cached_guids": [os.path.basename(p) for p in cached],
