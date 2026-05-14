@@ -56,7 +56,8 @@ fi
 
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements.txt"
-ok "Dependencies installed (fastmcp, httpx, python-dotenv, yara-python)"
+"$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements-dev.txt"
+ok "Dependencies installed (fastmcp, httpx, python-dotenv, yara-python, pytest)"
 
 # ── 3. Environment file ───────────────────────────────────────────────────────
 
