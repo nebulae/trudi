@@ -1,0 +1,85 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__trudi-sift__hash_verify_evidence_hash",
+      "mcp__trudi-sift__hash_hash_file",
+      "mcp__trudi-sift__hash_hash_directory",
+      "mcp__trudi-sift__ewf_ewf_info",
+      "mcp__trudi-sift__ewf_ewf_mount",
+      "mcp__trudi-sift__ewf_ewf_verify",
+      "mcp__trudi-sift__ewf_mount_full_image",
+      "mcp__trudi-sift__ewf_mount_ntfs",
+      "mcp__trudi-sift__tsk_tsk_mmls",
+      "mcp__trudi-sift__tsk_tsk_fsstat",
+      "mcp__trudi-sift__tsk_tsk_fls",
+      "mcp__trudi-sift__tsk_tsk_istat",
+      "mcp__trudi-sift__tsk_tsk_icat",
+      "mcp__trudi-sift__tsk_tsk_mactime",
+      "mcp__trudi-sift__tsk_tsk_recover",
+      "mcp__trudi-sift__strings_stat_file",
+      "mcp__trudi-sift__strings_file_identify",
+      "mcp__trudi-sift__strings_file_identify_directory",
+      "mcp__trudi-sift__strings_strings_extract",
+      "mcp__trudi-sift__strings_strings_grep",
+      "mcp__trudi-sift__strings_exiftool_metadata",
+      "mcp__trudi-sift__strings_hexdump",
+      "mcp__trudi-sift__vol_vol_info",
+      "mcp__trudi-sift__vol_vol_pstree",
+      "mcp__trudi-sift__vol_vol_pslist",
+      "mcp__trudi-sift__vol_vol_psscan",
+      "mcp__trudi-sift__vol_vol_cmdline",
+      "mcp__trudi-sift__vol_vol_netscan",
+      "mcp__trudi-sift__vol_vol_netstat",
+      "mcp__trudi-sift__vol_vol_malfind",
+      "mcp__trudi-sift__vol_vol_dlllist",
+      "mcp__trudi-sift__vol_vol_svcscan",
+      "mcp__trudi-sift__vol_vol_hollowprocesses",
+      "mcp__trudi-sift__vol_vol_pebmasquerade",
+      "mcp__trudi-sift__vol_vol_suspicious_threads",
+      "mcp__trudi-sift__vol_vol_consoles",
+      "mcp__trudi-sift__vol_vol_scheduled_tasks",
+      "mcp__trudi-sift__vol_vol_registry_hivelist",
+      "mcp__trudi-sift__vol_vol_dumpfiles",
+      "mcp__trudi-sift__ez_ez_mftecmd",
+      "mcp__trudi-sift__ez_ez_evtxecmd",
+      "mcp__trudi-sift__ez_ez_recmd_hive",
+      "mcp__trudi-sift__ez_ez_amcacheparser",
+      "mcp__trudi-sift__ez_ez_appcompatcacheparser",
+      "mcp__trudi-sift__ez_ez_pecmd",
+      "mcp__trudi-sift__ez_ez_lecmd",
+      "mcp__trudi-sift__ez_ez_jlecmd",
+      "mcp__trudi-sift__ez_ez_sbecmd",
+      "mcp__trudi-sift__misc_evtx_dump",
+      "mcp__trudi-sift__misc_evtx_filter",
+      "mcp__trudi-sift__misc_regripper_hive",
+      "mcp__trudi-sift__misc_parse_scheduled_tasks",
+      "mcp__trudi-sift__misc_usbdeviceforensics",
+      "mcp__trudi-sift__misc_start_execution_log",
+      "mcp__trudi-sift__misc_record_finding",
+      "mcp__trudi-sift__misc_export_execution_log",
+      "mcp__trudi-sift__enrich_vt_lookup_hash",
+      "mcp__trudi-sift__enrich_vt_lookup_ip",
+      "mcp__trudi-sift__enrich_vt_lookup_domain",
+      "mcp__trudi-sift__enrich_abuseipdb_check",
+      "mcp__trudi-sift__yara_yara_scan_file",
+      "mcp__trudi-sift__yara_yara_scan_directory",
+      "mcp__trudi-sift__yara_yara_scan_memory_image",
+      "mcp__trudi-sift__reason_reason_plan",
+      "mcp__trudi-sift__reason_reason_hypothesize",
+      "mcp__trudi-sift__reason_reason_evaluate_finding",
+      "mcp__trudi-sift__reason_reason_synthesize"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p ./analysis/ && echo \"$(date -u): $CONVERSATION_SUMMARY\" >> ./analysis/forensic_audit.log"
+          }
+        ]
+      }
+    ]
+  }
+}

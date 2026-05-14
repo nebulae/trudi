@@ -13,13 +13,15 @@ dist/
 build/
 *.egg-info/
 
-# case outputs — never commit investigation artifacts
-analysis/
-exports/
-reports/
+# case outputs — never commit investigation artifacts (root-level only)
+/analysis/
+/exports/
+/reports/
 *.log
 *.csv
-*.json
+# exclude generated/trace JSON but keep config JSON in the repo
+*_trace.json
+mft*.json
 
 # OS
 .DS_Store
