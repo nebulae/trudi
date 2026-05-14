@@ -38,7 +38,7 @@ All forensic execution goes through MCP tools. Never invoke binaries directly vi
 | Namespace | Domain | Key Tools |
 |-----------|--------|-----------|
 | `img.*` | Disk image mounting | ewfmount, vshadowmount, bdemount, xmount, photorec, losetup |
-| `vol.*` | Memory forensics (Volatility 3) | pstree, pslist, psscan, cmdline, netstat, dlllist, malfind, hivelist, dumpfiles, linux plugins |
+| `vol.*` | Memory forensics (Volatility 3) | **`vol_symbol_check` first on any new image**, then pstree, pslist, psscan, cmdline, netstat, dlllist, malfind, hivelist, dumpfiles, linux plugins |
 | `tsk.*` | Filesystem (Sleuth Kit) | fls, icat, istat, ils, blkls, mactime, tsk_recover, sigfind, sorter, jls, jcat |
 | `ewf.*` | E01 images | ewfmount, ewfinfo, ewfverify, mount_full_image |
 | `ez.*` | Windows artifacts (EZ Tools) | MFTECmd, EvtxECmd, RECmd, AmcacheParser, AppCompatCacheParser, PECmd, JLECmd, LECmd, SBECmd, WxTCmd, SQLECmd, RBCmd |
@@ -53,6 +53,8 @@ All forensic execution goes through MCP tools. Never invoke binaries directly vi
 | `reason.*` | Adversarial review (Foundation-Sec-8B) | hypothesize, evaluate_finding, synthesize |
 
 **Not available on this instance:** MemProcFS, VSCMount (Windows-only), tshark, hayabusa, guymager.
+
+**Volatility exit codes:** `exit_code: 1` = plugin ran but failed (e.g. unsupported OS structure, no data found — may be normal for some images). `exit_code: 2` = argument error (TRUDI bug — check command syntax). Check `stderr` for the actual error before retrying. A timeout (`exit_code: -1`) almost always means symbols are not cached — run `vol_symbol_check` to confirm.
 
 ---
 

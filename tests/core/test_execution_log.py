@@ -49,9 +49,12 @@ class TestExecutionLog:
         assert log._entries[0]["type"] == "reason_call"
         assert log._entries[0]["tool"] == "reason_plan"
 
-    def test_record_reason_call_conclusion_capped(self, log):
-        log.record_reason_call("reason_plan", True, "x" * 1000, {})
-        assert len(log._entries[0]["conclusion"]) == 500
+    def test_record_reason_call_full_conclusion_stored(self, log):
+        # conclusion should NOT be capped in the trace — it's already bounded
+        # by _CONCLUSION_CAP=1200 in reasoning.py before reaching here
+        long_text = "x" * 1000
+        log.record_reason_call("reason_plan", True, long_text, {})
+        assert log._entries[0]["conclusion"] == long_text
 
     def test_record_finding_type(self, log):
         log.record_finding("BlazingTools keylogger", "high", "Amcache")

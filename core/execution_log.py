@@ -29,10 +29,12 @@ class ExecutionLog:
         retries: int,
         exit_code: int,
         stderr: str = "",
+        elapsed_seconds: float = 0.0,
+        progress_lines: list | None = None,
     ) -> None:
         if self._path is None:
             return
-        self._entries.append({
+        entry: dict = {
             "type": "tool_call",
             "ts": _utcnow(),
             "cmd": cmd,
@@ -40,8 +42,12 @@ class ExecutionLog:
             "truncated": truncated,
             "retries": retries,
             "exit_code": exit_code,
+            "elapsed_seconds": elapsed_seconds,
             "stderr": stderr[:512] if stderr else "",
-        })
+        }
+        if progress_lines:
+            entry["progress_lines"] = progress_lines
+        self._entries.append(entry)
         self._flush()
 
     def record_reason_call(
@@ -58,7 +64,7 @@ class ExecutionLog:
             "ts": _utcnow(),
             "tool": tool,
             "success": success,
-            "conclusion": conclusion[:500] if conclusion else "",
+            "conclusion": conclusion or "",
             "directives": directives,
         })
         self._flush()
@@ -96,7 +102,8 @@ class ExecutionLog:
                 status = "OK" if e["success"] else "FAIL"
                 retries = f" ({e['retries']} retries)" if e.get("retries") else ""
                 trunc = " [TRUNCATED]" if e.get("truncated") else ""
-                lines.append(f"- `{ts}` **TOOL** `{e['cmd']}`  → {status}{retries}{trunc}")
+                elapsed = f" {e['elapsed_seconds']}s" if e.get("elapsed_seconds") else ""
+                lines.append(f"- `{ts}` **TOOL** `{e['cmd']}`  → {status}{retries}{trunc}{elapsed}")
                 if not e["success"] and e.get("stderr"):
                     lines.append(f"  - stderr: {e['stderr'][:200]}")
             elif t == "reason_call":

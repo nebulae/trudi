@@ -23,6 +23,7 @@
       "mcp__trudi-sift__strings_strings_grep",
       "mcp__trudi-sift__strings_exiftool_metadata",
       "mcp__trudi-sift__strings_hexdump",
+      "mcp__trudi-sift__vol_vol_symbol_check",
       "mcp__trudi-sift__vol_vol_info",
       "mcp__trudi-sift__vol_vol_pstree",
       "mcp__trudi-sift__vol_vol_pslist",

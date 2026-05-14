@@ -1,6 +1,7 @@
 """Tests for tools/volatility.py — verifies -s symbol path flag on every call."""
+import asyncio
 import pytest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, MagicMock
 
 
 IMG = "/fake/memory.img"
@@ -10,10 +11,28 @@ def get_cmd(mock_run):
     return mock_run.call_args[0][0]
 
 
+def make_mock_ctx():
+    ctx = MagicMock()
+    ctx.report_progress = AsyncMock()
+    return ctx
+
+
 @pytest.fixture(autouse=True)
 def mock_run(run_ok):
     with patch("tools.volatility.run", return_value=run_ok) as m:
         yield m
+
+
+@pytest.fixture()
+def mock_run_progress(run_ok):
+    """Fixture for async tools that use run_with_progress instead of run."""
+    with patch("tools.volatility.run_with_progress", new_callable=AsyncMock, return_value=run_ok) as m:
+        yield m
+
+
+def run_async(coro):
+    """Helper to run a coroutine in sync test context."""
+    return asyncio.get_event_loop().run_until_complete(coro)
 
 
 class TestSymbolPathFlag:
@@ -25,38 +44,39 @@ class TestSymbolPathFlag:
         cmd = get_cmd(mock_run)
         assert "-s" in cmd
 
-    def test_vol_psscan_has_symbol_flag(self, mock_run):
+    def test_vol_psscan_has_symbol_flag(self, mock_run, mock_run_progress):
         from tools.volatility import vol_psscan
-        vol_psscan(IMG)
-        cmd = get_cmd(mock_run)
+        run_async(vol_psscan(IMG, make_mock_ctx()))
+        cmd = mock_run_progress.call_args[0][0]
         assert "-s" in cmd
 
-    def test_symbol_path_is_not_opt_volatility3(self, mock_run):
+    def test_symbol_path_is_not_opt_volatility3(self, mock_run, mock_run_progress):
         from tools.volatility import vol_psscan
-        vol_psscan(IMG)
-        cmd = get_cmd(mock_run)
+        run_async(vol_psscan(IMG, make_mock_ctx()))
+        cmd = mock_run_progress.call_args[0][0]
         s_idx = cmd.index("-s")
         sym_path = cmd[s_idx + 1]
         assert not sym_path.startswith("/opt/volatility3")
 
 
 class TestProcessPlugins:
-    def test_vol_pslist(self, mock_run):
+    def test_vol_pslist(self, mock_run, mock_run_progress):
         from tools.volatility import vol_pslist
-        vol_pslist(IMG)
-        assert "windows.pslist" in get_cmd(mock_run)
+        run_async(vol_pslist(IMG, make_mock_ctx()))
+        assert "windows.pslist" in mock_run_progress.call_args[0][0]
 
     def test_vol_pslist_with_pid(self, mock_run):
+        # pid-filtered pslist uses sync run() — fast path, no ctx needed
         from tools.volatility import vol_pslist
-        vol_pslist(IMG, pid=1234)
+        run_async(vol_pslist(IMG, make_mock_ctx(), pid=1234))
         cmd = get_cmd(mock_run)
         assert "--pid" in cmd
         assert "1234" in cmd
 
-    def test_vol_psscan(self, mock_run):
+    def test_vol_psscan(self, mock_run, mock_run_progress):
         from tools.volatility import vol_psscan
-        vol_psscan(IMG)
-        assert "windows.psscan" in get_cmd(mock_run)
+        run_async(vol_psscan(IMG, make_mock_ctx()))
+        assert "windows.psscan" in mock_run_progress.call_args[0][0]
 
     def test_vol_pstree(self, mock_run):
         from tools.volatility import vol_pstree
@@ -152,15 +172,15 @@ class TestServicePlugins:
 
 
 class TestNetworkPlugins:
-    def test_vol_netstat(self, mock_run):
+    def test_vol_netstat(self, mock_run, mock_run_progress):
         from tools.volatility import vol_netstat
-        vol_netstat(IMG)
-        assert "windows.netstat" in get_cmd(mock_run)
+        run_async(vol_netstat(IMG, make_mock_ctx()))
+        assert "windows.netstat" in mock_run_progress.call_args[0][0]
 
-    def test_vol_netscan(self, mock_run):
+    def test_vol_netscan(self, mock_run, mock_run_progress):
         from tools.volatility import vol_netscan
-        vol_netscan(IMG)
-        assert "windows.netscan" in get_cmd(mock_run)
+        run_async(vol_netscan(IMG, make_mock_ctx()))
+        assert "windows.netscan" in mock_run_progress.call_args[0][0]
 
 
 class TestRegistryPlugins:
@@ -321,10 +341,10 @@ class TestKernelPlugins:
 
 
 class TestFilesystemPlugins:
-    def test_vol_filescan(self, mock_run):
+    def test_vol_filescan(self, mock_run, mock_run_progress):
         from tools.volatility import vol_filescan
-        vol_filescan(IMG)
-        assert "windows.filescan" in get_cmd(mock_run)
+        run_async(vol_filescan(IMG, make_mock_ctx()))
+        assert "windows.filescan" in mock_run_progress.call_args[0][0]
 
     def test_vol_dumpfiles_no_output_dir(self):
         from tools.volatility import vol_dumpfiles
@@ -492,14 +512,14 @@ class TestLinuxPlugins:
 
 
 class TestImageArg:
-    def test_image_path_in_cmd(self, mock_run):
+    def test_image_path_in_cmd(self, mock_run, mock_run_progress):
         from tools.volatility import vol_psscan
-        vol_psscan("/fake/evidence.img")
-        assert "/fake/evidence.img" in get_cmd(mock_run)
+        run_async(vol_psscan("/fake/evidence.img", make_mock_ctx()))
+        assert "/fake/evidence.img" in mock_run_progress.call_args[0][0]
 
-    def test_json_renderer_flag(self, mock_run):
+    def test_json_renderer_flag(self, mock_run, mock_run_progress):
         from tools.volatility import vol_pslist
-        vol_pslist(IMG)
-        cmd = get_cmd(mock_run)
+        run_async(vol_pslist(IMG, make_mock_ctx()))
+        cmd = mock_run_progress.call_args[0][0]
         assert "-r" in cmd
         assert "json" in cmd

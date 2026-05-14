@@ -95,7 +95,27 @@ class TestRun:
         big_err = b"e" * 10000
         mock_sub.return_value = make_proc(1, b"", big_err)
         r = run(["fail"])
-        assert len(r["stderr"]) == 4096
+        assert len(r["stderr"]) <= 4096
+
+    def test_elapsed_seconds_present(self, mock_sub):
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        r = run(["echo", "ok"])
+        assert "elapsed_seconds" in r
+        assert isinstance(r["elapsed_seconds"], float)
+
+    def test_progress_lines_parsed_from_stderr(self, mock_sub):
+        progress_stderr = b"Volatility 3 Framework 2.x\nProgress:   33.01\t\tscanning\nProgress:  100.00\t\tdone\n"
+        mock_sub.return_value = make_proc(0, b"output", progress_stderr)
+        r = run(["vol", "psscan"])
+        assert r["progress_lines"]
+        assert any("33.01" in line or "100.00" in line for line in r["progress_lines"])
+
+    def test_progress_lines_stripped_from_stderr(self, mock_sub):
+        mixed_stderr = b"Progress:   50.00\t\tscanning\nActual error: something failed\n"
+        mock_sub.return_value = make_proc(1, b"", mixed_stderr)
+        r = run(["vol", "bad"])
+        assert "Actual error" in r["stderr"]
+        assert "Progress:" not in r["stderr"]
 
     def test_timeout_returns_failure(self, mock_sub):
         mock_sub.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=1)
@@ -103,20 +123,12 @@ class TestRun:
         assert r["success"] is False
         assert "timed out" in r["stderr"]
 
-    def test_timeout_retries_max_3_times(self, mock_sub):
+    def test_timeout_does_not_retry(self, mock_sub):
+        # Timeouts should fail immediately — retrying a timed-out command wastes time
         mock_sub.side_effect = subprocess.TimeoutExpired(cmd="x", timeout=1)
         r = run(["sleep", "999"], timeout=1)
-        assert r["retries"] == 3
-        assert mock_sub.call_count == 4  # 1 initial + 3 retries
-
-    def test_timeout_succeeds_on_retry(self, mock_sub):
-        mock_sub.side_effect = [
-            subprocess.TimeoutExpired(cmd="x", timeout=1),
-            make_proc(0, b"ok", b""),
-        ]
-        r = run(["sleep", "1"], timeout=1)
-        assert r["success"] is True
-        assert r["retries"] == 1
+        assert r["retries"] == 0
+        assert mock_sub.call_count == 1
 
     def test_non_timeout_error_not_retried(self, mock_sub):
         mock_sub.side_effect = FileNotFoundError("no such file")

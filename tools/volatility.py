@@ -1,15 +1,25 @@
 """Volatility 3 plugin wrappers — Windows, Linux, and cross-platform."""
-from typing import Optional
-from fastmcp import FastMCP
-from core import run, vol3_bin, vol3_symbols
+import os
+import glob
+from typing import Optional, Any
+from fastmcp import FastMCP, Context
+from core import run, run_with_progress, vol3_bin, vol3_symbols
 
 mcp = FastMCP("volatility")
 VOL = vol3_bin()
 
 
-def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = 300):
-    cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json"] + (extra or []) + [plugin]
+def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = 300) -> dict:
+    # plugin comes BEFORE extra so plugin-specific args (--pid, --dump, etc.)
+    # are passed to the plugin, not interpreted as global vol args
+    cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json", plugin] + (extra or [])
     return run(cmd, timeout=timeout)
+
+
+async def _vol_progress(image: str, plugin: str, ctx: Any, timeout: int = 600) -> dict:
+    """Async variant of _vol() with FastMCP Context progress reporting."""
+    cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json", plugin]
+    return await run_with_progress(cmd, ctx, timeout=timeout)
 
 
 # ── Image info ──────────────────────────────────────────────────────────────
@@ -20,19 +30,60 @@ def vol_info(image: str) -> dict:
     return _vol(image, "windows.info")
 
 
+@mcp.tool()
+def vol_symbol_check(image: str) -> dict:
+    """
+    Pre-flight check: verify Volatility 3 symbol files are cached for this image.
+    Runs windows.banners (no symbols required) to identify the kernel build, then
+    checks whether the matching .json.xz file exists in the symbol cache.
+
+    Call this before the first memory plugin on any new image. If symbols_ready is
+    False, the kernel PDB must be downloaded before scanning plugins will succeed.
+    Download symbols by running:
+        python3 -c "
+        from volatility3.framework import contexts, automagic, interfaces
+        ctx = contexts.Context()
+        automagic.run(['/path/to/image.img'], ctx)
+        "
+    Or allow the first vol_info run to trigger the download (requires internet).
+    """
+    # Step 1: identify kernel via banners (no symbols needed, very fast)
+    banner_result = _vol(image, "windows.banners", timeout=60)
+
+    symbols_dir = vol3_symbols()
+    cached_guids = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
+    cached_guids += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
+
+    return {
+        "success": True,
+        "symbols_dir": symbols_dir,
+        "cached_symbol_count": len(cached_guids),
+        "cached_guids": [os.path.basename(p) for p in cached_guids],
+        "banner_output": banner_result.get("stdout", "")[:500],
+        "banner_success": banner_result.get("success", False),
+        "symbols_ready": len(cached_guids) > 0,
+        "note": (
+            "symbols_ready=True means at least one kernel symbol file is cached. "
+            "If the first vol scan still times out, the cached GUID may not match "
+            "this specific kernel build. Run vol_info to trigger download."
+        ),
+    }
+
+
 # ── Process enumeration ─────────────────────────────────────────────────────
 
 @mcp.tool()
-def vol_pslist(image: str, pid: Optional[int] = None) -> dict:
+async def vol_pslist(image: str, ctx: Context, pid: Optional[int] = None) -> dict:
     """List processes via EPROCESS linked list walk. Fast; misses hidden processes."""
-    extra = ["--pid", str(pid)] if pid else []
-    return _vol(image, "windows.pslist", extra)
+    if pid:
+        return _vol(image, "windows.pslist", ["--pid", str(pid)])
+    return await _vol_progress(image, "windows.pslist", ctx, timeout=600)
 
 
 @mcp.tool()
-def vol_psscan(image: str) -> dict:
+async def vol_psscan(image: str, ctx: Context) -> dict:
     """Scan for EPROCESS pool tags — finds hidden and exited processes. Preferred over pslist."""
-    return _vol(image, "windows.psscan")
+    return await _vol_progress(image, "windows.psscan", ctx, timeout=600)
 
 
 @mcp.tool()
@@ -115,15 +166,15 @@ def vol_sessions(image: str) -> dict:
 # ── Network ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def vol_netstat(image: str) -> dict:
+async def vol_netstat(image: str, ctx: Context) -> dict:
     """Walk TCP/IP structures — active connections at capture time."""
-    return _vol(image, "windows.netstat")
+    return await _vol_progress(image, "windows.netstat", ctx, timeout=600)
 
 
 @mcp.tool()
-def vol_netscan(image: str) -> dict:
+async def vol_netscan(image: str, ctx: Context) -> dict:
     """Pool-tag scan for network connections — finds historical/closed connections too."""
-    return _vol(image, "windows.netscan")
+    return await _vol_progress(image, "windows.netscan", ctx, timeout=600)
 
 
 # ── Services ─────────────────────────────────────────────────────────────────
@@ -317,9 +368,9 @@ def vol_unhooked_system_calls(image: str) -> dict:
 # ── File system artifacts ────────────────────────────────────────────────────
 
 @mcp.tool()
-def vol_filescan(image: str) -> dict:
+async def vol_filescan(image: str, ctx: Context) -> dict:
     """Scan for FILE_OBJECT structures — lists all files cached in memory."""
-    return _vol(image, "windows.filescan", timeout=600)
+    return await _vol_progress(image, "windows.filescan", ctx, timeout=600)
 
 
 @mcp.tool()
