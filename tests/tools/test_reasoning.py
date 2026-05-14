@@ -1,18 +1,8 @@
-"""Tests for tools/reasoning.py — mocks the Foundation-Sec HTTP call."""
+"""Tests for tools/reasoning.py — covers both claude and openai-compat backends."""
 import pytest
+from contextlib import contextmanager
 from unittest.mock import patch, MagicMock
 
-
-BASE_URL = "http://localhost:8000"
-HTTP_PATCH = "httpx.post"
-HEALTH_PATCH = "tools.reasoning._health_check"
-
-
-@pytest.fixture(autouse=True)
-def _server_healthy():
-    """Assume server passes health check for all tests unless explicitly overridden."""
-    with patch(HEALTH_PATCH, return_value=True):
-        yield
 
 _DIRECTIVES_JSON = (
     'DIRECTIVES:\n'
@@ -23,124 +13,174 @@ _DIRECTIVES_JSON = (
 )
 
 
-def _resp(content, reasoning="<think>chain of thought</think>"):
+# ── Mock factories ────────────────────────────────────────────────────────────
+
+def _claude_mock(text: str):
+    """Return a mock anthropic.Anthropic client whose create() returns text."""
+    resp = MagicMock()
+    resp.content = [MagicMock(text=text)]
+    client = MagicMock()
+    client.messages.create.return_value = resp
+    anthro = MagicMock(return_value=client)
+    return anthro, client
+
+
+def _http_resp(content: str):
+    """Return a mock httpx response with an OpenAI-compatible chat completion."""
     m = MagicMock()
     m.raise_for_status = MagicMock()
     m.json.return_value = {
-        "choices": [{
-            "message": {
-                "content": content,
-                "reasoning": reasoning,
-            }
-        }]
+        "choices": [{"message": {"content": content, "reasoning": ""}}]
     }
     return m
 
 
-def _resp_with_directives(content="ok"):
-    return _resp(content, reasoning=f"analysis here\n{_DIRECTIVES_JSON}")
+# ── Backend context managers ──────────────────────────────────────────────────
 
+@contextmanager
+def _claude_ctx(text: str):
+    """Context manager that routes calls through the claude backend."""
+    anthro, client = _claude_mock(text)
+    with patch("anthropic.Anthropic", anthro), \
+         patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+         patch("tools.reasoning.REASON_BACKEND", "claude"):
+        yield client
+
+
+@contextmanager
+def _compat_ctx(text: str):
+    """Context manager that routes calls through the openai-compat backend."""
+    http_mock = MagicMock(return_value=_http_resp(text))
+    with patch("httpx.post", http_mock), \
+         patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+         patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+        yield http_mock
+
+
+# ── Shared behavioural tests (both backends) ──────────────────────────────────
 
 class TestReasonPlan:
-    def test_returns_success(self):
+    def _run(self, ctx_fn, text="Investigation plan.\n" + _DIRECTIVES_JSON):
         from tools.reasoning import reason_plan
-        with patch(HTTP_PATCH, return_value=_resp_with_directives("1. Check memory first.")):
-            r = reason_plan("Suspected keylogger on wkstn-01", "memory.img, c-drive.E01")
-        assert r["success"] is True
+        with ctx_fn(text):
+            return reason_plan("Suspected keylogger on wkstn-01", "memory.img, c-drive.E01")
 
-    def test_directives_present(self):
-        from tools.reasoning import reason_plan
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()):
-            r = reason_plan("case", "evidence")
-        assert "directives" in r
-        assert isinstance(r["directives"], dict)
+    @pytest.mark.parametrize("ctx_fn", [_claude_ctx, _compat_ctx])
+    def test_returns_success(self, ctx_fn):
+        assert self._run(ctx_fn)["success"] is True
 
-    def test_directives_priority_tools_parsed(self):
-        from tools.reasoning import reason_plan
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()):
-            r = reason_plan("case", "evidence")
+    @pytest.mark.parametrize("ctx_fn", [_claude_ctx, _compat_ctx])
+    def test_directives_parsed(self, ctx_fn):
+        r = self._run(ctx_fn)
         assert r["directives"].get("priority_tools") == ["vol.psscan", "vol.cmdline"]
 
-    def test_evidence_capped_at_300_lines(self):
+    @pytest.mark.parametrize("ctx_fn", [_claude_ctx, _compat_ctx])
+    def test_conclusion_strips_directives(self, ctx_fn):
+        r = self._run(ctx_fn)
+        assert "DIRECTIVES" not in r["conclusion"]
+        assert "Investigation plan." in r["conclusion"]
+
+    def test_evidence_capped_at_300_lines_claude(self):
         from tools.reasoning import reason_plan
-        big_evidence = "\n".join(f"line{i}" for i in range(400))
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()) as m:
-            reason_plan("case", big_evidence)
-        body = m.call_args[1]["json"]
-        user_msg = body["messages"][1]["content"]
+        big = "\n".join(f"line{i}" for i in range(400))
+        anthro, client = _claude_mock("ok")
+        with patch("anthropic.Anthropic", anthro), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            reason_plan("case", big)
+        user_msg = client.messages.create.call_args[1]["messages"][0]["content"]
         assert "line399" not in user_msg
         assert "omitted for brevity" in user_msg
 
-    def test_case_and_evidence_in_request(self):
+    def test_evidence_capped_at_300_lines_compat(self):
         from tools.reasoning import reason_plan
-        with patch(HTTP_PATCH, return_value=_resp("ok")) as m:
-            reason_plan("Suspected C2 beacon", "memory.img mounted at /mnt")
-        body = m.call_args[1]["json"]
-        user_msg = body["messages"][1]["content"]
-        assert "Suspected C2 beacon" in user_msg
-        assert "memory.img" in user_msg
+        big = "\n".join(f"line{i}" for i in range(400))
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_plan("case", big)
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
+        assert "line399" not in user_msg
+        assert "omitted for brevity" in user_msg
 
-    def test_server_error_has_directives_key(self):
+    def test_short_evidence_not_trimmed(self):
         from tools.reasoning import reason_plan
-        with patch(HTTP_PATCH, side_effect=Exception("refused")):
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_plan("case", "line1\nline2\nline3")
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
+        assert "line1" in user_msg
+        assert "omitted for brevity" not in user_msg
+
+    def test_server_error_has_directives_key_compat(self):
+        from tools.reasoning import reason_plan
+        with patch("httpx.post", side_effect=Exception("refused")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_plan("case", "evidence")
-        assert r["success"] is False
+        assert "directives" in r
+
+    def test_server_error_has_directives_key_claude(self):
+        from tools.reasoning import reason_plan
+        anthro, client = _claude_mock("")
+        client.messages.create.side_effect = Exception("refused")
+        with patch("anthropic.Anthropic", anthro), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            r = reason_plan("case", "evidence")
         assert "directives" in r
 
 
 class TestReasonHypothesize:
-    def test_returns_success(self):
+    @pytest.mark.parametrize("ctx_fn", [_claude_ctx, _compat_ctx])
+    def test_returns_success(self, ctx_fn):
         from tools.reasoning import reason_hypothesize
-        with patch(HTTP_PATCH, return_value=_resp_with_directives("Hypothesis A: malicious.")):
+        with ctx_fn("Hypothesis A.\n" + _DIRECTIVES_JSON):
             r = reason_hypothesize("cmd.exe from orphaned PPID 2748 in Session 0")
         assert r["success"] is True
 
-    def test_directives_present(self):
-        from tools.reasoning import reason_hypothesize
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()):
-            r = reason_hypothesize("observation")
-        assert "directives" in r
-        assert isinstance(r["directives"], dict)
-
-    def test_conclusion_present(self):
-        from tools.reasoning import reason_hypothesize
-        with patch(HTTP_PATCH, return_value=_resp("Hypothesis A: malicious.")):
-            r = reason_hypothesize("cmd.exe from orphaned PPID 2748")
-        assert "Hypothesis" in r["conclusion"]
-
-    def test_conclusion_strips_directives_block(self):
+    def test_conclusion_strips_directives(self):
         from tools.reasoning import reason_hypothesize
         content = "Hypothesis: malicious.\nDIRECTIVES:\n{\"priority_tools\": [\"vol.psscan\"]}"
-        with patch(HTTP_PATCH, return_value=_resp(content)):
+        with patch("httpx.post", return_value=_http_resp(content)), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_hypothesize("cmd.exe from orphaned PPID")
         assert "DIRECTIVES" not in r["conclusion"]
         assert "Hypothesis: malicious." in r["conclusion"]
 
     def test_conclusion_capped_at_1200_chars(self):
         from tools.reasoning import reason_hypothesize
-        long_content = "A" * 2000
-        with patch(HTTP_PATCH, return_value=_resp(long_content)):
+        with patch("httpx.post", return_value=_http_resp("A" * 2000)), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_hypothesize("observation")
         assert len(r["conclusion"]) <= 1200
 
     def test_context_included_in_request(self):
         from tools.reasoning import reason_hypothesize
-        with patch(HTTP_PATCH, return_value=_resp("ok")) as m:
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             reason_hypothesize("observation", context="Windows 10, CRIMSON OSPREY")
-        body = m.call_args[1]["json"]
-        user_msg = body["messages"][1]["content"]
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
         assert "CRIMSON OSPREY" in user_msg
 
     def test_server_unreachable_returns_error(self):
         from tools.reasoning import reason_hypothesize
-        with patch(HTTP_PATCH, side_effect=Exception("connection refused")):
+        with patch("httpx.post", side_effect=Exception("connection refused")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_hypothesize("observation")
         assert r["success"] is False
         assert "connection refused" in r["error"]
 
     def test_server_unreachable_has_directives_key(self):
         from tools.reasoning import reason_hypothesize
-        with patch(HTTP_PATCH, side_effect=Exception("refused")):
+        with patch("httpx.post", side_effect=Exception("refused")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_hypothesize("observation")
         assert "directives" in r
 
@@ -148,97 +188,140 @@ class TestReasonHypothesize:
 class TestReasonEvaluateFinding:
     def test_supported_verdict(self):
         from tools.reasoning import reason_evaluate_finding
-        with patch(HTTP_PATCH, return_value=_resp_with_directives("VERDICT: SUPPORTED.")):
-            r = reason_evaluate_finding(
-                finding="BlazingTools keylogger installed by attacker",
-                supporting_evidence="Amcache entry, 48/77 VT detections, MFT ctime",
-            )
+        with patch("httpx.post", return_value=_http_resp("VERDICT: SUPPORTED.\n" + _DIRECTIVES_JSON)), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            r = reason_evaluate_finding("Keylogger installed", "Amcache entry, 48/77 VT detections")
         assert r["success"] is True
         assert "SUPPORTED" in r["conclusion"]
 
-    def test_directives_present(self):
-        from tools.reasoning import reason_evaluate_finding
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()):
-            r = reason_evaluate_finding("finding", "evidence")
-        assert "directives" in r
-
     def test_challenged_verdict(self):
         from tools.reasoning import reason_evaluate_finding
-        with patch(HTTP_PATCH, return_value=_resp("VERDICT: CHALLENGED. No direct attribution.")):
-            r = reason_evaluate_finding(
-                finding="gpupdate.exe run by attacker",
-                supporting_evidence="Process in memory, spawned from svchost",
-            )
+        with patch("httpx.post", return_value=_http_resp("VERDICT: CHALLENGED.")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            r = reason_evaluate_finding("gpupdate.exe run by attacker", "Process in memory")
         assert "CHALLENGED" in r["conclusion"]
 
     def test_case_context_included(self):
         from tools.reasoning import reason_evaluate_finding
-        with patch(HTTP_PATCH, return_value=_resp("ok")) as m:
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             reason_evaluate_finding("finding", "evidence", case_context="FOR508 dataset")
-        body = m.call_args[1]["json"]
-        user_msg = body["messages"][1]["content"]
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
         assert "FOR508" in user_msg
 
-    def test_server_error_has_directives_key(self):
+    def test_directives_present(self):
         from tools.reasoning import reason_evaluate_finding
-        with patch(HTTP_PATCH, side_effect=Exception("timeout")):
+        with patch("httpx.post", return_value=_http_resp(_DIRECTIVES_JSON)), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_evaluate_finding("finding", "evidence")
-        assert r["success"] is False
         assert "directives" in r
 
 
 class TestReasonSynthesize:
     def test_returns_success(self):
         from tools.reasoning import reason_synthesize
-        findings = "1. Keylogger installed 2018-08-31\n2. BITS exfiltration 2018-09-05"
-        with patch(HTTP_PATCH, return_value=_resp_with_directives("Gap: initial access unknown.")):
-            r = reason_synthesize(findings)
+        with patch("httpx.post", return_value=_http_resp("Gap: initial access unknown.")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            r = reason_synthesize("1. Keylogger\n2. BITS exfil")
         assert r["success"] is True
-
-    def test_directives_present(self):
-        from tools.reasoning import reason_synthesize
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()):
-            r = reason_synthesize("finding 1\nfinding 2")
-        assert "directives" in r
 
     def test_investigation_summary_included(self):
         from tools.reasoning import reason_synthesize
-        with patch(HTTP_PATCH, return_value=_resp("ok")) as m:
-            reason_synthesize("finding 1\nfinding 2", investigation_summary="ran psscan, netscan, amcache")
-        body = m.call_args[1]["json"]
-        user_msg = body["messages"][1]["content"]
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_synthesize("finding 1\nfinding 2", investigation_summary="ran psscan, netscan")
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
         assert "psscan" in user_msg
 
-    def test_model_and_url_in_request(self):
-        from tools.reasoning import reason_synthesize, MODEL, FOUNDATION_SEC_URL
-        with patch(HTTP_PATCH, return_value=_resp("ok")) as m:
+    def test_openai_compat_posts_to_completions_endpoint(self):
+        from tools.reasoning import reason_synthesize
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             reason_synthesize("findings")
         call_url = m.call_args[0][0]
-        body = m.call_args[1]["json"]
         assert "v1/chat/completions" in call_url
-        assert body["model"] == MODEL
 
-    def test_server_error_has_directives_key(self):
+    def test_directives_present(self):
         from tools.reasoning import reason_synthesize
-        with patch(HTTP_PATCH, side_effect=Exception("refused")):
+        with patch("httpx.post", return_value=_http_resp(_DIRECTIVES_JSON)), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("findings")
-        assert r["success"] is False
         assert "directives" in r
 
 
-class TestNoUrlConfigured:
-    def test_missing_url_returns_error(self, monkeypatch):
-        monkeypatch.setattr("tools.reasoning.FOUNDATION_SEC_URL", "")
+class TestBackendConfig:
+    def test_missing_anthropic_key_returns_error(self):
         from tools.reasoning import reason_hypothesize
-        r = reason_hypothesize("observation")
+        with patch("tools.reasoning.ANTHROPIC_API_KEY", ""), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            r = reason_hypothesize("observation")
         assert r["success"] is False
-        assert "FOUNDATION_SEC_URL" in r["error"]
+        assert "ANTHROPIC_API_KEY" in r["error"]
 
-    def test_missing_url_has_directives_key(self, monkeypatch):
-        monkeypatch.setattr("tools.reasoning.FOUNDATION_SEC_URL", "")
+    def test_missing_anthropic_key_has_directives_key(self):
         from tools.reasoning import reason_hypothesize
-        r = reason_hypothesize("observation")
+        with patch("tools.reasoning.ANTHROPIC_API_KEY", ""), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            r = reason_hypothesize("observation")
         assert "directives" in r
+
+    def test_missing_reason_url_returns_error(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("tools.reasoning.REASON_URL", ""), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            r = reason_hypothesize("observation")
+        assert r["success"] is False
+        assert "REASON_URL" in r["error"]
+
+    def test_auto_detect_claude_when_api_key_set(self):
+        from tools.reasoning import _active_backend
+        with patch("tools.reasoning.REASON_BACKEND", ""), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.reasoning.REASON_URL", ""):
+            assert _active_backend() == "claude"
+
+    def test_auto_detect_compat_when_url_set_no_key(self):
+        from tools.reasoning import _active_backend
+        with patch("tools.reasoning.REASON_BACKEND", ""), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", ""), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"):
+            assert _active_backend() == "openai-compat"
+
+    def test_explicit_backend_overrides_autodetect(self):
+        from tools.reasoning import _active_backend
+        with patch("tools.reasoning.REASON_BACKEND", "openai-compat"), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"):
+            assert _active_backend() == "openai-compat"
+
+    def test_claude_backend_uses_anthropic_sdk(self):
+        from tools.reasoning import reason_hypothesize
+        anthro, client = _claude_mock("Hypothesis A.")
+        with patch("anthropic.Anthropic", anthro), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            r = reason_hypothesize("cmd.exe from orphaned PPID")
+        assert r["success"] is True
+        client.messages.create.assert_called_once()
+
+    def test_claude_backend_sends_system_with_cache_control(self):
+        from tools.reasoning import reason_hypothesize
+        anthro, client = _claude_mock("ok")
+        with patch("anthropic.Anthropic", anthro), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            reason_hypothesize("observation")
+        kwargs = client.messages.create.call_args[1]
+        system = kwargs["system"]
+        assert isinstance(system, list)
+        assert system[0]["cache_control"]["type"] == "ephemeral"
 
 
 class TestParseDirectives:
@@ -287,7 +370,7 @@ class TestParseDirectives:
 
     def test_strips_line_comments(self):
         from tools.reasoning import _parse_directives
-        text = 'DIRECTIVES:\n{"priority_tools": ["vol.psscan"], "focus_pids": [1234] // check this pid\n}'
+        text = 'DIRECTIVES:\n{"priority_tools": ["vol.psscan"], "focus_pids": [1234] // check pid\n}'
         d = _parse_directives(text)
         assert d["priority_tools"] == ["vol.psscan"]
 
@@ -302,86 +385,3 @@ class TestParseDirectives:
         d = _parse_directives(text)
         assert d["priority_tools"] == ["vol.cmdline"]
         assert d["max_depth"] == "targeted"
-
-
-class TestHealthCheck:
-    def test_server_down_returns_failure(self):
-        from tools.reasoning import reason_hypothesize
-        with patch(HEALTH_PATCH, return_value=False):
-            r = reason_hypothesize("observation")
-        assert r["success"] is False
-        assert "unreachable" in r["error"]
-
-    def test_server_down_has_directives_key(self):
-        from tools.reasoning import reason_hypothesize
-        with patch(HEALTH_PATCH, return_value=False):
-            r = reason_hypothesize("observation")
-        assert "directives" in r
-
-    def test_server_down_does_not_call_completions(self):
-        from tools.reasoning import reason_hypothesize
-        with patch(HEALTH_PATCH, return_value=False):
-            with patch(HTTP_PATCH) as m:
-                reason_hypothesize("observation")
-        m.assert_not_called()
-
-    def test_server_up_proceeds_to_completions(self):
-        from tools.reasoning import reason_hypothesize
-        # autouse fixture already sets health=True; verify completions is called
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()) as m:
-            r = reason_hypothesize("observation")
-        assert r["success"] is True
-        assert m.called
-
-
-class TestTokenBudgetCap:
-    def test_falls_back_to_line_cap_when_tokenize_unavailable(self):
-        from tools.reasoning import reason_plan
-        big = "\n".join(f"line{i}" for i in range(400))
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()) as m:
-            reason_plan("case", big)
-        # Last POST is the completions call; user message should be line-capped at 300
-        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
-        assert "line399" not in user_msg
-        assert "omitted for brevity" in user_msg
-
-    def test_token_aware_trims_further_when_over_budget(self):
-        from tools.reasoning import reason_plan, _INPUT_BUDGET
-        big = "\n".join(f"line{i}" for i in range(400))
-
-        def fake_token_count(msgs):
-            # Over budget for 300 lines, under budget for 100 lines
-            user = msgs[1]["content"]
-            return _INPUT_BUDGET + 100 if "line299" in user else _INPUT_BUDGET - 100
-
-        with patch("tools.reasoning._token_count", side_effect=fake_token_count):
-            with patch(HTTP_PATCH, return_value=_resp_with_directives()) as m:
-                reason_plan("case", big)
-        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
-        assert "line299" not in user_msg
-        assert "omitted for brevity" in user_msg
-
-    def test_token_count_returns_neg1_on_bad_response(self):
-        from tools.reasoning import _token_count
-        # Mock returns response without "count" key
-        m = MagicMock()
-        m.status_code = 200
-        m.json.return_value = {"choices": []}
-        with patch(HTTP_PATCH, return_value=m):
-            result = _token_count([{"role": "user", "content": "hello"}])
-        assert result == -1
-
-    def test_token_count_returns_neg1_on_exception(self):
-        from tools.reasoning import _token_count
-        with patch(HTTP_PATCH, side_effect=Exception("refused")):
-            result = _token_count([{"role": "user", "content": "hello"}])
-        assert result == -1
-
-    def test_short_evidence_not_trimmed(self):
-        from tools.reasoning import reason_plan
-        short = "line1\nline2\nline3"
-        with patch(HTTP_PATCH, return_value=_resp_with_directives()) as m:
-            reason_plan("case", short)
-        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
-        assert "line1" in user_msg
-        assert "omitted for brevity" not in user_msg

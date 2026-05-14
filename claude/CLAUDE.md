@@ -50,7 +50,7 @@ All forensic execution goes through MCP tools. Never invoke binaries directly vi
 | `net.*` | Network analysis | tcpdump_read, tcpdump_extract_http/dns, ngrep_search, tcpxtract_streams |
 | `enrich.*` | Threat intel | virustotal_hash/ip/domain, abuseipdb_check (graceful-degrade without keys) |
 | `misc.*` | Windows artifacts | evtx_dump, regripper, usn_journal, analyzeMFT, Hindsight, ClamAV, PDF/PE analysis |
-| `reason.*` | Adversarial review (Foundation-Sec-8B) | hypothesize, evaluate_finding, synthesize |
+| `reason.*` | Adversarial review (swappable: Claude / OpenAI-compat / Foundation-Sec — set via REASON_BACKEND) | hypothesize, evaluate_finding, synthesize |
 
 **Not available on this instance:** MemProcFS, VSCMount (Windows-only), tshark, hayabusa, guymager.
 

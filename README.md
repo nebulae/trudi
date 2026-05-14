@@ -4,7 +4,7 @@
 
 Autonomous DFIR agent built on the SANS SIFT Workstation. TRUDI runs a complete incident response investigation — disk triage, memory forensics, Windows artifact parsing, IOC enrichment, YARA hunting — and produces a structured analyst report with a full audit trail, without prompting for confirmation at each step.
 
-Every conclusion is challenged by a second model (Foundation-Sec-8B-Reasoning) before it reaches the report. TRUDI only reports what survives both.
+Every conclusion is challenged by an adversarial reviewer before it reaches the report. TRUDI only reports what survives both.
 
 Built for the [Find Evil! hackathon](https://findevil.devpost.com/) — SANS Institute / Devpost, April–June 2026.
 
@@ -16,12 +16,12 @@ TRUDI is a two-model system:
 
 **Claude (primary analyst)** — orchestrates the investigation, selects tools, runs them via the TRUDI MCP server, interprets output, and writes the report.
 
-**Foundation-Sec-8B-Reasoning (adversarial reviewer)** — a security-domain model trained on MITRE ATT&CK, CVEs, and TTP patterns. It plays two roles in every investigation:
+**Adversarial reviewer** — a second model running against a different set of system prompts, playing two roles in every investigation:
 
 1. **Upstream** — given the evidence profile at case open, it generates a prioritized investigation plan and directs which tools to run first.
 2. **Downstream** — after findings are assembled, it challenges each conclusion before the report is written, flagging unsupported claims, logical gaps, and alternative explanations.
 
-Claude and Foundation-Sec exchange structured `DIRECTIVES` blocks that bind tool selection for the next phase. Disagreements are resolved by a capped self-correction loop (max 3 iterations); unresolved items are reported as `UNCERTAIN` rather than dropped.
+The reviewer backend is swappable via `REASON_BACKEND` in `.env` — Claude API (default), any OpenAI-compatible endpoint, or Foundation-Sec-8B-Reasoning. The two models exchange structured `DIRECTIVES` blocks that bind tool selection for the next phase. Disagreements are resolved by a capped self-correction loop (max 3 iterations); unresolved items are reported as `UNCERTAIN` rather than dropped.
 
 ### Execution flow
 
@@ -60,10 +60,17 @@ Every tool call, reason call, and confirmed finding is written to a live JSON tr
 
 3. **Python 3.10+** and **dotnet** — both included in SIFT Workstation
 
-4. **Foundation-Sec-8B-Reasoning** *(optional but required for adversarial review)*
-   - HuggingFace: `fdtn-ai/Foundation-Sec-8B-Reasoning`
-   - Requires `vllm` and a GPU with ~16 GB VRAM, or a HuggingFace Inference Endpoint
-   - TRUDI degrades gracefully if the server is unreachable — reason calls are logged as skipped
+4. **Reasoning backend** *(optional but required for adversarial review)*
+   Set `REASON_BACKEND` in `.env` to select which model powers the review loop:
+
+   | Backend | Config |
+   |---------|--------|
+   | `claude` (default) | `ANTHROPIC_API_KEY=sk-ant-...` — no server required |
+   | `openai-compat` | `REASON_URL=https://api.openai.com/v1` + `REASON_API_KEY=sk-...` |
+   | Foundation-Sec (local) | `REASON_BACKEND=openai-compat` + `REASON_URL=http://localhost:8000` |
+   | Foundation-Sec (HF) | `REASON_BACKEND=openai-compat` + `REASON_URL=<hf-endpoint>` + `REASON_API_KEY=hf_...` |
+
+   TRUDI degrades gracefully if no backend is configured — reason calls are logged as skipped.
 
 ---
 
@@ -88,26 +95,31 @@ If `~/.claude/CLAUDE.md` already exists (e.g. from a Protocol SIFT install), the
 
 ### API keys (optional)
 
-Edit `~/trudi/.env`:
-
-```
-VIRUSTOTAL_API_KEY=your_key_here
-ABUSEIPDB_API_KEY=your_key_here
-FOUNDATION_SEC_URL=http://localhost:8000
-```
-
-TRUDI runs without these keys — enrichment tools degrade gracefully and Foundation-Sec calls are skipped with a log entry.
-
-### Foundation-Sec (local)
+Edit `~/trudi/.env`. All keys are optional — TRUDI degrades gracefully when they are absent.
 
 ```bash
-pip install vllm
-vllm serve "fdtn-ai/Foundation-Sec-8B-Reasoning" --reasoning-parser minimax_m2
+# IOC enrichment
+VIRUSTOTAL_API_KEY=your_key_here
+ABUSEIPDB_API_KEY=your_key_here
+
+# Reasoning backend (pick one)
+REASON_BACKEND=claude
+ANTHROPIC_API_KEY=sk-ant-...          # Claude API — recommended
+
+# REASON_BACKEND=openai-compat
+# REASON_URL=https://api.openai.com/v1   # or http://localhost:8000 for local vLLM
+# REASON_API_KEY=sk-...
+# REASON_MODEL=gpt-4o-mini
 ```
 
-The `--reasoning-parser minimax_m2` flag is required for structured reasoning output. Set `FOUNDATION_SEC_URL=http://localhost:8000` in `.env`.
-
-For remote/on-demand use, a HuggingFace Inference Endpoint with scale-to-zero works well — cold start is ~60–90s, which is acceptable on forensic timescales. Set `FOUNDATION_SEC_URL` to the endpoint URL.
+**Foundation-Sec (openai-compat backend, local vLLM):**
+```bash
+pip install vllm
+vllm serve "fdtn-ai/Foundation-Sec-8B-Reasoning" \
+  --reasoning-parser minimax_m2 \
+  --quantization bitsandbytes --load-format bitsandbytes  # for <24 GB VRAM
+# then set: REASON_BACKEND=openai-compat, REASON_URL=http://localhost:8000
+```
 
 ---
 

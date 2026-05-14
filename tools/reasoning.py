@@ -1,19 +1,45 @@
-"""Foundation-Sec-8B-Reasoning integration — adversarial peer review for DFIR findings."""
+"""Adversarial reasoning — swappable backend (Claude API or any OpenAI-compatible endpoint)."""
 import os
 import re
 import json
 from fastmcp import FastMCP
 
 _CONCLUSION_CAP = 1200
-_MODEL_CONTEXT = 8192
-_COMPLETION_RESERVE = 2048
-_INPUT_BUDGET = _MODEL_CONTEXT - _COMPLETION_RESERVE  # 6144 tokens for input
 
 mcp = FastMCP("reasoning")
 
-FOUNDATION_SEC_URL = os.environ.get("FOUNDATION_SEC_URL") or "http://localhost:8000"
-HF_TOKEN = os.environ.get("HF_TOKEN") or ""
-MODEL = "fdtn-ai/Foundation-Sec-8B-Reasoning"
+# ── Backend configuration ────────────────────────────────────────────────────
+# Set REASON_BACKEND explicitly, or let auto-detection pick based on which
+# keys are present.  Both sets of Foundation-Sec vars are kept as aliases
+# so existing .env files keep working without changes.
+
+REASON_BACKEND   = os.environ.get("REASON_BACKEND") or ""
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY") or ""
+
+# openai-compat vars — FOUNDATION_SEC_URL / HF_TOKEN are deprecated aliases
+REASON_URL       = (os.environ.get("REASON_URL")
+                    or os.environ.get("FOUNDATION_SEC_URL") or "")
+REASON_API_KEY   = (os.environ.get("REASON_API_KEY")
+                    or os.environ.get("HF_TOKEN") or "")
+REASON_MODEL     = os.environ.get("REASON_MODEL") or ""
+
+# Default models per backend
+_DEFAULT_CLAUDE_MODEL      = "claude-haiku-4-5-20251001"
+_DEFAULT_COMPAT_MODEL      = "fdtn-ai/Foundation-Sec-8B-Reasoning"
+
+
+def _active_backend() -> str:
+    """Resolve which backend to use, with auto-detection from available keys."""
+    if REASON_BACKEND:
+        return REASON_BACKEND
+    if ANTHROPIC_API_KEY:
+        return "claude"
+    if REASON_URL:
+        return "openai-compat"
+    return "claude"  # will fail gracefully with a clear error if no key
+
+
+# ── Shared constants ─────────────────────────────────────────────────────────
 
 _EMPTY_DIRECTIVES: dict = {
     "priority_tools": [],
@@ -46,24 +72,24 @@ enrich.vt_lookup_hash, enrich.vt_lookup_ip). \
 Do not invent tool names outside this list."""
 
 
+# ── Text utilities ────────────────────────────────────────────────────────────
+
 def _strip_directives(text: str) -> str:
     """Remove the DIRECTIVES block (and everything after) from model output."""
     if not text:
         return text
-    cleaned = re.sub(
+    return re.sub(
         r"\*{0,2}DIRECTIVES\*{0,2}\s*:?\*{0,2}.*",
         "",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     ).rstrip()
-    return cleaned
 
 
 def _parse_directives(text: str) -> dict:
     """Extract the DIRECTIVES JSON block from model output. Returns {} on any failure."""
     if not text:
         return {}
-    # Handle optional markdown bold (**DIRECTIVES:**) and optional ```json code fence
     match = re.search(
         r"\*{0,2}DIRECTIVES\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\{.*?\})\s*(?:```)?",
         text,
@@ -72,8 +98,7 @@ def _parse_directives(text: str) -> dict:
     if not match:
         return {}
     raw = match.group(1)
-    # Strip // line comments — models emit them but they're not valid JSON
-    raw = re.sub(r"\s*//[^\n]*", "", raw)
+    raw = re.sub(r"\s*//[^\n]*", "", raw)  # strip // comments
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, ValueError):
@@ -81,7 +106,7 @@ def _parse_directives(text: str) -> dict:
 
 
 def _cap_lines(text: str, max_lines: int) -> str:
-    """Trim text to max_lines for model input, appending a note if trimmed."""
+    """Trim text to max_lines, appending a note if trimmed."""
     lines = text.splitlines(keepends=True)
     if len(lines) <= max_lines:
         return text
@@ -89,132 +114,33 @@ def _cap_lines(text: str, max_lines: int) -> str:
     return "".join(lines[:max_lines]) + f"\n[... {omitted} lines omitted for brevity]\n"
 
 
-def _auth_headers() -> dict:
-    """Return Authorization header when HF_TOKEN is set, empty dict otherwise."""
-    return {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+# ── Backend implementations ───────────────────────────────────────────────────
 
-
-_HF_WARMUP_TIMEOUT = 120  # seconds to wait for HF cold start
-_HF_POLL_INTERVAL = 5     # seconds between polls
-
-
-def _health_check() -> bool:
-    """Check if Foundation-Sec server is healthy.
-
-    Local (no HF_TOKEN): 3s fail-fast — if it's not up, it's not running.
-    HF endpoint (HF_TOKEN set): poll up to 120s to ride out cold start after
-    scale-to-zero pause.
-    """
-    import httpx
-    import time
-    timeout = _HF_WARMUP_TIMEOUT if HF_TOKEN else 3
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            r = httpx.get(
-                f"{FOUNDATION_SEC_URL}/health",
-                headers=_auth_headers(),
-                timeout=min(10, timeout),
-            )
-            if r.status_code == 200:
-                return True
-        except Exception:
-            pass
-        if not HF_TOKEN or time.monotonic() >= deadline:
-            return False
-        time.sleep(_HF_POLL_INTERVAL)
-
-
-def _token_count(messages: list[dict]) -> int:
-    """POST /tokenize to get the exact token count for a messages array.
-    Returns -1 on any failure (server down, bad response) — callers must handle."""
-    try:
-        import httpx
-        r = httpx.post(
-            f"{FOUNDATION_SEC_URL}/tokenize",
-            json={"model": MODEL, "messages": messages},
-            headers=_auth_headers(),
-            timeout=5,
-        )
-        if r.status_code == 200:
-            return r.json().get("count", -1)
-        return -1
-    except Exception:
-        return -1
-
-
-def _cap_to_token_budget(evidence: str, system: str, case_description: str) -> str:
-    """Return a user-message string that fits within _INPUT_BUDGET tokens.
-
-    Starts at a 300-line heuristic cap, then binary-searches for the maximum
-    line count that the tokenizer accepts. Falls back to the 300-line cap when
-    the /tokenize endpoint is unavailable (returns -1).
-    """
-    all_lines = evidence.splitlines(keepends=True)
-    total = len(all_lines)
-
-    def make_user(n: int) -> str:
-        text = "".join(all_lines[:n])
-        if n < total:
-            text += f"\n[... {total - n} lines omitted for brevity]\n"
-        return f"CASE:\n{case_description}\n\nEVIDENCE AVAILABLE:\n{text}"
-
-    cap = min(300, total)
-    user = make_user(cap)
-    msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    count = _token_count(msgs)
-
-    if count == -1 or count <= _INPUT_BUDGET:
-        return user  # tokenize unavailable or already fits — use line cap as-is
-
-    # Binary search for the maximum line count that fits within budget
-    lo, hi = 1, cap - 1
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        candidate = make_user(mid)
-        msgs = [{"role": "system", "content": system}, {"role": "user", "content": candidate}]
-        if _token_count(msgs) <= _INPUT_BUDGET:
-            lo = mid
-        else:
-            hi = mid - 1
-
-    return make_user(lo)
-
-
-def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "") -> dict:
+def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dict:
+    """Call the Anthropic Claude API with prompt caching on the system prompt."""
+    import anthropic
     _empty = {"success": False, "conclusion": "", "directives": {}}
-    if not FOUNDATION_SEC_URL:
-        result = {**_empty, "error": "FOUNDATION_SEC_URL not set"}
+
+    if not ANTHROPIC_API_KEY:
+        result = {**_empty, "error": "ANTHROPIC_API_KEY not set — add it to .env"}
         _log_reason(_tool_name, result)
         return result
-    if not _health_check():
-        result = {**_empty, "error": "Foundation-Sec server unreachable (health check failed)"}
-        _log_reason(_tool_name, result)
-        return result
+
+    model = REASON_MODEL or _DEFAULT_CLAUDE_MODEL
     try:
-        import httpx
-        resp = httpx.post(
-            f"{FOUNDATION_SEC_URL}/v1/chat/completions",
-            json={
-                "model": MODEL,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": max_tokens,
-            },
-            headers=_auth_headers(),
-            timeout=120,
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=[{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": user}],
         )
-        resp.raise_for_status()
-        choice = resp.json()["choices"][0]["message"]
-        reasoning = choice.get("reasoning") or ""
-        raw = choice.get("content") or reasoning
-        if not raw:
-            result = {**_empty, "error": "Model returned empty response — server may need restart"}
-            _log_reason(_tool_name, result)
-            return result
-        directives = _parse_directives(reasoning) or _parse_directives(raw)
+        raw = resp.content[0].text
+        directives = _parse_directives(raw)
         conclusion = _strip_directives(raw)[:_CONCLUSION_CAP]
         result = {"success": True, "conclusion": conclusion, "directives": directives}
         _log_reason(_tool_name, result)
@@ -223,6 +149,58 @@ def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "") -
         result = {**_empty, "error": str(e)}
         _log_reason(_tool_name, result)
         return result
+
+
+def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str) -> dict:
+    """Call any OpenAI-compatible endpoint (OpenAI, Foundation-Sec vLLM, Ollama, etc.)."""
+    import httpx
+    _empty = {"success": False, "conclusion": "", "directives": {}}
+
+    if not REASON_URL:
+        result = {**_empty, "error": "REASON_URL not set for openai-compat backend"}
+        _log_reason(_tool_name, result)
+        return result
+
+    model = REASON_MODEL or _DEFAULT_COMPAT_MODEL
+    headers = {"Authorization": f"Bearer {REASON_API_KEY}"} if REASON_API_KEY else {}
+    try:
+        resp = httpx.post(
+            f"{REASON_URL.rstrip('/')}/v1/chat/completions",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": max_tokens,
+            },
+            headers=headers,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        choice = resp.json()["choices"][0]["message"]
+        raw = choice.get("content") or choice.get("reasoning") or ""
+        if not raw:
+            result = {**_empty, "error": "Model returned empty response"}
+            _log_reason(_tool_name, result)
+            return result
+        directives = _parse_directives(raw)
+        conclusion = _strip_directives(raw)[:_CONCLUSION_CAP]
+        result = {"success": True, "conclusion": conclusion, "directives": directives}
+        _log_reason(_tool_name, result)
+        return result
+    except Exception as e:
+        result = {**_empty, "error": str(e)}
+        _log_reason(_tool_name, result)
+        return result
+
+
+def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "") -> dict:
+    """Dispatch to the active reasoning backend."""
+    backend = _active_backend()
+    if backend == "claude":
+        return _ask_claude(system, user, max_tokens, _tool_name)
+    return _ask_openai_compat(system, user, max_tokens, _tool_name)
 
 
 def _log_reason(tool_name: str, result: dict) -> None:
@@ -237,6 +215,8 @@ def _log_reason(tool_name: str, result: dict) -> None:
     except Exception:
         pass
 
+
+# ── System prompts ────────────────────────────────────────────────────────────
 
 _PLAN_SYS = (
     "You are a senior DFIR analyst receiving a new case. Given the case description "
@@ -290,6 +270,8 @@ _SYNTHESIZE_SYS = (
 )
 
 
+# ── MCP tools ─────────────────────────────────────────────────────────────────
+
 @mcp.tool()
 def reason_plan(case_description: str, evidence_available: str) -> dict:
     """
@@ -299,9 +281,9 @@ def reason_plan(case_description: str, evidence_available: str) -> dict:
 
     case_description: incident description — host, timeframe, known suspicion
     evidence_available: concatenated output from the pre-enumeration tools
-                        (token-budget capped before passing to the model)
     """
-    user = _cap_to_token_budget(evidence_available, _PLAN_SYS, case_description)
+    capped = _cap_lines(evidence_available, 300)
+    user = f"CASE:\n{case_description}\n\nEVIDENCE AVAILABLE:\n{capped}"
     return _ask(_PLAN_SYS, user, max_tokens=2048, _tool_name="reason_plan")
 
 
