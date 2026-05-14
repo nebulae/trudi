@@ -30,8 +30,9 @@ def _scan_image_for_kernel_guid(image_path: str) -> list[dict]:
     filename strings (ntkrnlmp.pdb, ntoskrnl.pdb) and reading the 24 bytes
     that precede them (RSDS signature + 16-byte GUID + 4-byte age).
 
-    Reads in 2 MB chunks with overlap so entries split across boundaries
-    are not missed. Deduplicates by GUID+age.
+    Scans from the END of the file — the Windows kernel is loaded at high
+    physical addresses so it appears near the end of a sequential memory dump.
+    Stops as soon as the first kernel GUID is found. Deduplicates by GUID+age.
     """
     TARGETS = [b"ntkrnlmp.pdb", b"ntoskrnl.pdb", b"ntkrpamp.pdb"]
     CHUNK = 2 * 1024 * 1024
@@ -43,20 +44,22 @@ def _scan_image_for_kernel_guid(image_path: str) -> list[dict]:
     try:
         file_size = os.path.getsize(image_path)
         with open(image_path, "rb") as f:
-            prev = b""
-            offset = 0
-            while offset < file_size:
-                chunk = f.read(CHUNK)
+            pos = file_size
+            tail = b""
+            while pos > 0:
+                read_start = max(0, pos - CHUNK)
+                f.seek(read_start)
+                chunk = f.read(pos - read_start)
                 if not chunk:
                     break
-                data = prev + chunk
+                # tail holds the start of the previous chunk (for cross-boundary matches)
+                data = chunk + tail
                 for target in TARGETS:
                     start = 0
                     while True:
                         idx = data.find(target, start)
                         if idx < 0:
                             break
-                        # RSDS (4) + GUID (16) + Age (4) = exactly 24 bytes before name
                         if idx >= 24 and data[idx - 24: idx - 20] == b"RSDS":
                             guid_bytes = data[idx - 20: idx - 4]
                             age = struct.unpack_from("<I", data, idx - 4)[0]
@@ -71,8 +74,10 @@ def _scan_image_for_kernel_guid(image_path: str) -> list[dict]:
                                     "vol_filename": f"{guid_str}-{age}.json.xz",
                                 })
                         start = idx + 1
-                prev = data[-OVERLAP:]
-                offset += len(chunk)
+                if results:
+                    break  # found the kernel — stop scanning
+                tail = data[:OVERLAP]
+                pos = read_start
     except OSError as e:
         return [{"error": str(e)}]
 
