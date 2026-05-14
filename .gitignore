@@ -1,0 +1,25 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# case outputs — never commit investigation artifacts
+analysis/
+exports/
+reports/
+*.log
+*.csv
+*.json
+
+# OS
+.DS_Store

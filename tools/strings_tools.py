@@ -1,0 +1,134 @@
+"""String extraction, file identification, and metadata tools."""
+from typing import Optional
+from fastmcp import FastMCP
+from core import run
+
+mcp = FastMCP("strings")
+
+
+@mcp.tool()
+def strings_extract(
+    file_path: str,
+    min_length: int = 8,
+    unicode: bool = True,
+    output_path: Optional[str] = None,
+) -> dict:
+    """
+    Extract printable ASCII and Unicode strings from a binary file.
+    min_length: minimum string length (default 8 reduces noise).
+    unicode: also extract Unicode (UTF-16LE) strings.
+    """
+    from core.paths import assert_output_safe
+    import subprocess
+
+    results = {}
+
+    # ASCII strings
+    ascii_cmd = ["strings", "-a", "-n", str(min_length), file_path]
+    results["ascii"] = run(ascii_cmd)
+
+    # Unicode strings
+    if unicode:
+        uni_cmd = ["strings", "-a", "-el", "-n", str(min_length), file_path]
+        results["unicode"] = run(uni_cmd)
+
+    combined = results["ascii"].get("stdout", "") + "\n" + results.get("unicode", {}).get("stdout", "")
+
+    if output_path:
+        assert_output_safe(output_path)
+        with open(output_path, "w") as f:
+            f.write(combined)
+
+    return {
+        "success": results["ascii"]["success"],
+        "ascii_lines": len(results["ascii"].get("stdout", "").splitlines()),
+        "unicode_lines": len(results.get("unicode", {}).get("stdout", "").splitlines()),
+        "ascii_stdout": results["ascii"].get("stdout", ""),
+        "unicode_stdout": results.get("unicode", {}).get("stdout", ""),
+        "output_path": output_path,
+    }
+
+
+@mcp.tool()
+def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensitive: bool = True) -> dict:
+    """
+    Extract strings from a file and filter by regex pattern.
+    Useful for targeted IOC hunting: URLs, IPs, domain names, commands.
+    """
+    import subprocess
+    import re
+
+    # Run strings
+    cmd = ["strings", "-a", "-n", str(min_length), file_path]
+    result = run(cmd)
+    if not result["success"] and not result["stdout"]:
+        return result
+
+    flags = re.IGNORECASE if case_insensitive else 0
+    try:
+        matches = [line for line in result["stdout"].splitlines() if re.search(pattern, line, flags)]
+        return {
+            "success": True,
+            "file": file_path,
+            "pattern": pattern,
+            "match_count": len(matches),
+            "matches": matches,
+        }
+    except re.error as e:
+        return {"success": False, "error": f"Invalid regex: {e}"}
+
+
+@mcp.tool()
+def file_identify(file_path: str) -> dict:
+    """Identify file type using magic bytes (libmagic). More reliable than extension."""
+    return run(["file", file_path])
+
+
+@mcp.tool()
+def file_identify_directory(directory: str) -> dict:
+    """Identify file types for all files in a directory."""
+    return run(["file", "-r", directory], timeout=120)
+
+
+@mcp.tool()
+def hexdump(file_path: str, length: int = 256, offset: int = 0) -> dict:
+    """
+    Display file content as hex dump.
+    length: number of bytes to dump (default 256).
+    offset: byte offset to start from.
+    """
+    cmd = ["hexdump", "-C", "-n", str(length), "-s", str(offset), file_path]
+    return run(cmd)
+
+
+@mcp.tool()
+def xxd_dump(file_path: str, length: int = 256, offset: int = 0) -> dict:
+    """
+    Display file content as xxd hex dump (more readable than hexdump for some cases).
+    length: number of bytes to dump.
+    offset: byte offset to start from.
+    """
+    cmd = ["xxd", "-l", str(length), "-s", str(offset), file_path]
+    return run(cmd)
+
+
+@mcp.tool()
+def exiftool_metadata(file_path: str) -> dict:
+    """Extract EXIF and metadata from files (images, Office docs, PDFs, executables)."""
+    return run(["exiftool", file_path])
+
+
+@mcp.tool()
+def exiftool_batch(directory: str, recursive: bool = True) -> dict:
+    """Extract EXIF metadata from all files in a directory."""
+    cmd = ["exiftool"]
+    if recursive:
+        cmd.append("-r")
+    cmd.append(directory)
+    return run(cmd, timeout=300)
+
+
+@mcp.tool()
+def stat_file(file_path: str) -> dict:
+    """Display filesystem metadata for a file: timestamps, permissions, inode, size."""
+    return run(["stat", file_path])
