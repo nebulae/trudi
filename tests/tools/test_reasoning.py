@@ -150,13 +150,14 @@ class TestReasonHypothesize:
         assert "DIRECTIVES" not in r["conclusion"]
         assert "Hypothesis: malicious." in r["conclusion"]
 
-    def test_conclusion_capped_at_1200_chars(self):
+    def test_conclusion_returned_in_full(self):
         from tools.reasoning import reason_hypothesize
-        with patch("httpx.post", return_value=_http_resp("A" * 2000)), \
+        long_text = "A" * 2000
+        with patch("httpx.post", return_value=_http_resp(long_text)), \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_hypothesize("observation")
-        assert len(r["conclusion"]) <= 1200
+        assert len(r["conclusion"]) == 2000
 
     def test_context_included_in_request(self):
         from tools.reasoning import reason_hypothesize

@@ -4,8 +4,6 @@ import re
 import json
 from fastmcp import FastMCP
 
-_CONCLUSION_CAP = 1200
-
 mcp = FastMCP("reasoning")
 
 # ── Backend configuration ────────────────────────────────────────────────────
@@ -52,8 +50,8 @@ _EMPTY_DIRECTIVES: dict = {
 
 _DIRECTIVES_INSTRUCTION = """\
 
-At the end of your response output exactly this block — no markdown bold, \
-no code fences, no // comments, plain text only:
+Output the DIRECTIVES block FIRST — before your analysis. \
+No markdown bold, no code fences, no // comments, plain text only:
 DIRECTIVES:
 {
   "priority_tools": ["vol.psscan", "ez.amcacheparser"],
@@ -63,7 +61,8 @@ DIRECTIVES:
   "max_depth": "targeted",
   "next_hypothesis_triggers": []
 }
-Replace the example values with your actual recommendations. \
+Replace the example values with your actual recommendations, \
+then write your full analysis after. \
 Tool names must use TRUDI MCP format: namespace.tool \
 (e.g. vol.psscan, vol.cmdline, vol.netscan, vol.dlllist, vol.malfind, \
 ez.amcacheparser, ez.appcompatcacheparser, ez.mftecmd, ez.evtxecmd, \
@@ -74,7 +73,8 @@ Do not invent tool names outside this list."""
 
 _EVIDENCE_AUDIT_INSTRUCTION = """\
 
-After your analysis, output this block listing each major claim:
+Output the EVIDENCE_AUDIT block FIRST — before your analysis, after DIRECTIVES. \
+List each major claim in the finding:
 EVIDENCE_AUDIT:
 [
   {
@@ -189,7 +189,7 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dic
         raw = resp.content[0].text
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
-        conclusion = _strip_evidence_audit(_strip_directives(raw))[:_CONCLUSION_CAP]
+        conclusion = _strip_evidence_audit(_strip_directives(raw))
         result = {"success": True, "conclusion": conclusion, "directives": directives,
                   "evidence_audit": evidence_audit}
         _log_reason(_tool_name, result)
@@ -235,7 +235,7 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str)
             return result
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
-        conclusion = _strip_evidence_audit(_strip_directives(raw))[:_CONCLUSION_CAP]
+        conclusion = _strip_evidence_audit(_strip_directives(raw))
         result = {"success": True, "conclusion": conclusion, "directives": directives,
                   "evidence_audit": evidence_audit}
         _log_reason(_tool_name, result)

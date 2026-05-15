@@ -113,8 +113,6 @@ class ExecutionLog:
             elif t == "reason_call":
                 status = "OK" if e["success"] else "FAIL"
                 lines.append(f"- `{ts}` **REASON** `{e['tool']}`  → {status}")
-                if e.get("conclusion"):
-                    lines.append(f"  - {e['conclusion'][:200]}")
                 if e.get("directives", {}).get("priority_tools"):
                     lines.append(f"  - priority_tools: {e['directives']['priority_tools']}")
                 for i, audit in enumerate(e.get("evidence_audit") or []):
@@ -173,8 +171,6 @@ class ExecutionLog:
                     elif t == "reason_call":
                         status = "OK" if e.get("success") else "FAIL"
                         lines.append(f"- `{ts}` **REASON** `{e.get('tool','')}`  → {status}")
-                        if e.get("conclusion"):
-                            lines.append(f"  - {e['conclusion'][:200]}")
                         if e.get("directives", {}).get("priority_tools"):
                             lines.append(f"  - priority_tools: {e['directives']['priority_tools']}")
                         for i, audit in enumerate(e.get("evidence_audit") or []):
