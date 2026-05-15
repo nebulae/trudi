@@ -298,5 +298,10 @@ def export_execution_log(output_path: str) -> dict:
     """
     assert_output_safe(output_path)
     from core.execution_log import log
-    log.export(output_path)
-    return {"success": True, "json_path": output_path + ".json", "md_path": output_path + ".md"}
+    result = log.export(output_path)
+    return {
+        "success": True,
+        "entry_count": result.get("entry_count", 0),
+        "json_path": output_path + ".json",
+        "md_path": output_path + ".md",
+    }

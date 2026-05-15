@@ -72,18 +72,65 @@ enrich.vt_lookup_hash, enrich.vt_lookup_ip). \
 Do not invent tool names outside this list."""
 
 
+_EVIDENCE_AUDIT_INSTRUCTION = """\
+
+After your analysis, output this block listing each major claim:
+EVIDENCE_AUDIT:
+[
+  {
+    "claim": "brief statement of the claim being audited",
+    "tool": "vol.psscan / ez.evtxecmd / yara / etc.",
+    "command": "exact MCP tool call or command used",
+    "raw_output_excerpt": "verbatim snippet from tool output",
+    "artifact_path": "file path or memory offset",
+    "timestamp_source": "how the timestamp was established",
+    "proof_rationale": "why this output proves the claim",
+    "benign_alternatives": "alternate non-attacker explanations"
+  }
+]
+Write NOT PROVIDED for any field not supplied in the supporting evidence.
+Claims with 2+ NOT PROVIDED fields are hallucination candidates."""
+
+
 # ── Text utilities ────────────────────────────────────────────────────────────
 
-def _strip_directives(text: str) -> str:
-    """Remove the DIRECTIVES block (and everything after) from model output."""
+def _strip_block(text: str, marker: str) -> str:
+    """Remove a named block marker and everything after it."""
     if not text:
         return text
     return re.sub(
-        r"\*{0,2}DIRECTIVES\*{0,2}\s*:?\*{0,2}.*",
+        rf"\*{{0,2}}{re.escape(marker)}\*{{0,2}}\s*:?\*{{0,2}}.*",
         "",
         text,
         flags=re.DOTALL | re.IGNORECASE,
     ).rstrip()
+
+
+def _strip_directives(text: str) -> str:
+    return _strip_block(text, "DIRECTIVES")
+
+
+def _strip_evidence_audit(text: str) -> str:
+    return _strip_block(text, "EVIDENCE_AUDIT")
+
+
+def _parse_evidence_audit(text: str) -> list:
+    """Extract the EVIDENCE_AUDIT JSON array from model output. Returns [] on failure."""
+    if not text:
+        return []
+    match = re.search(
+        r"EVIDENCE_AUDIT:\s*(\[.*?\])\s*(?:DIRECTIVES:|$)",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return []
+    raw = re.sub(r"\s*//[^\n]*", "", match.group(1))
+    try:
+        result = json.loads(raw)
+        return result if isinstance(result, list) else []
+    except (json.JSONDecodeError, ValueError):
+        return []
 
 
 def _parse_directives(text: str) -> dict:
@@ -140,9 +187,11 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dic
             messages=[{"role": "user", "content": user}],
         )
         raw = resp.content[0].text
+        evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
-        conclusion = _strip_directives(raw)[:_CONCLUSION_CAP]
-        result = {"success": True, "conclusion": conclusion, "directives": directives}
+        conclusion = _strip_evidence_audit(_strip_directives(raw))[:_CONCLUSION_CAP]
+        result = {"success": True, "conclusion": conclusion, "directives": directives,
+                  "evidence_audit": evidence_audit}
         _log_reason(_tool_name, result)
         return result
     except Exception as e:
@@ -184,9 +233,11 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str)
             result = {**_empty, "error": "Model returned empty response"}
             _log_reason(_tool_name, result)
             return result
+        evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
-        conclusion = _strip_directives(raw)[:_CONCLUSION_CAP]
-        result = {"success": True, "conclusion": conclusion, "directives": directives}
+        conclusion = _strip_evidence_audit(_strip_directives(raw))[:_CONCLUSION_CAP]
+        result = {"success": True, "conclusion": conclusion, "directives": directives,
+                  "evidence_audit": evidence_audit}
         _log_reason(_tool_name, result)
         return result
     except Exception as e:
@@ -211,6 +262,7 @@ def _log_reason(tool_name: str, result: dict) -> None:
             success=result.get("success", False),
             conclusion=result.get("conclusion", ""),
             directives=result.get("directives", {}),
+            evidence_audit=result.get("evidence_audit"),
         )
     except Exception:
         pass
@@ -246,26 +298,56 @@ _HYPOTHESIZE_SYS = (
 )
 
 _EVALUATE_SYS = (
-    "You are a DFIR peer reviewer whose job is to challenge conclusions before they "
-    "reach a report. For the finding presented, identify:\n"
-    "1. What evidence directly supports it\n"
-    "2. What evidence contradicts or weakens it\n"
-    "3. What alternative explanations exist\n"
-    "4. What additional investigation is required to be certain\n"
-    "5. Verdict: SUPPORTED / CHALLENGED / UNCERTAIN\n\n"
-    "Be blunt. Overclaimed findings damage court cases."
+    "You are a DFIR peer reviewer with two roles: adversarial challenger AND "
+    "technical fact-checker.\n\n"
+    "For the finding presented, work through ALL of the following:\n"
+    "1. EVIDENCE SUPPORT — what raw tool output directly supports it? "
+    "Name the specific tool, output field, and value.\n"
+    "2. CONTRADICTING EVIDENCE — what contradicts or weakens it?\n"
+    "3. ALTERNATIVE EXPLANATIONS — benign or non-attacker interpretations "
+    "of the same artifacts.\n"
+    "4. HALLUCINATION CHECK — flag any claim stated as fact but not derivable "
+    "from the cited evidence: invented specificity (precise numbers/offsets "
+    "without a cited source), fabricated mechanism (e.g. 'VAD tag X proves "
+    "API Y was used' without a reference), or conclusions that require "
+    "evidence not mentioned in the supporting evidence field.\n"
+    "5. FACT-CHECK — verify technical accuracy:\n"
+    "   - YARA match alone is NEVER sufficient to confirm a tool, technique, "
+    "or actor — it is a lead requiring corroboration.\n"
+    "   - Null process cmdline has multiple benign explanations; never "
+    "characterize as intentional wiping without supporting evidence.\n"
+    "   - ATT&CK technique IDs must exist in the MITRE ATT&CK matrix and "
+    "correctly describe the behaviour being claimed.\n"
+    "   - Port numbers, VAD tags, and memory structure claims must match "
+    "established forensic facts — flag if unverifiable.\n"
+    "6. ADDITIONAL INVESTIGATION — what specific tool run would upgrade this "
+    "finding from its current confidence tier?\n"
+    "7. VERDICT: SUPPORTED / CHALLENGED / UNCERTAIN — one-line rationale.\n\n"
+    "Be blunt. Overclaimed findings damage court cases. Flag any finding "
+    "that upgrades an indicator to a confirmed fact without direct evidence."
+    + _EVIDENCE_AUDIT_INSTRUCTION
     + _DIRECTIVES_INSTRUCTION
 )
 
 _SYNTHESIZE_SYS = (
-    "You are a DFIR lead analyst doing a final logic check before a report is "
-    "written. Given a set of findings, identify:\n"
-    "1. Logical gaps — steps in the attack chain that aren't evidenced\n"
-    "2. Contradictions — findings that conflict with each other\n"
-    "3. Overclaimed conclusions — where the evidence doesn't support the confidence level\n"
-    "4. Missing investigation — what should have been checked but wasn't\n\n"
-    "Return a structured punch list. Flag blockers (report-stopping) separately "
-    "from advisory items."
+    "You are a DFIR lead analyst doing a final logic and confidence check before "
+    "a report is written. Apply this evidence tier standard to every finding:\n\n"
+    "  CONFIRMED   → physical artifact (file/key/log) + corroborating context\n"
+    "  LIKELY      → live memory structure, active connection, or registry key "
+    "with supporting context\n"
+    "  SUSPECTED   → YARA match, behavioral indicator, or single corroborating "
+    "point — never write CONFIRMED for a SUSPECTED-tier finding\n"
+    "  UNCONFIRMED → inference or pattern-match without a direct artifact\n\n"
+    "Identify:\n"
+    "1. LOGICAL GAPS — steps in the attack chain that aren't evidenced\n"
+    "2. CONTRADICTIONS — findings that conflict with each other\n"
+    "3. TIER VIOLATIONS — findings written as CONFIRMED/HIGH where the evidence "
+    "is SUSPECTED or UNCONFIRMED tier; list each with the correct tier\n"
+    "4. OVERCLAIMED MECHANISMS — technical explanations that aren't supported "
+    "by cited evidence (e.g. YARA hit stated as 'confirmed execution')\n"
+    "5. MISSING INVESTIGATION — what should have been checked but wasn't\n\n"
+    "Return a structured punch list. Mark BLOCKERS (must fix before report is "
+    "written) separately from ADVISORIES (should note, not blocking)."
     + _DIRECTIVES_INSTRUCTION
 )
 

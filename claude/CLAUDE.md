@@ -84,6 +84,15 @@ These four complete in seconds. Do not include `ewf_info`, `mmls`, `fsstat`, or 
 - "exfiltration", "lateral movement", or "persistence confirmed"
 - Any negative finding used as evidence (e.g. "no injection detected", "no persistence found")
 
+**Before calling `reason.evaluate_finding`**, the `supporting_evidence` argument must include:
+- The specific tool output (command + field + value) that supports the claim
+- The confidence tier: CONFIRMED / LIKELY / SUSPECTED / UNCONFIRMED
+
+**Automatic CHALLENGED triggers** — flag immediately without waiting for the reviewer:
+- YARA match is the sole evidence for a CONFIRMED-tier finding
+- An ATT&CK technique ID cannot be verified against the finding description
+- A mechanism claim (how X happened) has no cited raw artifact to support it
+
 **`reason.synthesize`** — call exactly once, after all tool runs complete and before writing the report. Pass all findings as a block. This is non-negotiable.
 
 If the server is unreachable, log the failure, note which checkpoints were skipped, and continue.
