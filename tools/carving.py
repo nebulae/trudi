@@ -1,7 +1,7 @@
 """File carving tools — bulk_extractor, foremost, scalpel."""
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("carving")
@@ -29,7 +29,7 @@ def bulk_extractor_scan(
         for s in scanners.split(","):
             cmd += ["-e", s.strip()]
     cmd.append(image_path)
-    return run(cmd, needs_sudo=True, timeout=7200, output_dir=output_dir)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*12, output_dir=output_dir)
 
 
 @mcp.tool()
@@ -44,7 +44,7 @@ def bulk_extractor_unallocated(
     """
     assert_output_safe(output_dir)
     cmd = ["bulk_extractor", "-j", str(threads), "-o", output_dir, unallocated_raw]
-    return run(cmd, needs_sudo=True, timeout=3600, output_dir=output_dir)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*6, output_dir=output_dir)
 
 
 @mcp.tool()
@@ -66,7 +66,7 @@ def foremost_carve(
     if config_file:
         cmd += ["-c", config_file]
     cmd.append(image_path)
-    return run(cmd, needs_sudo=True, timeout=7200, output_dir=output_dir)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*12, output_dir=output_dir)
 
 
 @mcp.tool()
@@ -81,7 +81,7 @@ def scalpel_carve(
     """
     assert_output_safe(output_dir)
     cmd = ["scalpel", "-c", config_file, "-o", output_dir, image_path]
-    return run(cmd, needs_sudo=True, timeout=7200, output_dir=output_dir)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*12, output_dir=output_dir)
 
 
 @mcp.tool()

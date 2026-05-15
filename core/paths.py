@@ -17,6 +17,14 @@ OUTPUT_CAP = 51_200  # 50 KB
 # Maximum tool output lines returned to the agent (line-based cap)
 MAX_TOOL_OUTPUT_LINES = 150
 
+# ── Configurable timeouts (seconds) ─────────────────────────────────────────
+# Override via environment variables — useful on slow hardware (WSL2, USB drives).
+
+DEFAULT_TIMEOUT  = int(os.environ.get("TRUDI_DEFAULT_TIMEOUT")  or "300")
+VOL_TIMEOUT      = int(os.environ.get("TRUDI_VOL_TIMEOUT")      or "600")
+PLASO_TIMEOUT    = int(os.environ.get("TRUDI_PLASO_TIMEOUT")    or "21600")
+REASON_TIMEOUT   = int(os.environ.get("TRUDI_REASON_TIMEOUT")   or "120")
+
 
 def is_evidence_path(path: str) -> bool:
     """Return True if path is under a protected evidence location."""

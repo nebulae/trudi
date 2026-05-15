@@ -3,7 +3,7 @@ import os
 import glob
 from typing import Optional, Any
 from fastmcp import FastMCP, Context
-from core import run, run_with_progress, vol3_bin, vol3_symbols
+from core import run, run_with_progress, vol3_bin, vol3_symbols, DEFAULT_TIMEOUT, VOL_TIMEOUT
 
 mcp = FastMCP("volatility")
 VOL = vol3_bin()
@@ -11,14 +11,14 @@ VOL = vol3_bin()
 
 
 
-def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = 300) -> dict:
+def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = VOL_TIMEOUT) -> dict:
     # plugin comes BEFORE extra so plugin-specific args (--pid, --dump, etc.)
     # are passed to the plugin, not interpreted as global vol args
     cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json", plugin] + (extra or [])
     return run(cmd, timeout=timeout)
 
 
-async def _vol_progress(image: str, plugin: str, ctx: Any, timeout: int = 600) -> dict:
+async def _vol_progress(image: str, plugin: str, ctx: Any, timeout: int = VOL_TIMEOUT) -> dict:
     """Async variant of _vol() with FastMCP Context progress reporting."""
     cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json", plugin]
     return await run_with_progress(cmd, ctx, timeout=timeout)
@@ -66,13 +66,13 @@ async def vol_pslist(image: str, ctx: Context, pid: Optional[int] = None) -> dic
     """List processes via EPROCESS linked list walk. Fast; misses hidden processes."""
     if pid:
         return _vol(image, "windows.pslist", ["--pid", str(pid)])
-    return await _vol_progress(image, "windows.pslist", ctx, timeout=600)
+    return await _vol_progress(image, "windows.pslist", ctx, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
 async def vol_psscan(image: str, ctx: Context) -> dict:
     """Scan for EPROCESS pool tags — finds hidden and exited processes. Preferred over pslist."""
-    return await _vol_progress(image, "windows.psscan", ctx, timeout=600)
+    return await _vol_progress(image, "windows.psscan", ctx, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -157,13 +157,13 @@ def vol_sessions(image: str) -> dict:
 @mcp.tool()
 async def vol_netstat(image: str, ctx: Context) -> dict:
     """Walk TCP/IP structures — active connections at capture time."""
-    return await _vol_progress(image, "windows.netstat", ctx, timeout=600)
+    return await _vol_progress(image, "windows.netstat", ctx, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
 async def vol_netscan(image: str, ctx: Context) -> dict:
     """Pool-tag scan for network connections — finds historical/closed connections too."""
-    return await _vol_progress(image, "windows.netscan", ctx, timeout=600)
+    return await _vol_progress(image, "windows.netscan", ctx, timeout=VOL_TIMEOUT)
 
 
 # ── Services ─────────────────────────────────────────────────────────────────
@@ -289,7 +289,7 @@ def vol_vadyarascan(image: str, yara_rules: str, pid: Optional[int] = None) -> d
     extra = ["--yara-rules", yara_rules]
     if pid:
         extra += ["--pid", str(pid)]
-    return _vol(image, "windows.vadyarascan", extra, timeout=600)
+    return _vol(image, "windows.vadyarascan", extra, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -359,7 +359,7 @@ def vol_unhooked_system_calls(image: str) -> dict:
 @mcp.tool()
 async def vol_filescan(image: str, ctx: Context) -> dict:
     """Scan for FILE_OBJECT structures — lists all files cached in memory."""
-    return await _vol_progress(image, "windows.filescan", ctx, timeout=600)
+    return await _vol_progress(image, "windows.filescan", ctx, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -388,7 +388,7 @@ def vol_dumpfiles(
 @mcp.tool()
 def vol_mftscan(image: str) -> dict:
     """Scan for MFT entries in memory — finds files not in the live filesystem."""
-    return _vol(image, "windows.mftscan", timeout=600)
+    return _vol(image, "windows.mftscan", timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -470,7 +470,7 @@ def vol_timeliner(image: str, output_dir: Optional[str] = None) -> dict:
         from core.paths import assert_output_safe
         assert_output_safe(output_dir)
         extra += ["--output-dir", output_dir]
-    return _vol(image, "timeliner", extra, timeout=600)
+    return _vol(image, "timeliner", extra, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -479,7 +479,7 @@ def vol_yarascan(image: str, yara_rules: str, pid: Optional[int] = None) -> dict
     extra = ["--yara-rules", yara_rules]
     if pid:
         extra += ["--pid", str(pid)]
-    return _vol(image, "windows.yarascan", extra, timeout=600)
+    return _vol(image, "windows.yarascan", extra, timeout=VOL_TIMEOUT)
 
 
 # ── Linux plugins ─────────────────────────────────────────────────────────────

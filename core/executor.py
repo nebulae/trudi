@@ -5,7 +5,7 @@ import shlex
 import time
 import asyncio
 from typing import Any
-from .paths import OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES, assert_output_safe
+from .paths import OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES, assert_output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT
 
 _TRUNCATION_FOOTER = (
     "\n[TRUNCATED — {n} lines omitted. Use a targeted follow-up query "
@@ -64,7 +64,7 @@ def _log_tool(result: dict) -> None:
 def run(
     cmd: list[str] | str,
     *,
-    timeout: int = 300,
+    timeout: int = DEFAULT_TIMEOUT,
     output_dir: str | None = None,
     needs_sudo: bool = False,
     env: dict[str, str] | None = None,
@@ -147,7 +147,7 @@ async def run_with_progress(
     cmd: list[str],
     ctx: Any,  # fastmcp.Context — typed as Any to avoid importing fastmcp in core
     *,
-    timeout: int = 600,
+    timeout: int = VOL_TIMEOUT,
     output_dir: str | None = None,
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
 ) -> dict[str, Any]:
@@ -257,7 +257,7 @@ def run_dotnet(
     dll_path: str,
     args: list[str],
     *,
-    timeout: int = 300,
+    timeout: int = DEFAULT_TIMEOUT,
     output_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run an EZ Tools .NET binary via dotnet runtime."""

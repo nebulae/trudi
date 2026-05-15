@@ -3,7 +3,7 @@ import subprocess
 import os
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 
 mcp = FastMCP("ewf")
 
@@ -20,7 +20,7 @@ def ewf_verify(image: str) -> dict:
     Verify E01 image integrity by recomputing and comparing MD5/SHA1 hashes.
     Must complete without errors before analysis proceeds.
     """
-    return run(["ewfverify", image], timeout=3600)
+    return run(["ewfverify", image], timeout=VOL_TIMEOUT*6)
 
 
 @mcp.tool()

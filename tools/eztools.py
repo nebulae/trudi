@@ -1,7 +1,7 @@
 """EZ Tools (Eric Zimmerman) — Windows artifact parsers via .NET runtime."""
 from typing import Optional
 from fastmcp import FastMCP
-from core import run_dotnet, run
+from core import run_dotnet, run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("eztools")
@@ -69,7 +69,7 @@ def ez_evtxecmd(
     args = [flag, evtx_path, "--csv", output_dir, "--csvf", output_file, "--maps", maps_dir]
     if event_ids:
         args += ["--inc", event_ids]
-    return _ez(f"{EZ}/EvtxeCmd/EvtxECmd.dll", args, output_dir=output_dir, timeout=600)
+    return _ez(f"{EZ}/EvtxeCmd/EvtxECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ def ez_recmd_hive(
     """
     assert_output_safe(output_dir)
     args = ["-f", hive_path, "--bn", batch_file, "--csv", output_dir, "--csvf", output_file]
-    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=300)
+    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=DEFAULT_TIMEOUT)
 
 
 @mcp.tool()
@@ -101,7 +101,7 @@ def ez_recmd_dir(
     """Parse all registry hives in a directory recursively using a RECmd batch file."""
     assert_output_safe(output_dir)
     args = ["-d", hives_dir, "--bn", batch_file, "--csv", output_dir, "--csvf", output_file]
-    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=600)
+    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -113,7 +113,7 @@ def ez_recmd_batch(
     """Run a RECmd batch config against a directory of hives (targeted key extraction)."""
     assert_output_safe(output_dir)
     args = ["-d", hives_dir, "--bn", batch_file, "--csv", output_dir]
-    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=300)
+    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=DEFAULT_TIMEOUT)
 
 
 # ── Amcache & AppCompat ───────────────────────────────────────────────────────
@@ -268,7 +268,7 @@ def ez_sqlecmd(
     assert_output_safe(output_dir)
     flag = "-f" if db_path.endswith(".db") else "-d"
     args = [flag, db_path, "--csv", output_dir, "--csvf", output_file, "--maps", maps_dir]
-    return _ez(f"{EZ}/SQLECmd/SQLECmd.dll", args, output_dir=output_dir, timeout=300)
+    return _ez(f"{EZ}/SQLECmd/SQLECmd.dll", args, output_dir=output_dir, timeout=DEFAULT_TIMEOUT)
 
 
 # ── bstrings ──────────────────────────────────────────────────────────────────
@@ -292,7 +292,7 @@ def ez_bstrings(
     args = [flag, target_path, "--csv", output_dir, "--csvf", output_file, "-m", str(min_length)]
     if pattern:
         args += ["--lr", pattern]
-    return _ez(f"{EZ}/bstrings.dll", args, output_dir=output_dir, timeout=300)
+    return _ez(f"{EZ}/bstrings.dll", args, output_dir=output_dir, timeout=DEFAULT_TIMEOUT)
 
 
 # ── RLA (Registry Log Analysis) ──────────────────────────────────────────────

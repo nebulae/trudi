@@ -4,7 +4,7 @@ import hashlib
 import glob
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 
 mcp = FastMCP("hashing")
 
@@ -114,7 +114,7 @@ def ssdeep_scan_directory(directory: str, threshold: int = 50) -> dict:
     Find similar files in a directory using ssdeep.
     threshold: minimum similarity score (0-100) to report.
     """
-    return run(["ssdeep", "-r", "-t", str(threshold), directory], timeout=300, line_cap=None)
+    return run(["ssdeep", "-r", "-t", str(threshold), directory], timeout=DEFAULT_TIMEOUT, line_cap=None)
 
 
 @mcp.tool()
@@ -164,7 +164,7 @@ def hashdeep_compute(
     if recursive and os.path.isdir(target):
         cmd.append("-r")
     cmd.append(target)
-    result = run(cmd, timeout=600, line_cap=None)
+    result = run(cmd, timeout=VOL_TIMEOUT, line_cap=None)
     if output_path and result["success"]:
         with open(output_path, "w") as f:
             f.write(result["stdout"])
@@ -186,7 +186,7 @@ def hashdeep_audit(
     flag_map = {"audit": "-a", "match": "-m", "negative": "-X"}
     flag = flag_map.get(mode, "-a")
     cmd = ["hashdeep", flag, "-k", manifest_file, "-r", target_directory]
-    return run(cmd, timeout=600, line_cap=None)
+    return run(cmd, timeout=VOL_TIMEOUT, line_cap=None)
 
 
 @mcp.tool()
@@ -202,7 +202,7 @@ def md5deep_scan(directory: str, recursive: bool = True, output_path: Optional[s
     if recursive:
         cmd.append("-r")
     cmd.append(directory)
-    result = run(cmd, timeout=600, line_cap=None)
+    result = run(cmd, timeout=VOL_TIMEOUT, line_cap=None)
     if output_path and result["success"]:
         with open(output_path, "w") as f:
             f.write(result["stdout"])

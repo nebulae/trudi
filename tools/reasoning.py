@@ -3,6 +3,7 @@ import os
 import re
 import json
 from fastmcp import FastMCP
+from core.paths import REASON_TIMEOUT
 
 mcp = FastMCP("reasoning")
 
@@ -224,7 +225,7 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str)
                 "max_tokens": max_tokens,
             },
             headers=headers,
-            timeout=120,
+            timeout=REASON_TIMEOUT,
         )
         resp.raise_for_status()
         choice = resp.json()["choices"][0]["message"]

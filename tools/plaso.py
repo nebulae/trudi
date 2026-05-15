@@ -2,7 +2,7 @@
 import os
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("plaso")
@@ -27,7 +27,7 @@ def plaso_create_timeline(
     if parsers:
         cmd += ["--parsers", parsers]
     cmd.append(evidence_path)
-    return run(cmd, timeout=21600)  # 6 hour timeout for full images
+    return run(cmd, timeout=PLASO_TIMEOUT)  # 6 hour timeout for full images
 
 
 @mcp.tool()
@@ -53,7 +53,7 @@ def plaso_create_targeted(
         "--artifact-filters", artifact_filters,
         evidence_path,
     ]
-    return run(cmd, timeout=7200)
+    return run(cmd, timeout=VOL_TIMEOUT*12)
 
 
 @mcp.tool()
@@ -74,7 +74,7 @@ def plaso_export_csv(
         cmd.append(time_filter)
     elif query_filter:
         cmd.append(query_filter)
-    return run(cmd, timeout=3600)
+    return run(cmd, timeout=VOL_TIMEOUT*6)
 
 
 @mcp.tool()
@@ -88,7 +88,7 @@ def plaso_export_json(
     cmd = ["psort.py", "-o", "json_line", "-w", output_json, storage_file]
     if time_filter:
         cmd.append(time_filter)
-    return run(cmd, timeout=3600)
+    return run(cmd, timeout=VOL_TIMEOUT*6)
 
 
 @mcp.tool()
@@ -111,7 +111,7 @@ def plaso_filter_incident_window(
     assert_output_safe(output_csv)
     time_filter = f"date > '{start_utc}' AND date < '{end_utc}'"
     cmd = ["psort.py", "-o", "l2tcsv", "-w", output_csv, storage_file, time_filter]
-    return run(cmd, timeout=3600)
+    return run(cmd, timeout=VOL_TIMEOUT*6)
 
 
 @mcp.tool()

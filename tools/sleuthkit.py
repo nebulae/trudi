@@ -1,7 +1,7 @@
 """The Sleuth Kit — filesystem navigation and timeline tools."""
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 
 mcp = FastMCP("sleuthkit")
 
@@ -54,7 +54,7 @@ def tsk_fls(
     cmd.append(image)
     if inode is not None:
         cmd.append(str(inode))
-    return run(cmd, needs_sudo=True, timeout=600)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -146,7 +146,7 @@ def tsk_ils(
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd.append(image)
-    return run(cmd, needs_sudo=True, timeout=300)
+    return run(cmd, needs_sudo=True, timeout=DEFAULT_TIMEOUT)
 
 
 @mcp.tool()
@@ -182,7 +182,7 @@ def tsk_blkls(
     cmd.append(image)
     try:
         with open(output_path, "wb") as f:
-            proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=600)
+            proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=VOL_TIMEOUT)
         return {
             "success": proc.returncode == 0,
             "stdout": f"Blocks written to {output_path}",
@@ -216,7 +216,7 @@ def tsk_recover(
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd += [image, output_dir]
-    return run(cmd, needs_sudo=True, timeout=1800, output_dir=output_dir)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*3, output_dir=output_dir)
 
 
 @mcp.tool()
@@ -245,7 +245,7 @@ def tsk_mactime(
         import subprocess
         try:
             with open(output_path, "w") as f:
-                proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=600)
+                proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=VOL_TIMEOUT)
             return {
                 "success": proc.returncode == 0,
                 "stdout": f"Timeline written to {output_path}",
@@ -256,7 +256,7 @@ def tsk_mactime(
             }
         except Exception as e:
             return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1, "truncated": False, "cmd": ""}
-    return run(cmd, timeout=600)
+    return run(cmd, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -327,7 +327,7 @@ def tsk_sigfind(image: str, signature_hex: str, offset_sectors: Optional[int] = 
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd += [image, signature_hex]
-    return run(cmd, needs_sudo=True, timeout=600)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
@@ -350,7 +350,7 @@ def tsk_sorter(
     if category:
         cmd += ["-s", category]
     cmd.append(image)
-    return run(cmd, needs_sudo=True, timeout=600, output_dir=output_dir)
+    return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT, output_dir=output_dir)
 
 
 @mcp.tool()
@@ -363,7 +363,7 @@ def tsk_jls(image: str, offset_sectors: Optional[int] = None) -> dict:
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd.append(image)
-    return run(cmd, needs_sudo=True, timeout=300)
+    return run(cmd, needs_sudo=True, timeout=DEFAULT_TIMEOUT)
 
 
 @mcp.tool()
