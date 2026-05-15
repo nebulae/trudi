@@ -182,17 +182,32 @@ async def run_with_progress(
         )
 
         async def _drain_stderr() -> None:
-            async for raw in proc.stderr:
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                stderr_buf.append(line)
-                if ctx is not None:
-                    elapsed = time.perf_counter() - start
-                    try:
-                        await ctx.report_progress(elapsed, float(timeout), line[:120])
-                    except Exception:
-                        pass
+            # Read in chunks and split on \r or \n — Volatility writes progress
+            # with \r (carriage return), not \n, so line-based iteration misses them.
+            buf = b""
+            while True:
+                chunk = await proc.stderr.read(512)
+                if not chunk:
+                    break
+                buf += chunk
+                parts = re.split(rb"[\r\n]+", buf)
+                buf = parts[-1]
+                for part in parts[:-1]:
+                    line = part.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    stderr_buf.append(line)
+                    if ctx is not None:
+                        elapsed = time.perf_counter() - start
+                        try:
+                            await ctx.report_progress(elapsed, float(timeout), line[:120])
+                        except Exception:
+                            pass
+            # flush any remaining bytes
+            if buf:
+                line = buf.decode("utf-8", errors="replace").strip()
+                if line:
+                    stderr_buf.append(line)
 
         async def _drain_stdout() -> bytes:
             return await proc.stdout.read()
