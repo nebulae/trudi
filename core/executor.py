@@ -56,7 +56,6 @@ def _log_tool(result: dict) -> None:
             exit_code=result["exit_code"],
             stderr=result["stderr"],
             elapsed_seconds=result.get("elapsed_seconds", 0.0),
-            progress_lines=result.get("progress_lines"),
         )
     except Exception:
         pass

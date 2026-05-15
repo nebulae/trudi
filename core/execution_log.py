@@ -30,11 +30,10 @@ class ExecutionLog:
         exit_code: int,
         stderr: str = "",
         elapsed_seconds: float = 0.0,
-        progress_lines: list | None = None,
     ) -> None:
         if self._path is None:
             return
-        entry: dict = {
+        self._entries.append({
             "type": "tool_call",
             "ts": _utcnow(),
             "cmd": cmd,
@@ -44,10 +43,7 @@ class ExecutionLog:
             "exit_code": exit_code,
             "elapsed_seconds": elapsed_seconds,
             "stderr": stderr[:512] if stderr else "",
-        }
-        if progress_lines:
-            entry["progress_lines"] = progress_lines
-        self._entries.append(entry)
+        })
         self._flush()
 
     def record_reason_call(
