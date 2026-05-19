@@ -43,7 +43,25 @@ fi
 CLAUDE_BIN="$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")"
 ok "Claude Code at $CLAUDE_BIN"
 
-# ── 2. Python virtual environment ─────────────────────────────────────────────
+# ── 2. Passwordless sudo for forensic tools ───────────────────────────────────
+
+step "Configuring passwordless sudo for forensic tools"
+
+SUDOERS_FILE="/etc/sudoers.d/trudi"
+CURRENT_USER="$(whoami)"
+
+if sudo -n true 2>/dev/null; then
+    ok "Passwordless sudo already available — skipping"
+elif [ -f "$SUDOERS_FILE" ]; then
+    ok "$SUDOERS_FILE already exists — skipping"
+else
+    echo "$CURRENT_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee "$SUDOERS_FILE" > /dev/null
+    sudo chmod 440 "$SUDOERS_FILE"
+    ok "Configured passwordless sudo for $CURRENT_USER"
+    warn "This grants root access without a password — appropriate for a dedicated lab VM only"
+fi
+
+# ── 3. Python virtual environment ─────────────────────────────────────────────
 
 step "Setting up Python environment"
 
@@ -59,7 +77,7 @@ fi
 "$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements-dev.txt"
 ok "Dependencies installed (fastmcp, httpx, python-dotenv, yara-python, pytest)"
 
-# ── 3. Environment file ───────────────────────────────────────────────────────
+# ── 4. Environment file ───────────────────────────────────────────────────────
 
 step "Configuring environment"
 
@@ -71,7 +89,7 @@ else
     ok ".env already exists — skipping"
 fi
 
-# ── 4. Global CLAUDE.md ───────────────────────────────────────────────────────
+# ── 5. Global CLAUDE.md ───────────────────────────────────────────────────────
 
 step "Installing TRUDI orchestrator (CLAUDE.md)"
 
@@ -86,7 +104,59 @@ fi
 cp "$CLAUDE_MD_SRC" "$CLAUDE_MD_DEST"
 ok "Installed TRUDI orchestrator to $CLAUDE_MD_DEST"
 
-# ── 5. MCP server registration ────────────────────────────────────────────────
+# ── 6. Claude Code hooks ─────────────────────────────────────────────────────
+
+step "Installing Claude Code hooks"
+
+HOOKS_SRC="$TRUDI_DIR/claude/hooks"
+HOOKS_DEST="$CLAUDE_DIR/hooks"
+SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+
+mkdir -p "$HOOKS_DEST"
+cp "$HOOKS_SRC/"*.py "$HOOKS_DEST/"
+ok "Installed hook scripts to $HOOKS_DEST/"
+
+# Merge PostToolUse hook into settings.json
+if [ ! -f "$SETTINGS_FILE" ]; then
+    echo '{"hooks":{}}' > "$SETTINGS_FILE"
+fi
+
+python3 - <<'PYEOF'
+import json, sys
+from pathlib import Path
+
+settings_path = Path.home() / ".claude/settings.json"
+hooks_dest    = Path.home() / ".claude/hooks"
+
+settings = json.loads(settings_path.read_text())
+settings.setdefault("hooks", {})
+
+narration_hook = {
+    "hooks": [
+        {
+            "type": "command",
+            "command": f"python3 {hooks_dest}/log_narration.py"
+        }
+    ]
+}
+
+existing = settings["hooks"].get("PostToolUse", [])
+already  = any(
+    h.get("hooks", [{}])[0].get("command", "").endswith("log_narration.py")
+    for h in existing
+    if h.get("hooks")
+)
+if not already:
+    settings["hooks"].setdefault("PostToolUse", []).append(narration_hook)
+    settings_path.write_text(json.dumps(settings, indent=2))
+    print("  Registered PostToolUse hook")
+else:
+    print("  PostToolUse hook already registered — skipping")
+PYEOF
+
+ok "Claude Code hooks configured"
+
+# ── 7. MCP server registration ────────────────────────────────────────────────
 
 step "Registering TRUDI MCP server"
 
@@ -103,7 +173,7 @@ fi
 "$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global 2>/dev/null || true
 ok "Registered trudi-sift MCP server (global scope)"
 
-# ── 6. Verify ─────────────────────────────────────────────────────────────────
+# ── 7. Verify ─────────────────────────────────────────────────────────────────
 
 step "Running smoke test"
 

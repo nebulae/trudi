@@ -1,4 +1,5 @@
 """Miscellaneous SIFT tools — evtx parsing, registry, USN journal, AV, browser forensics."""
+import os
 from typing import Optional
 from fastmcp import FastMCP
 from core import run
@@ -265,27 +266,45 @@ def packerid(file_path: str) -> dict:
 @mcp.tool()
 def start_execution_log(case_id: str, output_path: str) -> dict:
     """
-    Initialize the execution trace log for a case. Call this at the very start
-    of every investigation, before any tool runs.
+    Open the execution trace log for a case. Call this at the very start of
+    every investigation, before any tool runs.
+
+    If a trace file already exists at output_path for this case_id (e.g. after
+    a server restart or reconnect), automatically resumes appending without
+    overwriting prior entries. Safe to call every time — no data is lost.
 
     case_id: unique case identifier e.g. 'SRL-2018-WKSTN01'.
-    output_path: path for incremental JSON log — must be in analysis/, exports/, or reports/.
+    output_path: path for the JSON log — must be in analysis/, exports/, or reports/.
     """
     assert_output_safe(output_path)
     from core.execution_log import log
-    log.configure(case_id, output_path)
-    return {"success": True, "case_id": case_id, "log_path": output_path}
+    recovered = log.configure(case_id, output_path)
+    return {
+        "success": True,
+        "case_id": case_id,
+        "log_path": output_path,
+        "entries_recovered": recovered,
+        "resumed": recovered > 0,
+    }
 
 
 @mcp.tool()
-def record_finding(description: str, confidence: str, source: str = "") -> dict:
+def record_finding(
+    description: str,
+    confidence: str,
+    source: str = "",
+    linked_call_id: int = 0,
+) -> dict:
     """
     Record a confirmed finding to the execution trace.
-    confidence: 'high', 'medium', 'low', or 'uncertain'.
-    source: tool or artifact that produced the finding e.g. 'vol.psscan', 'Amcache'.
+    confidence: CONFIRMED / LIKELY / SUSPECTED / UNCONFIRMED.
+    source: tool or artifact that produced the finding e.g. 'vol.psscan', 'ez.mftecmd'.
+    linked_call_id: the _trudi_call_id value from the tool result that produced this
+                    finding — enables judges to trace any finding back to its source
+                    tool execution in the audit log.
     """
     from core.execution_log import log
-    log.record_finding(description, confidence, source)
+    log.record_finding(description, confidence, source, linked_call_id)
     return {"success": True, "description": description, "confidence": confidence}
 
 
@@ -304,4 +323,80 @@ def export_execution_log(output_path: str) -> dict:
         "entry_count": result.get("entry_count", 0),
         "json_path": output_path + ".json",
         "md_path": output_path + ".md",
+    }
+
+
+@mcp.tool()
+def record_agent_message(
+    content: str,
+    input_call_ids: list[int] | None = None,
+) -> dict:
+    """
+    Log the orchestrator's analysis or interpretation to the execution trace.
+
+    Call this at these moments:
+    - After interpreting a batch of parallel tool results (before selecting next tools)
+    - After each reason.* call (what the reviewer concluded, which directives apply)
+    - Whenever you reach a conclusion that changes the investigation direction
+
+    content: the analysis text — what you observed, concluded, or decided to do next
+    input_call_ids: list of _trudi_call_id values from the tool results being interpreted
+    """
+    from core.execution_log import log
+    cid = log.record_agent_message(content, input_call_ids)
+    return {"success": True, "call_id": cid}
+
+
+@mcp.tool()
+def clear_case_run(case_dir: str) -> dict:
+    """
+    Reset a case for a fresh investigation run. Deletes:
+      - analysis/, exports/, reports/ contents (preserves generate_pdf_report.py)
+      - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
+      - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
+
+    case_dir: absolute path to the case directory e.g. /home/trin/cases/srl-2018-demo
+    """
+    import shutil
+    import glob
+    cleared = []
+    errors = []
+
+    for subdir in ("analysis", "exports", "reports"):
+        target = os.path.join(case_dir, subdir)
+        for item in glob.glob(os.path.join(target, "*")):
+            if os.path.basename(item) == "generate_pdf_report.py":
+                continue
+            try:
+                if os.path.isdir(item):
+                    shutil.rmtree(item)
+                else:
+                    os.remove(item)
+                cleared.append(item)
+            except OSError as e:
+                errors.append(str(e))
+
+    session = os.path.expanduser("~/.cache/trudi/session.json")
+    if os.path.exists(session):
+        try:
+            os.remove(session)
+            cleared.append(session)
+        except OSError as e:
+            errors.append(str(e))
+
+    encoded = case_dir.replace("/", "-")
+    memory_dir = os.path.expanduser(f"~/.claude/projects/{encoded}/memory")
+    if os.path.isdir(memory_dir):
+        for item in glob.glob(os.path.join(memory_dir, "*")):
+            try:
+                os.remove(item)
+                cleared.append(item)
+            except OSError as e:
+                errors.append(str(e))
+
+    return {
+        "success": len(errors) == 0,
+        "cleared_count": len(cleared),
+        "cleared": cleared,
+        "errors": errors,
     }

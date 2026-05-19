@@ -1,4 +1,5 @@
 """String extraction, file identification, and metadata tools."""
+import os
 from typing import Optional
 from fastmcp import FastMCP
 from core import run
@@ -18,8 +19,21 @@ def strings_extract(
     min_length: minimum string length (default 8 reduces noise).
     unicode: also extract Unicode (UTF-16LE) strings.
     """
-    from core.paths import assert_output_safe
-    import subprocess
+    from core.paths import assert_output_safe, resolve_path_ci
+
+    resolved, corrected = resolve_path_ci(file_path)
+    if not os.path.exists(resolved):
+        return {
+            "success": False,
+            "error": f"file not found on mounted filesystem: {file_path}",
+            "hint": "File may have been deleted post-execution. Use vol_vol_dumpfiles --pid <PID> to extract from memory.",
+            "ascii_lines": 0,
+            "unicode_lines": 0,
+            "ascii_stdout": "",
+            "unicode_stdout": "",
+            "output_path": output_path,
+        }
+    file_path = resolved
 
     results = {}
 
@@ -46,6 +60,8 @@ def strings_extract(
         "ascii_stdout": results["ascii"].get("stdout", ""),
         "unicode_stdout": results.get("unicode", {}).get("stdout", ""),
         "output_path": output_path,
+        "stderr": results["ascii"].get("stderr", ""),
+        "path_resolved": file_path if corrected else None,
     }
 
 
@@ -55,8 +71,18 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
     Extract strings from a file and filter by regex pattern.
     Useful for targeted IOC hunting: URLs, IPs, domain names, commands.
     """
-    import subprocess
     import re
+    from core.paths import resolve_path_ci
+
+    resolved, _ = resolve_path_ci(file_path)
+    if not os.path.exists(resolved):
+        return {
+            "success": False,
+            "error": f"file not found: {file_path}",
+            "hint": "Use vol_vol_dumpfiles to extract from memory.",
+            "matches": [],
+        }
+    file_path = resolved
 
     # Run strings
     cmd = ["strings", "-a", "-n", str(min_length), file_path]

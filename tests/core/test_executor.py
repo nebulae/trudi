@@ -156,6 +156,29 @@ class TestRun:
         r = run(["ls"], output_dir=safe)
         assert r["success"] is True
 
+    def test_tilde_expanded_in_arg(self, mock_sub):
+        import os
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        run(["vol", "-f", "~/cases/image.img"])
+        called = mock_sub.call_args[0][0]
+        home = os.path.expanduser("~")
+        assert called[2] == home + "/cases/image.img"
+        assert "~" not in called[2]
+
+    def test_absolute_path_not_modified(self, mock_sub):
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        run(["vol", "-f", "/absolute/cases/image.img"])
+        called = mock_sub.call_args[0][0]
+        assert called[2] == "/absolute/cases/image.img"
+
+    def test_tilde_expanded_in_string_cmd(self, mock_sub):
+        import os
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        run("vol -f ~/cases/image.img")
+        called = mock_sub.call_args[0][0]
+        home = os.path.expanduser("~")
+        assert called[2] == home + "/cases/image.img"
+
 
 class TestApplyLineCap:
     def test_under_limit_unchanged(self):

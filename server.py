@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before tool modules read os.environ
 
 from fastmcp import FastMCP
+from core.middleware import NarrationMiddleware
 
 from tools.imaging import mcp as imaging_mcp
 from tools.volatility import mcp as vol_mcp
@@ -31,6 +32,7 @@ mcp = FastMCP(
         "Timestamps are always UTC."
     ),
 )
+mcp.add_middleware(NarrationMiddleware())
 
 mcp.mount(imaging_mcp, namespace="img")
 mcp.mount(vol_mcp, namespace="vol")

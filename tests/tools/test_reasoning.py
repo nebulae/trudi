@@ -332,17 +332,31 @@ class TestParseDirectives:
         d = _parse_directives(text)
         assert d["priority_tools"] == ["vol.psscan"]
 
-    def test_returns_empty_on_no_marker(self):
+    def test_returns_keyed_defaults_on_no_marker(self):
         from tools.reasoning import _parse_directives
-        assert _parse_directives("no directives here") == {}
+        result = _parse_directives("no directives here")
+        assert "priority_tools" in result
+        assert "skip_tools" in result
+        assert result["priority_tools"] == []
 
-    def test_returns_empty_on_bad_json(self):
+    def test_returns_keyed_defaults_on_bad_json(self):
         from tools.reasoning import _parse_directives
-        assert _parse_directives("DIRECTIVES:\n{bad json!!!}") == {}
+        result = _parse_directives("DIRECTIVES:\n{bad json!!!}")
+        assert "priority_tools" in result
+        assert result["priority_tools"] == []
 
-    def test_returns_empty_on_empty_input(self):
+    def test_returns_keyed_defaults_on_empty_input(self):
         from tools.reasoning import _parse_directives
-        assert _parse_directives("") == {}
+        result = _parse_directives("")
+        assert "priority_tools" in result
+        assert result["priority_tools"] == []
+
+    def test_partial_directives_merged_with_defaults(self):
+        from tools.reasoning import _parse_directives
+        result = _parse_directives('DIRECTIVES:\n{"priority_tools": ["vol.psscan"]}')
+        assert result["priority_tools"] == ["vol.psscan"]
+        assert "skip_tools" in result
+        assert "focus_pids" in result
 
     def test_case_insensitive_marker(self):
         from tools.reasoning import _parse_directives
@@ -386,3 +400,174 @@ class TestParseDirectives:
         d = _parse_directives(text)
         assert d["priority_tools"] == ["vol.cmdline"]
         assert d["max_depth"] == "targeted"
+
+
+class TestReasonHypothesizeEvidence:
+    """Tests for the new `evidence` parameter on reason_hypothesize."""
+
+    def test_evidence_included_in_prompt(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_hypothesize(
+                "rsydow-a beacon from DC to file server every 2 minutes",
+                evidence="1. EID 4624 × 66 at 120-second intervals\n2. PerfSvc.exe MD5 62/77 VT",
+            )
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
+        assert "SUPPORTING EVIDENCE" in user_msg
+        assert "EID 4624" in user_msg
+
+    def test_observation_always_first(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_hypothesize("orphaned PPID", evidence="psscan output", context="CRIMSON OSPREY")
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
+        obs_pos = user_msg.index("OBSERVATION")
+        ev_pos = user_msg.index("SUPPORTING EVIDENCE")
+        ctx_pos = user_msg.index("CASE CONTEXT")
+        assert obs_pos < ev_pos < ctx_pos
+
+    def test_backward_compat_no_evidence(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_hypothesize("observation", context="Windows 10")
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
+        assert "OBSERVATION" in user_msg
+        assert "CASE CONTEXT" in user_msg
+        assert "SUPPORTING EVIDENCE" not in user_msg
+
+    def test_no_evidence_no_section(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            reason_hypothesize("observation only")
+        user_msg = m.call_args[1]["json"]["messages"][1]["content"]
+        assert "SUPPORTING EVIDENCE" not in user_msg
+        assert "CASE CONTEXT" not in user_msg
+
+
+class TestTokenExtraction:
+    """Tests for token usage extraction in both backends."""
+
+    def test_claude_backend_returns_tokens(self):
+        from tools.reasoning import reason_hypothesize
+        resp = MagicMock()
+        resp.content = [MagicMock(text="ok")]
+        resp.usage = MagicMock(input_tokens=512, output_tokens=128)
+        client = MagicMock()
+        client.messages.create.return_value = resp
+        anthro = MagicMock(return_value=client)
+        with patch("anthropic.Anthropic", anthro), \
+             patch("tools.reasoning.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            r = reason_hypothesize("observation")
+        assert r["input_tokens"] == 512
+        assert r["output_tokens"] == 128
+
+    def test_compat_backend_returns_tokens(self):
+        from tools.reasoning import reason_hypothesize
+        m = MagicMock()
+        m.raise_for_status = MagicMock()
+        m.json.return_value = {
+            "choices": [{"message": {"content": "ok", "reasoning": ""}}],
+            "usage": {"prompt_tokens": 400, "completion_tokens": 75},
+        }
+        with patch("httpx.post", return_value=m), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            r = reason_hypothesize("observation")
+        assert r["input_tokens"] == 400
+        assert r["output_tokens"] == 75
+
+    def test_compat_backend_missing_usage_defaults_zero(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("httpx.post", return_value=_http_resp("ok")), \
+             patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
+             patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
+            r = reason_hypothesize("observation")
+        assert r["input_tokens"] == 0
+        assert r["output_tokens"] == 0
+
+    def test_claude_error_result_has_token_keys(self):
+        from tools.reasoning import reason_hypothesize
+        with patch("tools.reasoning.ANTHROPIC_API_KEY", ""), \
+             patch("tools.reasoning.REASON_BACKEND", "claude"):
+            r = reason_hypothesize("observation")
+        assert "input_tokens" in r
+        assert "output_tokens" in r
+
+
+class TestReasonPreReportCheck:
+    """Tests for reason_pre_report_check."""
+
+    @pytest.fixture
+    def configured_log(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-PRE", str(tmp_path / "trace.json"))
+        return l
+
+    def test_empty_trace_not_ready(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("empty" in issue.lower() for issue in r["blocking_issues"])
+
+    def test_missing_plan_is_blocking(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("reason.plan" in issue for issue in r["blocking_issues"])
+
+    def test_missing_synthesize_is_blocking(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("reason.synthesize" in issue for issue in r["blocking_issues"])
+
+    def test_confirmed_findings_without_evaluate_is_warning(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_finding("PerfSvc.exe", "CONFIRMED", "ez.mftecmd")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True  # warning only, not blocking
+        assert len(r["warnings"]) > 0
+
+    def test_all_checks_pass(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding("PerfSvc.exe", "CONFIRMED", "ez.mftecmd")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
+        assert r["blocking_issues"] == []
+
+    def test_token_totals_reported(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_reason_call("reason_plan", True, "plan", {}, input_tokens=300, output_tokens=100)
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {}, input_tokens=500, output_tokens=200)
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["total_input_tokens"] == 800
+        assert r["total_output_tokens"] == 300

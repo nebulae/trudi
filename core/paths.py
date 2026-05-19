@@ -45,6 +45,36 @@ def assert_output_safe(path: str) -> None:
         )
 
 
+def resolve_path_ci(path: str) -> tuple[str, bool]:
+    """Walk path components case-insensitively on the real filesystem.
+
+    Returns (resolved_path, was_corrected). was_corrected=True means at least
+    one component was case-folded to match an actual directory entry.
+    If a component has no match the original path is returned with was_corrected=False
+    so callers can report a clean not-found error.
+    """
+    path = os.path.normpath(os.path.expanduser(path))
+    parts = Path(path).parts          # e.g. ('/', 'mnt', 'rd01', 'Windows', ...)
+    current = parts[0]                # '/'
+    corrected = False
+    for part in parts[1:]:
+        try:
+            entries = os.listdir(current)
+        except (PermissionError, NotADirectoryError, FileNotFoundError):
+            return path, False
+        if part in entries:
+            current = os.path.join(current, part)
+        else:
+            lower = part.lower()
+            matches = [e for e in entries if e.lower() == lower]
+            if matches:
+                current = os.path.join(current, matches[0])
+                corrected = True
+            else:
+                return path, False    # component missing — caller handles not-found
+    return current, corrected
+
+
 def vol3_bin() -> str:
     return "/usr/local/bin/vol"
 

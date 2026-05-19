@@ -51,7 +51,7 @@ _EMPTY_DIRECTIVES: dict = {
 
 _DIRECTIVES_INSTRUCTION = """\
 
-Output the DIRECTIVES block FIRST — before your analysis. \
+Write your full analysis first, then end your response with the DIRECTIVES block. \
 No markdown bold, no code fences, no // comments, plain text only:
 DIRECTIVES:
 {
@@ -62,8 +62,7 @@ DIRECTIVES:
   "max_depth": "targeted",
   "next_hypothesis_triggers": []
 }
-Replace the example values with your actual recommendations, \
-then write your full analysis after. \
+Replace the example values with your actual recommendations. \
 Tool names must use TRUDI MCP format: namespace.tool \
 (e.g. vol.psscan, vol.cmdline, vol.netscan, vol.dlllist, vol.malfind, \
 ez.amcacheparser, ez.appcompatcacheparser, ez.mftecmd, ez.evtxecmd, \
@@ -74,8 +73,9 @@ Do not invent tool names outside this list."""
 
 _EVIDENCE_AUDIT_INSTRUCTION = """\
 
-Output the EVIDENCE_AUDIT block FIRST — before your analysis, after DIRECTIVES. \
-List each major claim in the finding:
+Write your full analysis first. Then include the EVIDENCE_AUDIT block, \
+followed by the DIRECTIVES block at the very end. \
+List each major claim in the finding in EVIDENCE_AUDIT:
 EVIDENCE_AUDIT:
 [
   {
@@ -135,22 +135,27 @@ def _parse_evidence_audit(text: str) -> list:
 
 
 def _parse_directives(text: str) -> dict:
-    """Extract the DIRECTIVES JSON block from model output. Returns {} on any failure."""
+    """Extract the DIRECTIVES JSON block from model output.
+
+    Returns _EMPTY_DIRECTIVES template on any parse failure so callers always
+    have the expected keys and can check priority_tools without KeyError.
+    On successful parse, missing keys are filled from the template.
+    """
     if not text:
-        return {}
+        return _EMPTY_DIRECTIVES.copy()
     match = re.search(
         r"\*{0,2}DIRECTIVES\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\{.*?\})\s*(?:```)?",
         text,
         re.DOTALL | re.IGNORECASE,
     )
     if not match:
-        return {}
+        return _EMPTY_DIRECTIVES.copy()
     raw = match.group(1)
     raw = re.sub(r"\s*//[^\n]*", "", raw)  # strip // comments
     try:
-        return json.loads(raw)
+        return {**_EMPTY_DIRECTIVES, **json.loads(raw)}
     except (json.JSONDecodeError, ValueError):
-        return {}
+        return _EMPTY_DIRECTIVES.copy()
 
 
 def _cap_lines(text: str, max_lines: int) -> str:
@@ -167,7 +172,7 @@ def _cap_lines(text: str, max_lines: int) -> str:
 def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dict:
     """Call the Anthropic Claude API with prompt caching on the system prompt."""
     import anthropic
-    _empty = {"success": False, "conclusion": "", "directives": {}}
+    _empty = {"success": False, "conclusion": "", "directives": {}, "input_tokens": 0, "output_tokens": 0}
 
     if not ANTHROPIC_API_KEY:
         result = {**_empty, "error": "ANTHROPIC_API_KEY not set — add it to .env"}
@@ -191,8 +196,14 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dic
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
         conclusion = _strip_evidence_audit(_strip_directives(raw))
-        result = {"success": True, "conclusion": conclusion, "directives": directives,
-                  "evidence_audit": evidence_audit}
+        result = {
+            "success": True,
+            "conclusion": conclusion,
+            "directives": directives,
+            "evidence_audit": evidence_audit,
+            "input_tokens": getattr(resp.usage, "input_tokens", 0),
+            "output_tokens": getattr(resp.usage, "output_tokens", 0),
+        }
         _log_reason(_tool_name, result)
         return result
     except Exception as e:
@@ -204,7 +215,7 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dic
 def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str) -> dict:
     """Call any OpenAI-compatible endpoint (OpenAI, Foundation-Sec vLLM, Ollama, etc.)."""
     import httpx
-    _empty = {"success": False, "conclusion": "", "directives": {}}
+    _empty = {"success": False, "conclusion": "", "directives": {}, "input_tokens": 0, "output_tokens": 0}
 
     if not REASON_URL:
         result = {**_empty, "error": "REASON_URL not set for openai-compat backend"}
@@ -228,7 +239,8 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str)
             timeout=REASON_TIMEOUT,
         )
         resp.raise_for_status()
-        choice = resp.json()["choices"][0]["message"]
+        body = resp.json()
+        choice = body["choices"][0]["message"]
         raw = choice.get("content") or choice.get("reasoning") or ""
         if not raw:
             result = {**_empty, "error": "Model returned empty response"}
@@ -237,8 +249,15 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str)
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
         conclusion = _strip_evidence_audit(_strip_directives(raw))
-        result = {"success": True, "conclusion": conclusion, "directives": directives,
-                  "evidence_audit": evidence_audit}
+        usage = body.get("usage", {})
+        result = {
+            "success": True,
+            "conclusion": conclusion,
+            "directives": directives,
+            "evidence_audit": evidence_audit,
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+        }
         _log_reason(_tool_name, result)
         return result
     except Exception as e:
@@ -264,6 +283,8 @@ def _log_reason(tool_name: str, result: dict) -> None:
             conclusion=result.get("conclusion", ""),
             directives=result.get("directives", {}),
             evidence_audit=result.get("evidence_audit"),
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
         )
     except Exception:
         pass
@@ -344,9 +365,12 @@ _SYNTHESIZE_SYS = (
     "2. CONTRADICTIONS — findings that conflict with each other\n"
     "3. TIER VIOLATIONS — findings written as CONFIRMED/HIGH where the evidence "
     "is SUSPECTED or UNCONFIRMED tier; list each with the correct tier\n"
-    "4. OVERCLAIMED MECHANISMS — technical explanations that aren't supported "
+    "4. TIER CONTRADICTIONS — any two findings that make the same mechanistic "
+    "claim (same attacker action, same host, same credential) at different "
+    "confidence tiers; list each pair as TIER_CONTRADICTION with the correct tier\n"
+    "5. OVERCLAIMED MECHANISMS — technical explanations that aren't supported "
     "by cited evidence (e.g. YARA hit stated as 'confirmed execution')\n"
-    "5. MISSING INVESTIGATION — what should have been checked but wasn't\n\n"
+    "6. MISSING INVESTIGATION — what should have been checked but wasn't\n\n"
     "Return a structured punch list. Mark BLOCKERS (must fix before report is "
     "written) separately from ADVISORIES (should note, not blocking)."
     + _DIRECTIVES_INSTRUCTION
@@ -371,17 +395,21 @@ def reason_plan(case_description: str, evidence_available: str) -> dict:
 
 
 @mcp.tool()
-def reason_hypothesize(observation: str, context: str = "") -> dict:
+def reason_hypothesize(observation: str, evidence: str = "", context: str = "") -> dict:
     """
     Generate ranked alternative hypotheses for a forensic observation before
     committing to an interpretation. Call this when a finding has multiple
     plausible explanations — malicious and benign.
 
-    observation: the raw forensic artifact or behaviour (e.g. "cmd.exe PID 5024
-                 spawned from orphaned PPID 2748 in Session 0 at 17:15 UTC")
-    context: any relevant case context (OS, known attacker TTPs, timeline)
+    observation: the single behaviour or artifact being explained (one sentence,
+                 e.g. "cmd.exe PID 5024 spawned from orphaned PPID 2748 in Session 0")
+    evidence: raw artifact list supporting the observation (tool output excerpts,
+              event IDs, timestamps — paste verbatim)
+    context: broader case context (OS, known attacker TTPs, incident timeline)
     """
     user = f"OBSERVATION:\n{observation}"
+    if evidence:
+        user += f"\n\nSUPPORTING EVIDENCE:\n{evidence}"
     if context:
         user += f"\n\nCASE CONTEXT:\n{context}"
     return _ask(_HYPOTHESIZE_SYS, user, max_tokens=1024, _tool_name="reason_hypothesize")
@@ -422,3 +450,76 @@ def reason_synthesize(findings: str, investigation_summary: str = "") -> dict:
     if investigation_summary:
         user += f"\n\nINVESTIGATION COVERAGE:\n{investigation_summary}"
     return _ask(_SYNTHESIZE_SYS, user, max_tokens=2048, _tool_name="reason_synthesize")
+
+
+@mcp.tool()
+def reason_pre_report_check() -> dict:
+    """
+    Verify all mandatory investigation checkpoints before writing the report.
+    Reads the live execution trace and returns blocking_issues (must resolve)
+    and warnings (should review). Do not write the report if ready_to_report
+    is False.
+
+    Call this after reason.synthesize and before writing any report section.
+    """
+    from core.execution_log import log
+    entries = log._entries
+
+    has_plan = any(
+        e["type"] == "reason_call" and e.get("tool") == "reason_plan"
+        for e in entries
+    )
+    has_synthesize = any(
+        e["type"] == "reason_call" and e.get("tool") == "reason_synthesize"
+        for e in entries
+    )
+    has_hypothesize = any(
+        e["type"] == "reason_call" and e.get("tool") == "reason_hypothesize"
+        for e in entries
+    )
+    evaluate_calls = sum(
+        1 for e in entries
+        if e["type"] == "reason_call" and e.get("tool") == "reason_evaluate_finding"
+    )
+    confirmed_findings = sum(
+        1 for e in entries
+        if e["type"] == "finding" and e.get("confidence", "").upper() == "CONFIRMED"
+    )
+    tool_calls = sum(1 for e in entries if e["type"] == "tool_call")
+    total_input_tokens = sum(e.get("input_tokens", 0) for e in entries if e["type"] == "reason_call")
+    total_output_tokens = sum(e.get("output_tokens", 0) for e in entries if e["type"] == "reason_call")
+
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    if len(entries) == 0:
+        issues.append("Execution trace is empty — start_execution_log was not called before tool runs")
+    if not has_plan:
+        issues.append("reason.plan was not called — mandatory before tool selection")
+    if not has_synthesize:
+        issues.append("reason.synthesize was not called — mandatory before writing report")
+    if evaluate_calls < confirmed_findings:
+        warnings.append(
+            f"{confirmed_findings} CONFIRMED finding(s) but only {evaluate_calls} "
+            "reason.evaluate_finding call(s) — each CONFIRMED finding requires evaluation"
+        )
+    if not has_hypothesize:
+        warnings.append(
+            "reason.hypothesize was never called — required for any unusual artifact, "
+            "orphaned process, or unexpected network connection"
+        )
+
+    return {
+        "ready_to_report": len(issues) == 0,
+        "blocking_issues": issues,
+        "warnings": warnings,
+        "trace_entries": len(entries),
+        "tool_calls": tool_calls,
+        "confirmed_findings": confirmed_findings,
+        "evaluate_finding_calls": evaluate_calls,
+        "has_plan": has_plan,
+        "has_synthesize": has_synthesize,
+        "has_hypothesize": has_hypothesize,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+    }

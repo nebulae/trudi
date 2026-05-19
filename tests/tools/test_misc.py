@@ -132,3 +132,33 @@ class TestHindsight:
         from tools.misc import hindsight_chrome
         hindsight_chrome("/mnt/wkstn01/Users/mhill/AppData/Local/Google/Chrome/User Data/Default", str(tmp_path))
         assert mock_run.called
+
+
+class TestRecordFinding:
+    def test_record_finding_returns_success(self, tmp_path):
+        from tools.misc import record_finding
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = record_finding("PerfSvc.exe timestomped", "CONFIRMED", "ez.mftecmd")
+        assert r["success"] is True
+        assert r["confidence"] == "CONFIRMED"
+
+    def test_record_finding_stores_linked_call_id(self, tmp_path):
+        from tools.misc import record_finding
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            record_finding("PerfSvc.exe timestomped", "CONFIRMED", "ez.mftecmd", linked_call_id=7)
+        assert l._entries[0]["linked_call_id"] == 7
+
+    def test_record_finding_default_linked_call_id_zero(self, tmp_path):
+        from tools.misc import record_finding
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            record_finding("test finding", "LIKELY", "vol.netscan")
+        assert l._entries[0]["linked_call_id"] == 0

@@ -1,4 +1,5 @@
 """Safe subprocess executor for SIFT forensic tools."""
+import os
 import re
 import subprocess
 import shlex
@@ -48,7 +49,7 @@ def _parse_stderr(raw: str) -> tuple[str, list[str]]:
 def _log_tool(result: dict) -> None:
     try:
         from core.execution_log import log
-        log.record_tool_call(
+        cid = log.record_tool_call(
             cmd=result["cmd"],
             success=result["success"],
             truncated=result["truncated"],
@@ -56,7 +57,9 @@ def _log_tool(result: dict) -> None:
             exit_code=result["exit_code"],
             stderr=result["stderr"],
             elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
         )
+        result["_trudi_call_id"] = cid
     except Exception:
         pass
 
@@ -85,6 +88,9 @@ def run(
 
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
+
+    # subprocess.run() with a list does not shell-expand ~ — expand explicitly
+    cmd = [os.path.expanduser(a) if a.startswith("~") else a for a in cmd]
 
     if needs_sudo and cmd[0] != "sudo":
         cmd = ["sudo"] + cmd
@@ -158,6 +164,9 @@ async def run_with_progress(
     """
     if output_dir:
         assert_output_safe(output_dir)
+
+    # subprocess does not shell-expand ~ in list args — expand explicitly
+    cmd = [os.path.expanduser(a) if a.startswith("~") else a for a in cmd]
 
     result: dict[str, Any] = {
         "success": False,

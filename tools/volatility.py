@@ -11,16 +11,20 @@ VOL = vol3_bin()
 
 
 
-def _vol(image: str, plugin: str, extra: list[str] | None = None, timeout: int = VOL_TIMEOUT) -> dict:
-    # plugin comes BEFORE extra so plugin-specific args (--pid, --dump, etc.)
-    # are passed to the plugin, not interpreted as global vol args
-    cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json", plugin] + (extra or [])
+def _vol(image: str, plugin: str, extra: list[str] | None = None,
+         output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
+    # -o OUTPUT_DIR is a global Volatility flag — must come before the plugin name.
+    # Plugin-specific args (--pid, --dump, etc.) go in extra, after the plugin.
+    out_flags = ["-o", output_dir] if output_dir else []
+    cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin] + (extra or [])
     return run(cmd, timeout=timeout)
 
 
-async def _vol_progress(image: str, plugin: str, ctx: Any, timeout: int = VOL_TIMEOUT) -> dict:
+async def _vol_progress(image: str, plugin: str, ctx: Any,
+                        output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
     """Async variant of _vol() with FastMCP Context progress reporting."""
-    cmd = [VOL, "-s", vol3_symbols(), "-f", image, "-r", "json", plugin]
+    out_flags = ["-o", output_dir] if output_dir else []
+    cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin]
     return await run_with_progress(cmd, ctx, timeout=timeout)
 
 
@@ -35,19 +39,31 @@ def vol_info(image: str) -> dict:
 @mcp.tool()
 def vol_symbol_check(memory_image: str) -> dict:
     """
-    Pre-flight check: verify Volatility 3 symbol files are cached.
-    Returns instantly — pure filesystem check, no image I/O.
+    Pre-flight check: verify the memory image exists and Volatility 3 symbol
+    files are cached. Returns the resolved absolute path in the 'image' field
+    so downstream plugins can use it directly without re-expanding ~.
 
     If symbols_ready is False, call vol_info once (requires internet) to
     trigger the download for this kernel build, then retry memory plugins.
     """
+    expanded = os.path.expanduser(memory_image)
+    if not os.path.exists(expanded):
+        return {
+            "success": False,
+            "image": memory_image,
+            "symbols_ready": False,
+            "cached_symbol_count": 0,
+            "cached_guids": [],
+            "note": f"Image not found: {expanded} — check the path and try again.",
+        }
+
     symbols_dir = vol3_symbols()
     cached = glob.glob(os.path.join(symbols_dir, "windows", "ntkrnlmp.pdb", "*.json.xz"))
     cached += glob.glob(os.path.join(symbols_dir, "windows", "ntoskrnl.pdb", "*.json.xz"))
 
     return {
         "success": True,
-        "image": memory_image,
+        "image": expanded,
         "symbols_ready": len(cached) > 0,
         "cached_symbol_count": len(cached),
         "cached_guids": [os.path.basename(p) for p in cached],
@@ -244,8 +260,8 @@ def vol_malfind(image: str, pid: Optional[int] = None, dump: bool = False, outpu
     if dump and output_dir:
         from core.paths import assert_output_safe
         assert_output_safe(output_dir)
-        extra += ["--dump", "--output-dir", output_dir]
-    return _vol(image, "windows.malfind", extra)
+        extra += ["--dump"]
+    return _vol(image, "windows.malfind", extra, output_dir=output_dir if dump else None)
 
 
 @mcp.tool()
@@ -377,12 +393,12 @@ def vol_dumpfiles(
         return {"success": False, "stderr": "output_dir is required for dumpfiles"}
     from core.paths import assert_output_safe
     assert_output_safe(output_dir)
-    extra = ["--output-dir", output_dir]
+    extra = []
     if virt_addr:
         extra += ["--virtaddr", virt_addr]
     if pid:
         extra += ["--pid", str(pid)]
-    return _vol(image, "windows.dumpfiles", extra)
+    return _vol(image, "windows.dumpfiles", extra, output_dir=output_dir)
 
 
 @mcp.tool()
@@ -401,8 +417,8 @@ def vol_memmap(image: str, pid: int, dump: bool = False, output_dir: Optional[st
     if dump and output_dir:
         from core.paths import assert_output_safe
         assert_output_safe(output_dir)
-        extra += ["--dump", "--output-dir", output_dir]
-    return _vol(image, "windows.memmap", extra)
+        extra += ["--dump"]
+    return _vol(image, "windows.memmap", extra, output_dir=output_dir if dump else None)
 
 
 # ── Execution artifacts ───────────────────────────────────────────────────────
@@ -465,12 +481,10 @@ def vol_timeliner(image: str, output_dir: Optional[str] = None) -> dict:
     Generate a unified timeline of all memory artifacts.
     Produces a bodyfile suitable for mactime.
     """
-    extra = []
     if output_dir:
         from core.paths import assert_output_safe
         assert_output_safe(output_dir)
-        extra += ["--output-dir", output_dir]
-    return _vol(image, "timeliner", extra, timeout=VOL_TIMEOUT)
+    return _vol(image, "timeliner", output_dir=output_dir, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
