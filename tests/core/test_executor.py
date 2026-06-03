@@ -5,6 +5,10 @@ from unittest.mock import patch, MagicMock
 from core.executor import run, run_dotnet, _apply_line_cap
 from core.paths import OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES
 
+# Note: the autouse `isolate_session_file` fixture in tests/conftest.py now
+# also configures the global trace log to a tmp path, so run() can call
+# _log_tool() without tripping the new _require_configured raise.
+
 
 def make_proc(returncode=0, stdout=b"", stderr=b""):
     m = MagicMock()
@@ -155,6 +159,29 @@ class TestRun:
         safe = str(tmp_path / "exports")
         r = run(["ls"], output_dir=safe)
         assert r["success"] is True
+
+    def test_tilde_expanded_in_arg(self, mock_sub):
+        import os
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        run(["vol", "-f", "~/cases/image.img"])
+        called = mock_sub.call_args[0][0]
+        home = os.path.expanduser("~")
+        assert called[2] == home + "/cases/image.img"
+        assert "~" not in called[2]
+
+    def test_absolute_path_not_modified(self, mock_sub):
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        run(["vol", "-f", "/absolute/cases/image.img"])
+        called = mock_sub.call_args[0][0]
+        assert called[2] == "/absolute/cases/image.img"
+
+    def test_tilde_expanded_in_string_cmd(self, mock_sub):
+        import os
+        mock_sub.return_value = make_proc(0, b"ok", b"")
+        run("vol -f ~/cases/image.img")
+        called = mock_sub.call_args[0][0]
+        home = os.path.expanduser("~")
+        assert called[2] == home + "/cases/image.img"
 
 
 class TestApplyLineCap:

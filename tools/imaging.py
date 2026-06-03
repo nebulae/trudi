@@ -2,7 +2,7 @@
 import os
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, output_safe
 from core.paths import assert_output_safe
 
 mcp = FastMCP("imaging")
@@ -11,6 +11,7 @@ mcp = FastMCP("imaging")
 # ── Volume Shadow Copies ───────────────────────────────────────────────────────
 
 @mcp.tool()
+@output_safe
 def vshadow_mount(
     image_or_device: str,
     mount_point: str,
@@ -25,6 +26,7 @@ def vshadow_mount(
 
 
 @mcp.tool()
+@output_safe
 def vshadow_list(mount_point: str) -> dict:
     """
     List mounted Volume Shadow Copies after vshadow_mount.
@@ -34,6 +36,7 @@ def vshadow_list(mount_point: str) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def vshadow_umount(mount_point: str) -> dict:
     """Unmount a vshadowmount mount point."""
     return run(["umount", mount_point], needs_sudo=True)
@@ -42,6 +45,7 @@ def vshadow_umount(mount_point: str) -> dict:
 # ── BitLocker ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
+@output_safe
 def bde_mount(
     image_path: str,
     mount_point: str,
@@ -64,6 +68,7 @@ def bde_mount(
 
 
 @mcp.tool()
+@output_safe
 def bde_info(image_path: str) -> dict:
     """Display BitLocker encryption information from an image."""
     return run(["bdeinfo", image_path])
@@ -72,6 +77,7 @@ def bde_info(image_path: str) -> dict:
 # ── xmount (multi-format image mounting) ──────────────────────────────────────
 
 @mcp.tool()
+@output_safe
 def xmount_image(
     input_image: str,
     mount_point: str,
@@ -95,6 +101,7 @@ def xmount_image(
 
 
 @mcp.tool()
+@output_safe
 def xmount_umount(mount_point: str) -> dict:
     """Unmount an xmount mount point."""
     return run(["fusermount", "-u", mount_point])
@@ -103,6 +110,7 @@ def xmount_umount(mount_point: str) -> dict:
 # ── PhotoRec (non-interactive carving) ────────────────────────────────────────
 
 @mcp.tool()
+@output_safe
 def photorec_carve(
     image_path: str,
     output_dir: str,
@@ -118,7 +126,6 @@ def photorec_carve(
     Note: PhotoRec creates numbered subdirectories (recup_dir.1, recup_dir.2, ...) inside output_dir.
     For large images this can take hours and recover thousands of files.
     """
-    assert_output_safe(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     # Build photorec command-line (non-interactive via /cmd option)
@@ -140,12 +147,14 @@ def photorec_carve(
 # ── Partition tools ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
+@output_safe
 def partprobe_refresh(device: str) -> dict:
     """Inform the OS of partition table changes on a device."""
     return run(["partprobe", device], needs_sudo=True)
 
 
 @mcp.tool()
+@output_safe
 def losetup_create(image_path: str, offset_bytes: Optional[int] = None) -> dict:
     """
     Create a loop device from a disk image (alternative to mount -o loop).
@@ -159,12 +168,14 @@ def losetup_create(image_path: str, offset_bytes: Optional[int] = None) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def losetup_list() -> dict:
     """List all active loop devices."""
     return run(["losetup", "-l"])
 
 
 @mcp.tool()
+@output_safe
 def losetup_detach(loop_device: str) -> dict:
     """Detach a loop device (e.g. /dev/loop0)."""
     return run(["losetup", "-d", loop_device], needs_sudo=True)

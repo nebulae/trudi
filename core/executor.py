@@ -1,4 +1,5 @@
 """Safe subprocess executor for SIFT forensic tools."""
+import os
 import re
 import subprocess
 import shlex
@@ -46,9 +47,18 @@ def _parse_stderr(raw: str) -> tuple[str, list[str]]:
 
 
 def _log_tool(result: dict) -> None:
+    """Write a tool_call trace entry for the just-run command.
+
+    Trace integrity is required for the audit story — if recording the entry
+    fails (disk full, perms, log not configured), re-raise so the caller
+    sees a structured error instead of returning a tool result with a
+    fabricated `_trudi_call_id: 0`. The middleware wraps the raise into a
+    ToolError that the agent must read.
+    """
     try:
         from core.execution_log import log
-        log.record_tool_call(
+        parent = [log._last_dair_cid] if log._last_dair_cid else None
+        cid = log.record_tool_call(
             cmd=result["cmd"],
             success=result["success"],
             truncated=result["truncated"],
@@ -56,9 +66,16 @@ def _log_tool(result: dict) -> None:
             exit_code=result["exit_code"],
             stderr=result["stderr"],
             elapsed_seconds=result.get("elapsed_seconds", 0.0),
+            stdout_excerpt=result.get("stdout", ""),
+            timed_out=result.get("timed_out", False),
+            input_call_ids=parent,
         )
-    except Exception:
-        pass
+        result["_trudi_call_id"] = cid
+    except Exception as e:
+        import sys
+        print(f"[TRUDI WARN] _log_tool failed for {result.get('cmd', '?')[:80]}: {e}",
+              file=sys.stderr)
+        raise
 
 
 def run(
@@ -85,6 +102,9 @@ def run(
 
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
+
+    # subprocess.run() with a list does not shell-expand ~ — expand explicitly
+    cmd = [os.path.expanduser(a) if a.startswith("~") else a for a in cmd]
 
     if needs_sudo and cmd[0] != "sudo":
         cmd = ["sudo"] + cmd
@@ -131,6 +151,7 @@ def run(
 
     except subprocess.TimeoutExpired:
         result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        result["timed_out"] = True
 
     except FileNotFoundError as e:
         result["stderr"] = f"Tool not found: {e}"
@@ -159,6 +180,9 @@ async def run_with_progress(
     if output_dir:
         assert_output_safe(output_dir)
 
+    # subprocess does not shell-expand ~ in list args — expand explicitly
+    cmd = [os.path.expanduser(a) if a.startswith("~") else a for a in cmd]
+
     result: dict[str, Any] = {
         "success": False,
         "stdout": "",
@@ -186,6 +210,8 @@ async def run_with_progress(
             # with \r (carriage return), not \n, so line-based iteration misses them.
             buf = b""
             while True:
+                if proc.stderr is None:
+                    break
                 chunk = await proc.stderr.read(512)
                 if not chunk:
                     break
@@ -201,8 +227,23 @@ async def run_with_progress(
                         elapsed = time.perf_counter() - start
                         try:
                             await ctx.report_progress(elapsed, float(timeout), line[:120])
-                        except Exception:
-                            pass
+                        except Exception as _progress_err:
+                            # Don't let progress-reporting bugs interrupt the
+                            # tool run, but surface them in the trace so
+                            # they're not invisible.
+                            import sys as _sys
+                            print(f"[TRUDI WARN] progress_drain failed: "
+                                  f"{_progress_err}", file=_sys.stderr)
+                            try:
+                                from core.execution_log import log as _log
+                                _log.record_system_error(
+                                    "progress_drain",
+                                    f"report_progress raised "
+                                    f"{type(_progress_err).__name__}: "
+                                    f"{_progress_err}",
+                                )
+                            except Exception:
+                                pass
             # flush any remaining bytes
             if buf:
                 line = buf.decode("utf-8", errors="replace").strip()
@@ -210,6 +251,8 @@ async def run_with_progress(
                     stderr_buf.append(line)
 
         async def _drain_stdout() -> bytes:
+            if proc.stdout is None:
+                return b""
             return await proc.stdout.read()
 
         try:
@@ -224,6 +267,7 @@ async def run_with_progress(
                 pass
             await proc.communicate()
             result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+            result["timed_out"] = True
             result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
             _, result["progress_lines"] = _parse_stderr("\n".join(stderr_buf))
             _log_tool(result)
@@ -263,3 +307,81 @@ def run_dotnet(
     """Run an EZ Tools .NET binary via dotnet runtime."""
     cmd = ["dotnet", dll_path] + args
     return run(cmd, timeout=timeout, output_dir=output_dir)
+
+
+def run_with_output_file(
+    cmd: list[str] | str,
+    *,
+    output_path: str,
+    mode: str = "w",
+    timeout: int = DEFAULT_TIMEOUT,
+    needs_sudo: bool = False,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> dict[str, Any]:
+    """
+    Execute a forensic tool with stdout redirected to output_path.
+
+    Use this when the tool's stdout *is* the artifact (icat → file contents,
+    blkls → raw blocks, mactime → CSV, evtx_dump → JSON, etc.). The standard
+    run() captures stdout in memory and would be wrong for binary or large
+    outputs. Returns the standard executor result dict with `output_path`
+    added and a synthetic stdout summary.
+
+    mode: "w" for text, "wb" for binary.
+    """
+    assert_output_safe(output_path)
+    parent = os.path.dirname(os.path.abspath(output_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    if isinstance(cmd, str):
+        cmd = shlex.split(cmd)
+    cmd = [os.path.expanduser(a) if a.startswith("~") else a for a in cmd]
+    if needs_sudo and cmd[0] != "sudo":
+        cmd = ["sudo"] + cmd
+
+    result: dict[str, Any] = {
+        "success": False,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": -1,
+        "elapsed_seconds": 0.0,
+        "truncated": False,
+        "cmd": " ".join(cmd),
+        "retries": 0,
+        "progress_lines": [],
+        "output_path": output_path,
+    }
+
+    start = time.perf_counter()
+
+    try:
+        with open(output_path, mode) as f:
+            proc = subprocess.run(
+                cmd,
+                stdout=f,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                env=env,
+                cwd=cwd,
+            )
+        result["exit_code"] = proc.returncode
+        result["success"] = proc.returncode == 0
+        result["stdout"] = f"Output written to {output_path}"
+        stderr_raw = proc.stderr.decode("utf-8", errors="replace")
+        result["stderr"], result["progress_lines"] = _parse_stderr(stderr_raw)
+
+    except subprocess.TimeoutExpired:
+        result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
+        result["timed_out"] = True
+
+    except FileNotFoundError as e:
+        result["stderr"] = f"Tool not found: {e}"
+
+    except Exception as e:
+        result["stderr"] = f"Executor error: {e}"
+
+    result["elapsed_seconds"] = round(time.perf_counter() - start, 1)
+    _log_tool(result)
+    return result

@@ -10,6 +10,12 @@ def mock_run(run_ok):
 
 
 class TestStringsExtract:
+    @pytest.fixture(autouse=True)
+    def mock_path(self):
+        with patch("tools.strings_tools.os.path.exists", return_value=True), \
+             patch("core.paths.resolve_path_ci", side_effect=lambda p: (p, False)):
+            yield
+
     def test_strings_extract_basic(self, mock_run):
         from tools.strings_tools import strings_extract
         strings_extract("/malware/sample.exe")
@@ -35,6 +41,12 @@ class TestStringsExtract:
 
 
 class TestStringsGrep:
+    @pytest.fixture(autouse=True)
+    def mock_path(self):
+        with patch("tools.strings_tools.os.path.exists", return_value=True), \
+             patch("core.paths.resolve_path_ci", side_effect=lambda p: (p, False)):
+            yield
+
     def test_grep_pattern(self, mock_run):
         from tools.strings_tools import strings_grep
         mock_run.return_value = {**mock_run.return_value, "stdout": "http://evil.com\nftp://also.evil"}
@@ -95,3 +107,55 @@ class TestStat:
         stat_file("/malware/sample.exe")
         cmd = mock_run.call_args[0][0]
         assert "stat" in cmd
+
+
+class TestResolvePathCI:
+    def test_missing_file_returns_error(self, tmp_path):
+        from tools.strings_tools import strings_extract
+        result = strings_extract(str(tmp_path / "nonexistent.exe"))
+        assert result["success"] is False
+        assert "not found" in result["error"]
+        assert "dumpfiles" in result["hint"]
+
+    def test_case_corrected_path_used(self, tmp_path):
+        real = tmp_path / "Perfmon" / "p.exe"
+        real.parent.mkdir()
+        real.write_bytes(b"MZ\x00test string here!!")
+        from tools.strings_tools import strings_extract
+        result = strings_extract(str(tmp_path / "perfmon" / "p.exe"))
+        assert result["success"] is True
+        assert result["path_resolved"] is not None
+
+    def test_stderr_in_response(self, mock_run, tmp_path):
+        mock_run.return_value = {**mock_run.return_value, "success": False, "stderr": "binary error"}
+        real = tmp_path / "sample.exe"
+        real.write_bytes(b"data")
+        from tools.strings_tools import strings_extract
+        result = strings_extract(str(real))
+        assert "stderr" in result
+
+
+class TestFlossExtract:
+    def test_floss_missing_binary(self, monkeypatch):
+        from tools.strings_tools import floss_extract
+        monkeypatch.setattr("tools.strings_tools.shutil.which", lambda name: None)
+        r = floss_extract("/tmp/x.exe")
+        assert r["success"] is False
+        assert "flare-floss" in r["error"]
+
+    def test_floss_invokes_binary(self, monkeypatch):
+        from tools.strings_tools import floss_extract
+        monkeypatch.setattr("tools.strings_tools.shutil.which", lambda name: "/usr/local/bin/floss")
+        captured = {}
+        monkeypatch.setattr("tools.strings_tools.run",
+                            lambda cmd, **kw: captured.setdefault("cmd", cmd) or {"success": True})
+        floss_extract("/tmp/x.exe", min_length=10)
+        assert captured["cmd"][0] == "/usr/local/bin/floss"
+        assert "-n" in captured["cmd"]
+        assert "10" in captured["cmd"]
+        assert "/tmp/x.exe" in captured["cmd"]
+
+    def test_floss_refuses_evidence_output_path(self):
+        from tools.strings_tools import floss_extract
+        with pytest.raises(ValueError):
+            floss_extract("/tmp/x.exe", output_path="/mnt/rd01/out.json")

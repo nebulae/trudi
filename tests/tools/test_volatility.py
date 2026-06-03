@@ -59,6 +59,41 @@ class TestSymbolPathFlag:
         assert not sym_path.startswith("/opt/volatility3")
 
 
+class TestVolSymbolCheck:
+    def test_nonexistent_image_returns_failure(self, mock_run):
+        from tools.volatility import vol_symbol_check
+        r = vol_symbol_check("/nonexistent/path/image.img")
+        assert r["success"] is False
+        assert r["symbols_ready"] is False
+        assert "not found" in r["note"].lower()
+        assert mock_run.call_count == 0  # no subprocess spawned
+
+    def test_tilde_path_nonexistent_returns_failure(self, mock_run):
+        from tools.volatility import vol_symbol_check
+        r = vol_symbol_check("~/nonexistent_image_xyz_abc.img")
+        assert r["success"] is False
+        assert "~" not in r["note"] or r["success"] is False  # expanded path in note
+
+    def test_existing_image_returns_expanded_path(self, mock_run, tmp_path):
+        from tools.volatility import vol_symbol_check
+        img = tmp_path / "memory.img"
+        img.write_bytes(b"\x00" * 1024)
+        r = vol_symbol_check(str(img))
+        assert r["success"] is True
+        assert r["image"] == str(img)
+
+    def test_existing_image_with_tilde_returns_expanded_path(self, mock_run):
+        from unittest.mock import patch
+        from tools.volatility import vol_symbol_check
+        expanded = "/home/trin/cases/memory.img"
+        with patch("tools.volatility.os.path.expanduser", return_value=expanded), \
+             patch("tools.volatility.os.path.exists", return_value=True):
+            r = vol_symbol_check("~/cases/memory.img")
+        assert r["success"] is True
+        assert r["image"] == expanded  # resolved path, not tilde path
+        assert "~" not in r["image"]
+
+
 class TestProcessPlugins:
     def test_vol_pslist(self, mock_run, mock_run_progress):
         from tools.volatility import vol_pslist
@@ -135,13 +170,25 @@ class TestProcessPlugins:
         vol_handles(IMG)
         assert "windows.handles" in get_cmd(mock_run)
 
-    def test_vol_handles_with_pid_and_type(self, mock_run):
+    def test_vol_handles_with_pid(self, mock_run):
         from tools.volatility import vol_handles
-        vol_handles(IMG, pid=100, object_type="File")
+        vol_handles(IMG, pid=100)
         cmd = get_cmd(mock_run)
         assert "--pid" in cmd
-        assert "--object-type" in cmd
-        assert "File" in cmd
+
+    def test_vol_handles_does_not_accept_object_type(self):
+        # Regression: windows.handles only supports --pid/--offset. The old
+        # object_type kwarg was passed as --object-type which Vol3 rejects.
+        import inspect
+        from tools.volatility import vol_handles
+        sig = inspect.signature(vol_handles)
+        assert "object_type" not in sig.parameters
+
+    def test_vol_handles_never_emits_object_type_flag(self, mock_run):
+        from tools.volatility import vol_handles
+        vol_handles(IMG, pid=100)
+        cmd = get_cmd(mock_run)
+        assert "--object-type" not in cmd
 
     def test_vol_ldrmodules(self, mock_run):
         from tools.volatility import vol_ldrmodules
@@ -237,8 +284,18 @@ class TestMalfindAndInjection:
 
     def test_vol_malfind_with_dump(self, mock_run, tmp_path):
         from tools.volatility import vol_malfind
-        vol_malfind(IMG, dump=True, output_dir=str(tmp_path / "dumps"))
-        assert "--dump" in get_cmd(mock_run)
+        out = str(tmp_path / "dumps")
+        vol_malfind(IMG, dump=True, output_dir=out)
+        cmd = get_cmd(mock_run)
+        # -o must appear BEFORE the plugin name
+        assert "-o" in cmd
+        assert "--output-dir" not in cmd
+        o_idx = cmd.index("-o")
+        plugin_idx = cmd.index("windows.malfind")
+        assert o_idx < plugin_idx
+        # --dump is a plugin flag and must appear AFTER the plugin name
+        assert "--dump" in cmd
+        assert cmd.index("--dump") > plugin_idx
 
     def test_vol_malfind_evidence_output_blocked(self, mock_run):
         from tools.volatility import vol_malfind
@@ -357,6 +414,9 @@ class TestFilesystemPlugins:
         cmd = get_cmd(mock_run)
         assert "windows.dumpfiles" in cmd
         assert "--virtaddr" in cmd
+        assert "-o" in cmd
+        assert "--output-dir" not in cmd
+        assert cmd.index("-o") < cmd.index("windows.dumpfiles")
 
     def test_vol_dumpfiles_evidence_blocked(self):
         from tools.volatility import vol_dumpfiles
@@ -383,7 +443,11 @@ class TestFilesystemPlugins:
     def test_vol_memmap_dump(self, mock_run, tmp_path):
         from tools.volatility import vol_memmap
         vol_memmap(IMG, pid=42, dump=True, output_dir=str(tmp_path))
-        assert "--dump" in get_cmd(mock_run)
+        cmd = get_cmd(mock_run)
+        assert "--dump" in cmd
+        assert "-o" in cmd
+        assert "--output-dir" not in cmd
+        assert cmd.index("-o") < cmd.index("windows.memmap")
 
     def test_vol_memmap_evidence_blocked(self):
         from tools.volatility import vol_memmap
@@ -444,7 +508,10 @@ class TestMiscWindowsPlugins:
     def test_vol_timeliner_with_output(self, mock_run, tmp_path):
         from tools.volatility import vol_timeliner
         vol_timeliner(IMG, output_dir=str(tmp_path))
-        assert "--output-dir" in get_cmd(mock_run)
+        cmd = get_cmd(mock_run)
+        assert "-o" in cmd
+        assert "--output-dir" not in cmd
+        assert cmd.index("-o") < cmd.index("timeliner")
 
     def test_vol_timeliner_evidence_blocked(self):
         from tools.volatility import vol_timeliner

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# trudi-dashboard — persistent multi-case TRUDI trace dashboard.
+#
+# Long-running, independent of the MCP server. Picks up traces from every
+# case under $TRUDI_CASES_ROOT (default ~/cases); the case + trace dropdown
+# in the dashboard UI populates from /_dashboard/api/cases.
+#
+# Usage:
+#   trudi-dashboard                       # ~/cases on port 8765
+#   trudi-dashboard --port 9090
+#   trudi-dashboard --cases-root /data/cases
+#
+# Environment:
+#   TRUDI_CASES_ROOT      default cases root (fallback: ~/cases)
+#   TRUDI_DASHBOARD_PORT  default port       (fallback: 8765)
+
+set -euo pipefail
+
+TRUDI_DIR="${TRUDI_DIR:-$HOME/trudi}"
+VENV_PY="${VENV_PY:-$HOME/.venv/bin/python3}"
+
+if [ ! -x "$VENV_PY" ]; then
+    VENV_PY="$(command -v python3)"
+fi
+
+cd "$TRUDI_DIR"
+exec "$VENV_PY" -m dashboard.serve "$@"

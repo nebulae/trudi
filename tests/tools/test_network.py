@@ -89,31 +89,35 @@ class TestNgrepSearch:
 
 
 class TestTcpdumpExtractIps:
-    def test_extracts_unique_ips(self):
+    def test_extracts_unique_ips(self, mock_run):
         from tools.network import tcpdump_extract_ips
-        fake_output = (
-            b"IP 192.168.1.1.443 > 10.0.0.5.56789\n"
-            b"IP 192.168.1.1.443 > 10.0.0.6.56790\n"
-            b"IP 172.16.1.100.80 > 10.0.0.5.56791\n"
-        )
-        with patch("subprocess.run") as mock_sub:
-            mock_sub.return_value = MagicMock(
-                returncode=0, stdout=fake_output, stderr=b""
-            )
-            r = tcpdump_extract_ips(PCAP)
+        mock_run.return_value = {
+            "success": True,
+            "stdout": (
+                "IP 192.168.1.1.443 > 10.0.0.5.56789\n"
+                "IP 192.168.1.1.443 > 10.0.0.6.56790\n"
+                "IP 172.16.1.100.80 > 10.0.0.5.56791\n"
+            ),
+            "stderr": "",
+            "exit_code": 0,
+            "_trudi_call_id": 1,
+        }
+        r = tcpdump_extract_ips(PCAP)
         assert r["success"] is True
         assert "192.168.1.1" in r["unique_ips"]
         assert "10.0.0.5" in r["unique_ips"]
         assert r["count"] >= 3
 
-    def test_deduplicates_ips(self):
+    def test_deduplicates_ips(self, mock_run):
         from tools.network import tcpdump_extract_ips
-        fake_output = b"192.168.1.1 192.168.1.1 192.168.1.1\n"
-        with patch("subprocess.run") as mock_sub:
-            mock_sub.return_value = MagicMock(
-                returncode=0, stdout=fake_output, stderr=b""
-            )
-            r = tcpdump_extract_ips(PCAP)
+        mock_run.return_value = {
+            "success": True,
+            "stdout": "192.168.1.1 192.168.1.1 192.168.1.1\n",
+            "stderr": "",
+            "exit_code": 0,
+            "_trudi_call_id": 1,
+        }
+        r = tcpdump_extract_ips(PCAP)
         assert r["unique_ips"].count("192.168.1.1") == 1
 
 

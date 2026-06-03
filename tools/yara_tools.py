@@ -4,6 +4,7 @@ import glob
 from typing import Optional
 from fastmcp import FastMCP
 from core.paths import assert_output_safe
+from core import output_safe
 
 mcp = FastMCP("yara")
 
@@ -37,6 +38,7 @@ def _match_to_dict(match) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
     """
     Scan a single file with YARA rules.
@@ -58,6 +60,7 @@ def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def yara_scan_directory(
     directory: str,
     rules_path: str,
@@ -108,6 +111,7 @@ def yara_scan_directory(
 
 
 @mcp.tool()
+@output_safe
 def yara_scan_process_memory(
     dump_file: str,
     rules_path: str,
@@ -121,6 +125,7 @@ def yara_scan_process_memory(
 
 
 @mcp.tool()
+@output_safe
 def yara_compile_check(rules_path: str) -> dict:
     """
     Compile and validate a YARA rule file without scanning anything.
@@ -134,6 +139,7 @@ def yara_compile_check(rules_path: str) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def yara_scan_memory_image(
     image_path: str,
     rules_path: str,
@@ -162,6 +168,7 @@ def yara_scan_memory_image(
 
 
 @mcp.tool()
+@output_safe
 def yara_scan_strings(inline_rule: str, file_path: str) -> dict:
     """
     Scan a file using an inline YARA rule string.

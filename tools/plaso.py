@@ -2,13 +2,14 @@
 import os
 from typing import Optional
 from fastmcp import FastMCP
-from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
+from core import run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("plaso")
 
 
 @mcp.tool()
+@output_safe
 def plaso_create_timeline(
     evidence_path: str,
     storage_file: str,
@@ -22,7 +23,6 @@ def plaso_create_timeline(
     parsers: comma-separated parser names to limit scope (omit for all parsers).
     Note: Full disk images take 1-6 hours depending on size. Use filters to scope.
     """
-    assert_output_safe(storage_file)
     cmd = ["log2timeline.py", "--storage-file", storage_file, f"--timezone={timezone}"]
     if parsers:
         cmd += ["--parsers", parsers]
@@ -31,6 +31,7 @@ def plaso_create_timeline(
 
 
 @mcp.tool()
+@output_safe
 def plaso_create_targeted(
     evidence_path: str,
     storage_file: str,
@@ -45,7 +46,6 @@ def plaso_create_targeted(
         WindowsRegistryCurrentControlSet, WindowsMFT, WindowsRecycleBin,
         WindowsScheduledTasks, WindowsUserShellFolders
     """
-    assert_output_safe(storage_file)
     cmd = [
         "log2timeline.py",
         "--storage-file", storage_file,
@@ -57,6 +57,7 @@ def plaso_create_targeted(
 
 
 @mcp.tool()
+@output_safe
 def plaso_export_csv(
     storage_file: str,
     output_csv: str,
@@ -68,7 +69,6 @@ def plaso_export_csv(
     time_filter: e.g. "date > '2023-01-20' AND date < '2023-01-30'"
     query_filter: additional psort query filter expression.
     """
-    assert_output_safe(output_csv)
     cmd = ["psort.py", "-o", "l2tcsv", "-w", output_csv, storage_file]
     if time_filter:
         cmd.append(time_filter)
@@ -78,13 +78,13 @@ def plaso_export_csv(
 
 
 @mcp.tool()
+@output_safe
 def plaso_export_json(
     storage_file: str,
     output_json: str,
     time_filter: Optional[str] = None,
 ) -> dict:
     """Export a Plaso storage file to JSON Lines format."""
-    assert_output_safe(output_json)
     cmd = ["psort.py", "-o", "json_line", "-w", output_json, storage_file]
     if time_filter:
         cmd.append(time_filter)
@@ -92,12 +92,14 @@ def plaso_export_json(
 
 
 @mcp.tool()
+@output_safe
 def plaso_info(storage_file: str) -> dict:
     """Display metadata and statistics about a Plaso storage file (event counts, parsers used)."""
     return run(["pinfo.py", storage_file], timeout=120)
 
 
 @mcp.tool()
+@output_safe
 def plaso_filter_incident_window(
     storage_file: str,
     output_csv: str,
@@ -108,13 +110,13 @@ def plaso_filter_incident_window(
     Export events within an incident time window to CSV.
     start_utc / end_utc: ISO format e.g. '2023-01-24 00:00:00'
     """
-    assert_output_safe(output_csv)
     time_filter = f"date > '{start_utc}' AND date < '{end_utc}'"
     cmd = ["psort.py", "-o", "l2tcsv", "-w", output_csv, storage_file, time_filter]
     return run(cmd, timeout=VOL_TIMEOUT*6)
 
 
 @mcp.tool()
+@output_safe
 def plaso_list_parsers() -> dict:
     """List all available Plaso parsers and plugins."""
     return run(["log2timeline.py", "--parsers", "list"], timeout=30)

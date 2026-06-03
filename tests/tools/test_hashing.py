@@ -58,6 +58,42 @@ class TestHashFile:
         assert r["file"] == test_file
 
 
+class TestHashFileCache:
+    @pytest.fixture(autouse=True)
+    def isolate_cache(self, tmp_path, monkeypatch):
+        """Redirect the hash cache to a per-test tmp path and reset module state."""
+        import tools.hashing as h
+        cache_path = str(tmp_path / "hash_cache.json")
+        monkeypatch.setattr(h, "_HASH_CACHE_PATH", cache_path)
+        monkeypatch.setattr(h, "_HASH_CACHE", None)
+        yield
+        monkeypatch.setattr(h, "_HASH_CACHE", None)
+
+    def test_first_call_is_cache_miss(self, test_file):
+        r = hash_file(test_file)
+        assert r["success"] is True
+        assert r.get("cache_hit") is False
+
+    def test_second_call_is_cache_hit(self, test_file):
+        r1 = hash_file(test_file)
+        r2 = hash_file(test_file)
+        assert r1["cache_hit"] is False
+        assert r2["cache_hit"] is True
+        assert r1["sha256"] == r2["sha256"]
+
+    def test_cache_invalidated_when_mtime_changes(self, test_file):
+        import os, time
+        r1 = hash_file(test_file)
+        time.sleep(1.1)
+        with open(test_file, "wb") as f:
+            f.write(KNOWN_CONTENT + b"-modified")
+        # Touch mtime so it definitely changes
+        os.utime(test_file, None)
+        r2 = hash_file(test_file)
+        assert r2["cache_hit"] is False
+        assert r2["sha256"] != r1["sha256"]
+
+
 class TestHashDirectory:
     def test_hashes_all_files(self, tmp_path):
         for i in range(3):
@@ -126,6 +162,44 @@ class TestVerifyEvidenceHash:
     def test_file_not_found(self):
         r = verify_evidence_hash("/nonexistent.img")
         assert r["success"] is False
+
+
+class TestVerifyEvidenceHashState:
+    """Hash verification: successful verify_evidence_hash records state in the execution log."""
+
+    def test_state_recorded_on_success(self, test_file, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("HV-001", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            verify_evidence_hash(test_file)
+        entries = [e for e in l._entries if e.get("tool") == "hash_verify_evidence_hash"]
+        assert len(entries) == 1
+        assert entries[0]["conclusion"].startswith("VERIFIED:")
+        assert test_file in entries[0]["conclusion"]
+
+    def test_has_evidence_been_verified_returns_true(self, test_file, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("HV-002", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            verify_evidence_hash(test_file)
+        assert l.has_evidence_been_verified(test_file) is True
+
+    def test_has_evidence_been_verified_returns_false_for_unverified(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("HV-003", str(tmp_path / "trace.json"))
+        assert l.has_evidence_been_verified("/never/seen.img") is False
+
+    def test_state_not_recorded_on_failure(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("HV-004", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            verify_evidence_hash("/nonexistent.img")
+        entries = [e for e in l._entries if e.get("tool") == "hash_verify_evidence_hash"]
+        assert entries == []
 
 
 class TestSsdeepTools:

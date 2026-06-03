@@ -4,6 +4,13 @@ import re
 import json
 from fastmcp import FastMCP
 from core.paths import REASON_TIMEOUT
+from core.timeout import with_tool_timeout
+
+# Watchdog budget: HTTP timeout (REASON_TIMEOUT, 90s default) handles a stalled
+# local LLM; the watchdog gives a 30s buffer for parsing, trace-logging, and
+# directive extraction after the HTTP response returns. Without this, a hang in
+# the post-HTTP code path looks like a silent stall to the agent.
+_REASON_WATCHDOG = REASON_TIMEOUT + 30
 
 mcp = FastMCP("reasoning")
 
@@ -25,6 +32,18 @@ REASON_MODEL     = os.environ.get("REASON_MODEL") or ""
 # Default models per backend
 _DEFAULT_CLAUDE_MODEL      = "claude-haiku-4-5-20251001"
 _DEFAULT_COMPAT_MODEL      = "fdtn-ai/Foundation-Sec-8B-Reasoning"
+
+# Per-call max_tokens budgets. Doubled from the original 1024/2048 defaults
+# after observing reason.plan truncated outputs (conclusion ended mid-sentence,
+# directives empty). Override via env if a different backend or task profile
+# needs a different envelope.
+MAX_TOKENS_PLAN           = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_PLAN")           or "4096")
+MAX_TOKENS_HYPOTHESIZE    = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_HYPOTHESIZE")    or "2048")
+MAX_TOKENS_EVALUATE       = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_EVALUATE")       or "4096")
+MAX_TOKENS_CITE_CHECK     = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_CITE_CHECK")     or "2048")
+MAX_TOKENS_CONFIDENCE     = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_CONFIDENCE")     or "2048")
+MAX_TOKENS_AUDIT_FINDINGS = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_AUDIT_FINDINGS") or "4096")
+MAX_TOKENS_SYNTHESIZE     = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_SYNTHESIZE")     or "4096")
 
 
 def _active_backend() -> str:
@@ -51,7 +70,7 @@ _EMPTY_DIRECTIVES: dict = {
 
 _DIRECTIVES_INSTRUCTION = """\
 
-Output the DIRECTIVES block FIRST — before your analysis. \
+Write your full analysis first, then end your response with the DIRECTIVES block. \
 No markdown bold, no code fences, no // comments, plain text only:
 DIRECTIVES:
 {
@@ -62,8 +81,7 @@ DIRECTIVES:
   "max_depth": "targeted",
   "next_hypothesis_triggers": []
 }
-Replace the example values with your actual recommendations, \
-then write your full analysis after. \
+Replace the example values with your actual recommendations. \
 Tool names must use TRUDI MCP format: namespace.tool \
 (e.g. vol.psscan, vol.cmdline, vol.netscan, vol.dlllist, vol.malfind, \
 ez.amcacheparser, ez.appcompatcacheparser, ez.mftecmd, ez.evtxecmd, \
@@ -74,8 +92,9 @@ Do not invent tool names outside this list."""
 
 _EVIDENCE_AUDIT_INSTRUCTION = """\
 
-Output the EVIDENCE_AUDIT block FIRST — before your analysis, after DIRECTIVES. \
-List each major claim in the finding:
+Write your full analysis first. Then include the EVIDENCE_AUDIT block, \
+followed by the DIRECTIVES block at the very end. \
+List each major claim in the finding in EVIDENCE_AUDIT:
 EVIDENCE_AUDIT:
 [
   {
@@ -135,22 +154,27 @@ def _parse_evidence_audit(text: str) -> list:
 
 
 def _parse_directives(text: str) -> dict:
-    """Extract the DIRECTIVES JSON block from model output. Returns {} on any failure."""
+    """Extract the DIRECTIVES JSON block from model output.
+
+    Returns _EMPTY_DIRECTIVES template on any parse failure so callers always
+    have the expected keys and can check priority_tools without KeyError.
+    On successful parse, missing keys are filled from the template.
+    """
     if not text:
-        return {}
+        return _EMPTY_DIRECTIVES.copy()
     match = re.search(
         r"\*{0,2}DIRECTIVES\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\{.*?\})\s*(?:```)?",
         text,
         re.DOTALL | re.IGNORECASE,
     )
     if not match:
-        return {}
+        return _EMPTY_DIRECTIVES.copy()
     raw = match.group(1)
     raw = re.sub(r"\s*//[^\n]*", "", raw)  # strip // comments
     try:
-        return json.loads(raw)
+        return {**_EMPTY_DIRECTIVES, **json.loads(raw)}
     except (json.JSONDecodeError, ValueError):
-        return {}
+        return _EMPTY_DIRECTIVES.copy()
 
 
 def _cap_lines(text: str, max_lines: int) -> str:
@@ -164,19 +188,35 @@ def _cap_lines(text: str, max_lines: int) -> str:
 
 # ── Backend implementations ───────────────────────────────────────────────────
 
-def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dict:
+def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str,
+                hypothesis_id: str = "",
+                input_call_ids: list[int] | None = None) -> dict:
     """Call the Anthropic Claude API with prompt caching on the system prompt."""
     import anthropic
-    _empty = {"success": False, "conclusion": "", "directives": {}}
+    _inputs = {
+        "user_message": user,
+        "max_tokens": max_tokens,
+        "system_prompt_kind": _tool_name,
+    }
+    _empty = {"success": False, "conclusion": "", "directives": {},
+              "input_tokens": 0, "output_tokens": 0, "inputs": _inputs}
+    if hypothesis_id:
+        _empty["hypothesis_id"] = hypothesis_id
 
     if not ANTHROPIC_API_KEY:
         result = {**_empty, "error": "ANTHROPIC_API_KEY not set — add it to .env"}
-        _log_reason(_tool_name, result)
+        _log_reason(_tool_name, result, input_call_ids=input_call_ids)
         return result
 
     model = REASON_MODEL or _DEFAULT_CLAUDE_MODEL
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        from core.execution_log import log as _elog
+        _elog.record_call_initiated(_tool_name, "claude", {"model": model},
+                                    input_call_ids=input_call_ids)
+    except Exception as _e:
+        import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=REASON_TIMEOUT)
         resp = client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -191,28 +231,65 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str) -> dic
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
         conclusion = _strip_evidence_audit(_strip_directives(raw))
-        result = {"success": True, "conclusion": conclusion, "directives": directives,
-                  "evidence_audit": evidence_audit}
-        _log_reason(_tool_name, result)
+        result = {
+            "success": True,
+            "conclusion": conclusion,
+            "directives": directives,
+            "evidence_audit": evidence_audit,
+            "input_tokens": getattr(resp.usage, "input_tokens", 0),
+            "output_tokens": getattr(resp.usage, "output_tokens", 0),
+            "inputs": _inputs,
+        }
+        if hypothesis_id:
+            result["hypothesis_id"] = hypothesis_id
+        _log_reason(_tool_name, result, input_call_ids=input_call_ids)
         return result
     except Exception as e:
+        try:
+            from core.execution_log import log as _elog
+            _elog.record_call_abandoned(_tool_name, str(e))
+        except Exception as _log_err:
+            # Best-effort — we're already in the failure path. Surface to
+            # stderr so the double-fault isn't completely silent. Not
+            # routed through record_system_error to avoid recursion if the
+            # trace itself is the cause.
+            import sys as _sys
+            print(f"[TRUDI WARN] reason record_call_abandoned failed during "
+                  f"{_tool_name} error: {_log_err!r}", file=_sys.stderr)
         result = {**_empty, "error": str(e)}
-        _log_reason(_tool_name, result)
+        _log_reason(_tool_name, result, input_call_ids=input_call_ids)
         return result
 
 
-def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str) -> dict:
+def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str,
+                       hypothesis_id: str = "",
+                       input_call_ids: list[int] | None = None) -> dict:
     """Call any OpenAI-compatible endpoint (OpenAI, Foundation-Sec vLLM, Ollama, etc.)."""
     import httpx
-    _empty = {"success": False, "conclusion": "", "directives": {}}
+    _inputs = {
+        "user_message": user,
+        "max_tokens": max_tokens,
+        "system_prompt_kind": _tool_name,
+    }
+    _empty = {"success": False, "conclusion": "", "directives": {},
+              "input_tokens": 0, "output_tokens": 0, "inputs": _inputs}
+    if hypothesis_id:
+        _empty["hypothesis_id"] = hypothesis_id
 
     if not REASON_URL:
         result = {**_empty, "error": "REASON_URL not set for openai-compat backend"}
-        _log_reason(_tool_name, result)
+        _log_reason(_tool_name, result, input_call_ids=input_call_ids)
         return result
 
     model = REASON_MODEL or _DEFAULT_COMPAT_MODEL
     headers = {"Authorization": f"Bearer {REASON_API_KEY}"} if REASON_API_KEY else {}
+    try:
+        from core.execution_log import log as _elog
+        _elog.record_call_initiated(_tool_name, "openai-compat",
+                                    {"model": model, "url": REASON_URL},
+                                    input_call_ids=input_call_ids)
+    except Exception as _e:
+        import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
     try:
         resp = httpx.post(
             f"{REASON_URL.rstrip('/')}/v1/chat/completions",
@@ -228,34 +305,63 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str)
             timeout=REASON_TIMEOUT,
         )
         resp.raise_for_status()
-        choice = resp.json()["choices"][0]["message"]
+        body = resp.json()
+        choice = body["choices"][0]["message"]
         raw = choice.get("content") or choice.get("reasoning") or ""
         if not raw:
             result = {**_empty, "error": "Model returned empty response"}
-            _log_reason(_tool_name, result)
+            _log_reason(_tool_name, result, input_call_ids=input_call_ids)
             return result
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
         conclusion = _strip_evidence_audit(_strip_directives(raw))
-        result = {"success": True, "conclusion": conclusion, "directives": directives,
-                  "evidence_audit": evidence_audit}
-        _log_reason(_tool_name, result)
+        usage = body.get("usage", {})
+        result = {
+            "success": True,
+            "conclusion": conclusion,
+            "directives": directives,
+            "evidence_audit": evidence_audit,
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "inputs": _inputs,
+        }
+        if hypothesis_id:
+            result["hypothesis_id"] = hypothesis_id
+        _log_reason(_tool_name, result, input_call_ids=input_call_ids)
         return result
     except Exception as e:
+        try:
+            from core.execution_log import log as _elog
+            _elog.record_call_abandoned(_tool_name, str(e))
+        except Exception as _log_err:
+            # Best-effort — we're already in the failure path. Surface to
+            # stderr so the double-fault isn't completely silent. Not
+            # routed through record_system_error to avoid recursion if the
+            # trace itself is the cause.
+            import sys as _sys
+            print(f"[TRUDI WARN] reason record_call_abandoned failed during "
+                  f"{_tool_name} error: {_log_err!r}", file=_sys.stderr)
         result = {**_empty, "error": str(e)}
-        _log_reason(_tool_name, result)
+        _log_reason(_tool_name, result, input_call_ids=input_call_ids)
         return result
 
 
-def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "") -> dict:
-    """Dispatch to the active reasoning backend."""
+def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "",
+         hypothesis_id: str = "",
+         input_call_ids: list[int] | None = None) -> dict:
+    """Dispatch to the active reasoning backend. `input_call_ids` is propagated
+    through to the eventual record_reason_call so the reason entry carries its
+    agent-declared upstream lineage as a foreign key."""
     backend = _active_backend()
     if backend == "claude":
-        return _ask_claude(system, user, max_tokens, _tool_name)
-    return _ask_openai_compat(system, user, max_tokens, _tool_name)
+        return _ask_claude(system, user, max_tokens, _tool_name, hypothesis_id,
+                           input_call_ids=input_call_ids)
+    return _ask_openai_compat(system, user, max_tokens, _tool_name, hypothesis_id,
+                              input_call_ids=input_call_ids)
 
 
-def _log_reason(tool_name: str, result: dict) -> None:
+def _log_reason(tool_name: str, result: dict,
+                input_call_ids: list[int] | None = None) -> None:
     try:
         from core.execution_log import log
         log.record_reason_call(
@@ -264,9 +370,29 @@ def _log_reason(tool_name: str, result: dict) -> None:
             conclusion=result.get("conclusion", ""),
             directives=result.get("directives", {}),
             evidence_audit=result.get("evidence_audit"),
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
+            hypothesis_id=result.get("hypothesis_id", ""),
+            inputs=result.get("inputs"),
+            input_call_ids=input_call_ids,
         )
+    except Exception as e:
+        import sys
+        print(f"[TRUDI WARN] _log_reason failed for {tool_name}: {e}", file=sys.stderr)
+
+
+def _next_hypothesis_id() -> str:
+    """Generate a stable, sequential hypothesis_id like H0001.
+    Used to build the hypothesis→finding lineage rendered in trace.md."""
+    try:
+        from core.execution_log import log
+        existing = sum(
+            1 for e in log._entries
+            if e.get("type") == "reason_call" and e.get("hypothesis_id")
+        )
+        return f"H{existing + 1:04d}"
     except Exception:
-        pass
+        return "H0001"
 
 
 # ── System prompts ────────────────────────────────────────────────────────────
@@ -281,7 +407,16 @@ _PLAN_SYS = (
     "5. Red flags that would change the priority order mid-investigation\n\n"
     "Be specific and opinionated. The investigator will follow this plan.\n"
     "The DIRECTIVES block is the primary output — populate priority_tools with the "
-    "first 3-5 concrete tool calls the investigator should run, in order."
+    "first 3-5 concrete tool calls the investigator should run, in order.\n\n"
+    "EXHAUSTIVE COLLECTION: for each artifact category in the plan, the tool sequence "
+    "must collect ALL instances, not just the first. Explicitly name: all registry hive "
+    "variants needed (SOFTWARE, SYSTEM, SAM, NTUSER.DAT per user profile), all event "
+    "log channels relevant to the TTP, all HTTP session types (Cookie headers, URL auth "
+    "params: login=, email=, user=, gausr=, Y=, T=), all browser profiles present. "
+    "If the case description includes a suspect list (class roster, employee directory, "
+    "user accounts), include a cross-reference step as a named plan item — it is "
+    "mandatory, not optional. The plan is incomplete if it names an identity-bearing "
+    "artifact category without specifying the full collection sequence for that category."
     + _DIRECTIVES_INSTRUCTION
 )
 
@@ -294,7 +429,15 @@ _HYPOTHESIZE_SYS = (
     "Keep your response concise and structured.\n"
     "The DIRECTIVES block is the primary output — populate priority_tools with the "
     "tools that would most efficiently confirm or rule out the top hypothesis, and "
-    "next_hypothesis_triggers with conditions that should prompt re-evaluation."
+    "next_hypothesis_triggers with conditions that should prompt re-evaluation.\n"
+    "IMPORTANT: priority_tools MUST be non-empty if your conclusion names specific "
+    "search patterns, artifact types, or investigative steps. Convert every concrete "
+    "recommendation in your conclusion text into a priority_tools entry. Examples: "
+    "if you write 'search for tuckrige in Yahoo traffic', add "
+    "net.ngrep_search(pattern='tuckrige'); if you write 'check Yahoo Mail cookies', "
+    "add net.ngrep_search(pattern='Cookie: Y=') and net.tcpdump_extract_http. "
+    "An empty priority_tools alongside a conclusion that contains investigative "
+    "recommendations is invalid — the structured directive must reflect the text."
     + _DIRECTIVES_INSTRUCTION
 )
 
@@ -321,6 +464,12 @@ _EVALUATE_SYS = (
     "correctly describe the behaviour being claimed.\n"
     "   - Port numbers, VAD tags, and memory structure claims must match "
     "established forensic facts — flag if unverifiable.\n"
+    "   - NEGATIVE FINDING SCRUTINY: if the finding states that something was NOT "
+    "found (no persistence, no injection, identity unknown, no C2 traffic), verify "
+    "that the absence claim was reached by exhaustive collection — not by a single "
+    "tool pass that returned empty. A single ngrep returning no results does not mean "
+    "the artifact is absent; a single vol.malfind pass does not clear all processes. "
+    "Flag CHALLENGED if the negative claim is based on incomplete collection coverage.\n"
     "6. ADDITIONAL INVESTIGATION — what specific tool run would upgrade this "
     "finding from its current confidence tier?\n"
     "7. VERDICT: SUPPORTED / CHALLENGED / UNCERTAIN — one-line rationale.\n\n"
@@ -344,9 +493,18 @@ _SYNTHESIZE_SYS = (
     "2. CONTRADICTIONS — findings that conflict with each other\n"
     "3. TIER VIOLATIONS — findings written as CONFIRMED/HIGH where the evidence "
     "is SUSPECTED or UNCONFIRMED tier; list each with the correct tier\n"
-    "4. OVERCLAIMED MECHANISMS — technical explanations that aren't supported "
+    "4. TIER CONTRADICTIONS — any two findings that make the same mechanistic "
+    "claim (same attacker action, same host, same credential) at different "
+    "confidence tiers; list each pair as TIER_CONTRADICTION with the correct tier\n"
+    "5. OVERCLAIMED MECHANISMS — technical explanations that aren't supported "
     "by cited evidence (e.g. YARA hit stated as 'confirmed execution')\n"
-    "5. MISSING INVESTIGATION — what should have been checked but wasn't\n\n"
+    "6. MISSING INVESTIGATION — what should have been checked but wasn't, including:\n"
+    "   - EVIDENCE EXHAUSTION: for each artifact category named in findings, was the "
+    "full category collected (all hives, all log channels, all HTTP cookie types, all "
+    "memory regions) or only sampled? Flag as BLOCKER if a conclusion of 'identity "
+    "unknown' or 'no evidence found' was reached without exhausting the artifact "
+    "category. Flag as BLOCKER if found identities were never cross-referenced against "
+    "a suspect list that was available in the case context.\n\n"
     "Return a structured punch list. Mark BLOCKERS (must fix before report is "
     "written) separately from ADVISORIES (should note, not blocking)."
     + _DIRECTIVES_INSTRUCTION
@@ -356,7 +514,9 @@ _SYNTHESIZE_SYS = (
 # ── MCP tools ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def reason_plan(case_description: str, evidence_available: str) -> dict:
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_plan")
+def reason_plan(case_description: str, evidence_available: str,
+                input_call_ids: list[int] | None = None) -> dict:
     """
     Generate a prioritized investigation plan before deep forensic tool runs.
     Call this after the fast pre-enumeration block (SYSTEM hive, SAM hive,
@@ -364,34 +524,100 @@ def reason_plan(case_description: str, evidence_available: str) -> dict:
 
     case_description: incident description — host, timeframe, known suspicion
     evidence_available: concatenated output from the pre-enumeration tools
+    input_call_ids: REQUIRED (after genesis grace) — list of _trudi_call_id
+        values for the pre-enumeration tool calls that produced the evidence
+        you're passing in. The `lineage_required` gate enforces this.
     """
     capped = _cap_lines(evidence_available, 300)
     user = f"CASE:\n{case_description}\n\nEVIDENCE AVAILABLE:\n{capped}"
-    return _ask(_PLAN_SYS, user, max_tokens=2048, _tool_name="reason_plan")
+    return _ask(_PLAN_SYS, user, max_tokens=MAX_TOKENS_PLAN, _tool_name="reason_plan",
+                input_call_ids=input_call_ids)
 
 
 @mcp.tool()
-def reason_hypothesize(observation: str, context: str = "") -> dict:
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_hypothesize")
+def reason_hypothesize(observation: str, evidence: str = "", context: str = "",
+                       input_call_ids: list[int] | None = None) -> dict:
     """
     Generate ranked alternative hypotheses for a forensic observation before
     committing to an interpretation. Call this when a finding has multiple
     plausible explanations — malicious and benign.
 
-    observation: the raw forensic artifact or behaviour (e.g. "cmd.exe PID 5024
-                 spawned from orphaned PPID 2748 in Session 0 at 17:15 UTC")
-    context: any relevant case context (OS, known attacker TTPs, timeline)
+    observation: the single behaviour or artifact being explained (one sentence,
+                 e.g. "cmd.exe PID 5024 spawned from orphaned PPID 2748 in Session 0")
+    evidence: raw artifact list supporting the observation (tool output excerpts,
+              event IDs, timestamps — paste verbatim)
+    context: broader case context (OS, known attacker TTPs, incident timeline)
+    input_call_ids: REQUIRED — list of _trudi_call_id values for the tool calls
+        that produced the observation/evidence.
     """
     user = f"OBSERVATION:\n{observation}"
+    if evidence:
+        user += f"\n\nSUPPORTING EVIDENCE:\n{evidence}"
     if context:
         user += f"\n\nCASE CONTEXT:\n{context}"
-    return _ask(_HYPOTHESIZE_SYS, user, max_tokens=1024, _tool_name="reason_hypothesize")
+    hid = _next_hypothesis_id()
+    result = _ask(_HYPOTHESIZE_SYS, user, max_tokens=MAX_TOKENS_HYPOTHESIZE,
+                  _tool_name="reason_hypothesize", hypothesis_id=hid,
+                  input_call_ids=input_call_ids)
+
+    # ── Server-side conclusion parser (Fix G) ───────────────────────────────
+    # If the model's prose conclusion names specific search patterns or
+    # investigative steps but the structured directives.priority_tools is
+    # empty, extract the recommendations from the prose and synthesise
+    # priority_tools entries. Defense in depth — keeps the agent moving
+    # even when the model forgets to populate the directives block.
+    try:
+        import re as _re
+        directives = result.get("directives") or {}
+        existing_tools = list(directives.get("priority_tools") or [])
+        if not existing_tools:
+            conclusion = result.get("conclusion", "") or ""
+            extracted: list[str] = []
+            # Pattern A: explicit "search for X" / "grep for X" / "look for X"
+            for m in _re.finditer(
+                r"(?:search|grep|look|check|hunt|extract|filter)\s+(?:for\s+|the\s+)?[`\"']?([A-Za-z0-9_@:.\-=/]{3,40})[`\"']?",
+                conclusion, _re.IGNORECASE,
+            ):
+                term = m.group(1).strip().rstrip(".,;:")
+                if term and term.lower() not in {"the", "and", "for", "from"}:
+                    extracted.append(f"net.ngrep_search(pattern={term!r})")
+            # Pattern B: explicit tool names mentioned (net.X, vol.X, ez.X, ...)
+            for m in _re.finditer(
+                r"\b((?:net|vol|tsk|ez|strings|hash|carve|enrich|misc|yara|correlate|af|live)\.[a-z_]+)",
+                conclusion,
+            ):
+                tool_name = m.group(1)
+                if tool_name not in extracted:
+                    extracted.append(tool_name)
+            # Pattern C: HTTP cookie / session keywords trigger session inventory
+            if _re.search(r"\b(cookie|session|webmail|gmail|yahoo|hotmail|aol|facebook)\b",
+                          conclusion, _re.IGNORECASE):
+                if "net.http_session_inventory" not in extracted:
+                    extracted.append("net.http_session_inventory")
+            # Cap to avoid runaway
+            extracted = extracted[:12]
+            if extracted:
+                directives["priority_tools"] = extracted
+                directives.setdefault("_extracted_from_conclusion", True)
+                result["directives"] = directives
+                # Annotate the result so callers know these were auto-extracted
+                result["_priority_tools_auto_extracted"] = True
+    except Exception as _ge:
+        import sys as _sys
+        print(f"[TRUDI WARN] hypothesize conclusion post-processor failed: {_ge}",
+              file=_sys.stderr)
+
+    return result
 
 
 @mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_evaluate_finding")
 def reason_evaluate_finding(
     finding: str,
     supporting_evidence: str,
     case_context: str = "",
+    input_call_ids: list[int] | None = None,
 ) -> dict:
     """
     Adversarially challenge a specific conclusion before it goes into the report.
@@ -401,15 +627,447 @@ def reason_evaluate_finding(
     finding: the specific conclusion being made
     supporting_evidence: the artifacts and tool output that support it
     case_context: broader investigation context
+    input_call_ids: REQUIRED — list of _trudi_call_id values that produced
+        the supporting_evidence you're passing in.
+
+    When the model returns VERDICT: CHALLENGED, this function auto-emits a
+    `self_correction` trace entry so the moment is captured as a first-class
+    audit event even when the agent abandons the claim without ever calling
+    record_finding (the only path that previously emitted self_correction).
+
+    Reformulation depth gate: tracks how many times the same normalized finding
+    description has been through evaluate_finding recently without intervening
+    new tool calls. Refuses on the third consecutive reformulation so the agent
+    stops defending a finding that isn't improving with new evidence.
     """
+    import re
+    # ── Reformulation depth gate ────────────────────────────────────────────
+    # Normalize the finding for comparison: lowercase, collapse whitespace,
+    # drop punctuation. Then walk recent trace entries to count prior
+    # evaluate_finding calls on the same normalized description that occurred
+    # without an intervening tool_call producing new evidence.
+    def _normalize(s: str) -> str:
+        return re.sub(r"[\s\W_]+", " ", (s or "").lower()).strip()
+    try:
+        from core.execution_log import log
+        norm_now = _normalize(finding)[:200]
+        if norm_now:
+            recent = log._entries[-60:] if len(log._entries) > 60 else log._entries
+            prior_evals = 0
+            new_tool_calls_since_last_eval = 0
+            saw_eval = False
+            for entry in reversed(recent):
+                t = entry.get("type")
+                if t == "reason_call" and entry.get("tool") == "reason_evaluate_finding":
+                    blob = entry.get("conclusion", "") + " " + str(entry.get("inputs", {}).get("user_message", ""))
+                    if norm_now and norm_now in _normalize(blob)[:5000]:
+                        prior_evals += 1
+                        saw_eval = True
+                elif t == "tool_call" and entry.get("success"):
+                    if not saw_eval:
+                        new_tool_calls_since_last_eval += 1
+            # 2 prior reformulations + no new tool evidence between latest eval
+            # and now = refuse the third attempt.
+            if prior_evals >= 2 and new_tool_calls_since_last_eval == 0:
+                refusal_msg = (
+                    f"Reformulation depth gate refused this evaluate_finding call: "
+                    f"the same finding description has been evaluated {prior_evals} "
+                    f"time(s) recently with no new tool evidence collected between "
+                    f"attempts. Reformulating a finding that isn't acquiring new "
+                    f"supporting evidence is a rumination spiral. Run new tool "
+                    f"calls to gather fresh evidence, OR park this finding "
+                    f"(record as UNCONFIRMED with note about the reformulation "
+                    f"loop) and explore a different finding direction relevant "
+                    f"to the case question."
+                )
+                # Emit a self_correction so the loop break is auditable
+                try:
+                    log.record_self_correction(
+                        trigger="reformulation_depth_gate",
+                        prior_belief=f"Repeated evaluate on: {finding[:200]}",
+                        new_belief=("Refused by reformulation depth gate — explore "
+                                    "different finding directions or run new tools."),
+                        evidence=refusal_msg[:300],
+                        linked_call_id=0,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "success": False,
+                    "error": refusal_msg,
+                    "gate": "reformulation_depth_limit",
+                    "prior_evaluations": prior_evals,
+                    "new_tool_calls_since_last_eval": new_tool_calls_since_last_eval,
+                }
+    except Exception as _gate_e:
+        # Gate must never break the underlying call — log and continue
+        import sys as _sys
+        print(f"[TRUDI WARN] reformulation_depth_limit check failed: {_gate_e}",
+              file=_sys.stderr)
+
     user = f"FINDING:\n{finding}\n\nSUPPORTING EVIDENCE:\n{supporting_evidence}"
     if case_context:
         user += f"\n\nCASE CONTEXT:\n{case_context}"
-    return _ask(_EVALUATE_SYS, user, max_tokens=2048, _tool_name="reason_evaluate_finding")
+    result = _ask(_EVALUATE_SYS, user, max_tokens=MAX_TOKENS_EVALUATE,
+                  _tool_name="reason_evaluate_finding",
+                  input_call_ids=input_call_ids)
+    conclusion = result.get("conclusion", "") or ""
+    verdict_match = re.search(
+        r"VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)", conclusion, re.IGNORECASE,
+    )
+    if verdict_match and verdict_match.group(1).upper() == "CHALLENGED":
+        try:
+            from core.execution_log import log
+            # _log_reason has already written the reason_call entry. Find its
+            # call_id so the self_correction can carry an explicit FK.
+            eval_cid = 0
+            for entry in reversed(log._entries):
+                if (entry.get("type") == "reason_call"
+                        and entry.get("tool") == "reason_evaluate_finding"):
+                    eval_cid = int(entry.get("call_id") or 0)
+                    break
+            log.record_self_correction(
+                trigger="evaluate_challenged",
+                prior_belief=f"Attempted to assert: {finding[:200]}",
+                new_belief=("reason.evaluate_finding returned CHALLENGED — claim "
+                            "refuted before recording. Address the weaknesses or "
+                            "downgrade the tier before re-evaluating."),
+                evidence=conclusion[:300],
+                linked_call_id=eval_cid,
+            )
+        except Exception as e:  # noqa: BLE001
+            import sys
+            print(f"[TRUDI WARN] auto-self_correction emit failed: {e}", file=sys.stderr)
+    return result
+
+
+_CITE_CHECK_SYS = (
+    "You are a citation auditor. Given a forensic FINDING and its SUPPORTING_EVIDENCE, "
+    "verify that every concrete claim in the finding has a citation in the evidence.\n\n"
+    "Concrete claims include: file paths, IP addresses, port numbers, timestamps, "
+    "process names, account names, registry keys, hash values, event IDs, port numbers, "
+    "service names, MITRE ATT&CK technique IDs, and specific numeric quantities.\n\n"
+    "For each concrete claim, decide:\n"
+    "  CITED — the same value appears in supporting_evidence with a tool name or "
+    "field reference (e.g. 'vol.psscan: PID=5024', '/mnt/rd01/Windows/Temp/X.exe').\n"
+    "  UNCITED — the value appears in the finding but not in supporting_evidence, "
+    "OR appears without a tool/field reference.\n\n"
+    "Output format (strict, no markdown bolding, no code fences):\n"
+    "CITE_CHECK:\n"
+    "{\n"
+    '  "verdict": "ALL_CITED" | "UNCITED_CLAIMS_PRESENT" | "INSUFFICIENT_EVIDENCE",\n'
+    '  "cited_claims": ["claim text 1", "claim text 2", ...],\n'
+    '  "uncited_claims": ["claim text X", "claim text Y", ...],\n'
+    '  "rationale": "one-sentence summary"\n'
+    "}\n\n"
+    "Choose INSUFFICIENT_EVIDENCE only when supporting_evidence is empty or contains "
+    "no actual artifact data. A finding with no concrete claims gets ALL_CITED with "
+    "empty arrays."
+)
+
+
+def _parse_cite_check(raw: str) -> dict:
+    """Extract CITE_CHECK JSON block from model output."""
+    import re
+    if not raw:
+        return {"verdict": "INSUFFICIENT_EVIDENCE", "cited_claims": [],
+                "uncited_claims": [], "rationale": "empty model output"}
+    match = re.search(
+        r"\*{0,2}CITE_CHECK\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\{.*\})\s*(?:```)?",
+        raw, re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return {"verdict": "INSUFFICIENT_EVIDENCE", "cited_claims": [],
+                "uncited_claims": [], "rationale": "no CITE_CHECK block found"}
+    text = re.sub(r"\s*//[^\n]*", "", match.group(1))
+    try:
+        parsed = json.loads(text)
+        return {
+            "verdict": parsed.get("verdict", "INSUFFICIENT_EVIDENCE"),
+            "cited_claims": parsed.get("cited_claims", []) or [],
+            "uncited_claims": parsed.get("uncited_claims", []) or [],
+            "rationale": parsed.get("rationale", ""),
+        }
+    except (json.JSONDecodeError, ValueError):
+        return {"verdict": "INSUFFICIENT_EVIDENCE", "cited_claims": [],
+                "uncited_claims": [], "rationale": "malformed CITE_CHECK JSON"}
 
 
 @mcp.tool()
-def reason_synthesize(findings: str, investigation_summary: str = "") -> dict:
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_cite_check")
+def reason_cite_check(finding: str, supporting_evidence: str,
+                      input_call_ids: list[int] | None = None) -> dict:
+    """
+    Proactively verify every concrete claim in `finding` is backed by a citation
+    in `supporting_evidence`. Call before record_finding to surface uncited
+    claims while you can still gather evidence.
+
+    finding: the conclusion text as you intend to record it.
+    supporting_evidence: the tool output excerpts and citations that back it.
+    input_call_ids: REQUIRED — list of _trudi_call_id values that produced
+        the supporting_evidence.
+
+    Returns: verdict (ALL_CITED / UNCITED_CLAIMS_PRESENT / INSUFFICIENT_EVIDENCE),
+             cited_claims, uncited_claims, rationale.
+    """
+    user = f"FINDING:\n{finding}\n\nSUPPORTING_EVIDENCE:\n{supporting_evidence}"
+    result = _ask(_CITE_CHECK_SYS, user, max_tokens=MAX_TOKENS_CITE_CHECK,
+                  _tool_name="reason_cite_check",
+                  input_call_ids=input_call_ids)
+    if result.get("success"):
+        parsed = _parse_cite_check(result.get("conclusion", ""))
+        result.update(parsed)
+    return result
+
+
+_CONFIDENCE_SCORE_SYS = (
+    "You are a forensic confidence-tier scorer. Given a finding and its "
+    "supporting evidence, decide the appropriate confidence tier:\n\n"
+    "  CONFIRMED — multiple independent forensic artifacts directly support "
+    "the claim (e.g. MFT record + Prefetch + EVTX 7045 all agreeing); the "
+    "claim is technically verified and the alternative explanations are ruled out.\n"
+    "  LIKELY    — a single high-quality artifact supports the claim "
+    "(e.g. a definitive EVTX entry, an authoritative VT detection ratio); "
+    "alternative explanations are weak but not eliminated.\n"
+    "  SUSPECTED — indirect or pattern-based evidence (e.g. anomalous timing, "
+    "YARA hit alone, suspicious filename); plausible alternatives remain.\n"
+    "  UNCONFIRMED — inference or expectation only; no direct artifact.\n\n"
+    "Apply hard rules:\n"
+    "  - YARA hit ALONE is NEVER above SUSPECTED.\n"
+    "  - A claim that the supporting evidence does not literally contain is "
+    "UNCONFIRMED.\n"
+    "  - Mechanism claims (how something happened) need direct artifact "
+    "support or drop to SUSPECTED.\n"
+    "  - Negative findings (we didn't see X) are UNCONFIRMED unless an "
+    "exhaustive search method is cited.\n\n"
+    "Output format (strict, no markdown bolding, no code fences):\n"
+    "CONFIDENCE_SCORE:\n"
+    "{\n"
+    '  "tier": "CONFIRMED" | "LIKELY" | "SUSPECTED" | "UNCONFIRMED",\n'
+    '  "score": 0.0,\n'
+    '  "rationale": "one-line justification citing the evidence",\n'
+    '  "downgrade_reasons": ["reason 1", "reason 2"]\n'
+    "}\n\n"
+    "score is a 0.0–1.0 numeric confidence: ≥0.85 CONFIRMED, 0.60–0.84 LIKELY, "
+    "0.30–0.59 SUSPECTED, <0.30 UNCONFIRMED. downgrade_reasons is non-empty "
+    "only when the tier is below the agent's apparent intent."
+)
+
+
+def _parse_confidence_score(raw: str) -> dict:
+    """Extract CONFIDENCE_SCORE JSON from model output."""
+    if not raw:
+        return {"tier": "UNCONFIRMED", "score": 0.0,
+                "rationale": "empty model output", "downgrade_reasons": []}
+    match = re.search(
+        r"\*{0,2}CONFIDENCE_SCORE\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\{.*\})\s*(?:```)?",
+        raw, re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return {"tier": "UNCONFIRMED", "score": 0.0,
+                "rationale": "no CONFIDENCE_SCORE block found",
+                "downgrade_reasons": []}
+    text = re.sub(r"\s*//[^\n]*", "", match.group(1))
+    try:
+        parsed = json.loads(text)
+        tier = (parsed.get("tier") or "UNCONFIRMED").upper()
+        if tier not in ("CONFIRMED", "LIKELY", "SUSPECTED", "UNCONFIRMED"):
+            tier = "UNCONFIRMED"
+        score_val = parsed.get("score", 0.0)
+        try:
+            score = float(score_val)
+        except (TypeError, ValueError):
+            score = 0.0
+        return {
+            "tier": tier,
+            "score": max(0.0, min(1.0, score)),
+            "rationale": parsed.get("rationale", ""),
+            "downgrade_reasons": parsed.get("downgrade_reasons", []) or [],
+        }
+    except (json.JSONDecodeError, ValueError):
+        return {"tier": "UNCONFIRMED", "score": 0.0,
+                "rationale": "malformed CONFIDENCE_SCORE JSON",
+                "downgrade_reasons": []}
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_confidence_score")
+def reason_confidence_score(finding: str, supporting_evidence: str,
+                            intended_tier: str = "",
+                            input_call_ids: list[int] | None = None) -> dict:
+    """
+    Score a finding's confidence tier from its supporting evidence. Use BEFORE
+    record_finding for any tier above SUSPECTED — this grounds the tier choice
+    in evidence properties rather than agent assertion.
+
+    finding: the claim text.
+    supporting_evidence: tool output excerpts + citations that back the claim.
+    intended_tier: optional — what tier the agent was about to use. The reviewer
+                   compares its scoring to this and flags downgrades.
+    input_call_ids: REQUIRED — list of _trudi_call_id values that produced
+        the supporting_evidence.
+
+    Returns: tier (CONFIRMED/LIKELY/SUSPECTED/UNCONFIRMED), score (0.0–1.0),
+             rationale, downgrade_reasons.
+    """
+    user = (
+        f"FINDING:\n{finding}\n\n"
+        f"SUPPORTING_EVIDENCE:\n{supporting_evidence}"
+    )
+    if intended_tier:
+        user += f"\n\nAGENT_INTENDED_TIER: {intended_tier.upper()}"
+    result = _ask(_CONFIDENCE_SCORE_SYS, user, max_tokens=MAX_TOKENS_CONFIDENCE,
+                  _tool_name="reason_confidence_score",
+                  input_call_ids=input_call_ids)
+    if result.get("success"):
+        parsed = _parse_confidence_score(result.get("conclusion", ""))
+        result.update(parsed)
+    return result
+
+
+_AUDIT_FINDINGS_SYS = (
+    "You audit a forensic investigation's execution trace for unrecorded findings.\n\n"
+    "You receive:\n"
+    "  - A list of recent NARRATIONS (assistant analysis text written to the trace).\n"
+    "  - A list of RECORDED_FINDINGS (structured finding entries currently in the trace).\n\n"
+    "Identify factual claims in the narrations that should have been recorded as "
+    "structured `finding` entries but weren't. Look for:\n"
+    "  - Specific IOCs (file paths, IPs, hashes, process names, account names).\n"
+    "  - Attribution claims (this is attacker tool X, this is technique Y).\n"
+    "  - Mechanism claims (X happened because of Y).\n"
+    "  - Confirmed compromise statements.\n"
+    "  - Exfiltration / lateral-movement / persistence confirmations.\n\n"
+    "Skip narrations that:\n"
+    "  - Just restate a finding that's already in RECORDED_FINDINGS (same IOC + same claim).\n"
+    "  - Describe planned next steps without stating facts.\n"
+    "  - Express reasoning, hypotheses, or directives only.\n\n"
+    "Output format (strict, no markdown bolding, no code fences):\n"
+    "AUDIT_FINDINGS:\n"
+    "[\n"
+    "  {\n"
+    "    \"narration_call_id\": 819,\n"
+    "    \"narration_excerpt\": \"first ~200 chars of the narration\",\n"
+    "    \"suggested_finding\": {\n"
+    "      \"description\": \"…\",\n"
+    "      \"suggested_confidence\": \"CONFIRMED|LIKELY|SUSPECTED|UNCONFIRMED\",\n"
+    "      \"suggested_source\": \"tool that produced it, e.g. vol.netscan\"\n"
+    "    },\n"
+    "    \"suggested_linked_call_id\": 815,\n"
+    "    \"rationale\": \"one-line why this should be a structured finding\"\n"
+    "  }\n"
+    "]\n\n"
+    "Return an empty array [] if all factual claims are already represented in "
+    "RECORDED_FINDINGS. Conservative is better than aggressive — if in doubt, skip."
+)
+
+
+def _parse_audit_findings(raw: str) -> list[dict]:
+    """Extract AUDIT_FINDINGS JSON array from model output."""
+    if not raw:
+        return []
+    match = re.search(
+        r"\*{0,2}AUDIT_FINDINGS\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\[.*\])\s*(?:```)?",
+        raw, re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return []
+    text = re.sub(r"\s*//[^\n]*", "", match.group(1))
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_audit_findings")
+def reason_audit_findings(narration_window: int = 60,
+                          input_call_ids: list[int] | None = None) -> dict:
+    """
+    Audit the live trace for unrecorded findings.
+
+    Reads the most-recent `narration_window` investigation_narration entries
+    and all current `finding` entries from the execution log, sends them to
+    the reason backend, and returns model-judged candidates for factual
+    claims that should be recorded as structured findings but aren't.
+
+    narration_window: how many of the most recent narrations to audit.
+
+    Returns:
+      candidates: list of {
+        narration_call_id, narration_excerpt,
+        suggested_finding: {description, suggested_confidence, suggested_source},
+        suggested_linked_call_id, rationale,
+      }
+      summary: {total_narrations, recorded_findings, candidate_count}
+    """
+    from core.execution_log import log
+    narrations = [
+        e for e in log._entries if e.get("type") == "investigation_narration"
+    ]
+    if narration_window and len(narrations) > narration_window:
+        narrations = narrations[-narration_window:]
+    findings_entries = [e for e in log._entries if e.get("type") == "finding"]
+
+    if not narrations:
+        return {
+            "success": True,
+            "candidates": [],
+            "summary": {
+                "total_narrations": 0,
+                "recorded_findings": len(findings_entries),
+                "candidate_count": 0,
+            },
+        }
+
+    # Trim narrations/findings for the prompt
+    nars_payload = [
+        {"call_id": e.get("call_id"),
+         "content": (e.get("content") or "")[:1200],
+         "input_call_ids": e.get("input_call_ids") or []}
+        for e in narrations
+    ]
+    finds_payload = [
+        {"call_id": e.get("call_id"),
+         "description": (e.get("description") or "")[:300],
+         "confidence": e.get("confidence", ""),
+         "linked_call_id": e.get("linked_call_id", 0)}
+        for e in findings_entries
+    ]
+    user = (
+        f"NARRATIONS ({len(nars_payload)} most recent):\n"
+        f"{json.dumps(nars_payload, indent=2)}\n\n"
+        f"RECORDED_FINDINGS ({len(finds_payload)}):\n"
+        f"{json.dumps(finds_payload, indent=2)}"
+    )
+    # If no explicit input_call_ids supplied, auto-derive from the call_ids
+    # of every narration + finding we just consumed — keeps the lineage
+    # complete without forcing the agent to list them all.
+    derived_ids = input_call_ids or [
+        e.get("call_id") for e in (narrations + findings_entries)
+        if e.get("call_id")
+    ]
+    result = _ask(_AUDIT_FINDINGS_SYS, user, max_tokens=MAX_TOKENS_AUDIT_FINDINGS,
+                  _tool_name="reason_audit_findings",
+                  input_call_ids=derived_ids)
+    candidates = []
+    if result.get("success"):
+        candidates = _parse_audit_findings(result.get("conclusion", ""))
+    return {
+        **result,
+        "candidates": candidates,
+        "summary": {
+            "total_narrations": len(narrations),
+            "recorded_findings": len(findings_entries),
+            "candidate_count": len(candidates),
+        },
+    }
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_synthesize")
+def reason_synthesize(findings: str, investigation_summary: str = "",
+                      input_call_ids: list[int] | None = None) -> dict:
     """
     Cross-finding consistency and completeness check. Call this before writing
     the final report. Identifies logical gaps, contradictions, overclaimed
@@ -417,8 +1075,218 @@ def reason_synthesize(findings: str, investigation_summary: str = "") -> dict:
 
     findings: newline-separated list of confirmed findings
     investigation_summary: brief summary of tools run and scope covered
+    input_call_ids: REQUIRED — typically the call_ids of every CONFIRMED/LIKELY
+        finding entry in the trace (the synthesis aggregates them all).
+
+    Only callable in the Report phase. Requires that the most recent dair_assess
+    call returned current_phase="Report"; otherwise refused.
     """
+    from core.execution_log import log
+    recent_dair = None
+    for e in reversed(log._entries):
+        if e.get("type") == "dair_call":
+            recent_dair = e
+            break
+    if recent_dair is None:
+        return {
+            "success": False,
+            "error": (
+                "No dair_assess call found in execution trace. Call dair_assess "
+                "to establish phase state before reason.synthesize."
+            ),
+        }
+    phase = recent_dair.get("current_phase", "")
+    if phase != "Report":
+        return {
+            "success": False,
+            "error": (
+                f"reason.synthesize is only callable in Report phase. Current "
+                f"DAIR phase: {phase or 'unknown'}. Continue the DAIR loop until "
+                f"dair_assess returns next_phase='Report'."
+            ),
+        }
     user = f"FINDINGS:\n{findings}"
     if investigation_summary:
         user += f"\n\nINVESTIGATION COVERAGE:\n{investigation_summary}"
-    return _ask(_SYNTHESIZE_SYS, user, max_tokens=2048, _tool_name="reason_synthesize")
+    # Auto-derive lineage from every finding cid if not supplied
+    derived_ids = input_call_ids or [
+        e.get("call_id") for e in log._entries
+        if e.get("type") == "finding" and e.get("call_id")
+    ]
+    return _ask(_SYNTHESIZE_SYS, user, max_tokens=MAX_TOKENS_SYNTHESIZE,
+                _tool_name="reason_synthesize",
+                input_call_ids=derived_ids)
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_pre_report_check")
+def reason_pre_report_check() -> dict:
+    """
+    Verify all mandatory investigation checkpoints before writing the report.
+    Reads the live execution trace and returns blocking_issues (must resolve)
+    and warnings (should review). Do not write the report if ready_to_report
+    is False.
+
+    Call this after reason.synthesize and before writing any report section.
+    """
+    from core.execution_log import log
+    entries = log._entries
+
+    has_plan = any(
+        e["type"] == "reason_call" and e.get("tool") == "reason_plan"
+        for e in entries
+    )
+    has_synthesize = any(
+        e["type"] == "reason_call" and e.get("tool") == "reason_synthesize"
+        for e in entries
+    )
+    has_hypothesize = any(
+        e["type"] == "reason_call" and e.get("tool") == "reason_hypothesize"
+        for e in entries
+    )
+    evaluate_calls = sum(
+        1 for e in entries
+        if e["type"] == "reason_call" and e.get("tool") == "reason_evaluate_finding"
+    )
+    confirmed_findings = sum(
+        1 for e in entries
+        if e["type"] == "finding" and e.get("confidence", "").upper() == "CONFIRMED"
+    )
+    tool_calls = sum(1 for e in entries if e["type"] == "tool_call")
+    total_input_tokens = sum(e.get("input_tokens", 0) for e in entries if e["type"] == "reason_call")
+    total_output_tokens = sum(e.get("output_tokens", 0) for e in entries if e["type"] == "reason_call")
+
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    if len(entries) == 0:
+        issues.append("Execution trace is empty — start_execution_log was not called before tool runs")
+    if not has_plan:
+        issues.append("reason.plan was not called — mandatory before tool selection")
+    if not has_synthesize:
+        issues.append("reason.synthesize was not called — mandatory before writing report")
+
+    # Case-question gate: if any reason.plan call carries an explicit case_question
+    # (passed by the agent via the case_description), or if a CASE_QUESTION: marker
+    # appears in any agent_message / dair_call case_context, require at least one
+    # CONFIRMED or LIKELY finding whose description plausibly addresses that question.
+    case_question = ""
+    cq_re = re.compile(r"CASE[_ ]QUESTION:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+    for e in entries:
+        for field in ("conclusion", "content", "case_context", "case_description"):
+            blob = (e.get(field) or "") if isinstance(e.get(field), str) else ""
+            m = cq_re.search(blob)
+            if m:
+                case_question = m.group(1).strip()
+                break
+        if case_question:
+            break
+    if case_question:
+        # Tokenise the question into content words (drop stopwords/short tokens).
+        stop = {"the", "and", "for", "with", "from", "this", "that", "what", "who",
+                "where", "when", "why", "how", "did", "does", "was", "were", "are",
+                "is", "of", "to", "on", "in", "at", "by", "an", "a", "as", "be",
+                "or", "if", "it", "any"}
+        q_tokens = [t for t in re.findall(r"[A-Za-z0-9_]+", case_question.lower())
+                    if len(t) >= 3 and t not in stop]
+        addressed = False
+        if q_tokens:
+            for e in entries:
+                if e.get("type") != "finding":
+                    continue
+                tier = (e.get("confidence") or "").upper()
+                if tier not in {"CONFIRMED", "LIKELY"}:
+                    continue
+                desc_l = (e.get("description") or "").lower()
+                # Address = at least half the content tokens appear in the finding
+                hits = sum(1 for t in q_tokens if t in desc_l)
+                if hits >= max(2, len(q_tokens) // 2):
+                    addressed = True
+                    break
+        if not addressed:
+            issues.append(
+                f"Case question \"{case_question}\" is not directly addressed by "
+                f"any CONFIRMED or LIKELY finding. Record a finding whose description "
+                f"answers the question (mentioning the question's key entities) "
+                f"before transitioning to Report."
+            )
+
+    if evaluate_calls < confirmed_findings:
+        warnings.append(
+            f"{confirmed_findings} CONFIRMED finding(s) but only {evaluate_calls} "
+            "reason.evaluate_finding call(s) — each CONFIRMED finding requires evaluation"
+        )
+    if not has_hypothesize:
+        warnings.append(
+            "reason.hypothesize was never called — required for any unusual artifact, "
+            "orphaned process, or unexpected network connection"
+        )
+
+    # Unrecorded-findings audit: model-based scan of narrations vs. structured
+    # finding entries. Surfaces facts the agent wrote in chat but never
+    # promoted via misc.record_finding.
+    audit_summary: dict = {}
+    try:
+        audit = reason_audit_findings()
+        audit_summary = audit.get("summary", {}) or {}
+        n = int(audit_summary.get("candidate_count") or 0)
+        if n > 0:
+            cands = audit.get("candidates", [])[:5]
+            cids = ", ".join(f"#{c.get('narration_call_id')}" for c in cands)
+            warnings.append(
+                f"{n} narration(s) appear to contain factual claims that aren't "
+                f"recorded as structured `finding` entries (first 5: {cids}). "
+                f"Call misc.record_finding (or misc.record_agent_message with "
+                f"findings=[…]) for each, or restate to remove the fact language."
+            )
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] audit_findings failed: {_e}", file=_sys.stderr)
+
+    ready = len(issues) == 0
+
+    # Persist ready_to_report as a reason_call trace entry so downstream gates
+    # (misc.export_execution_log) can read the verdict from the audit log
+    # instead of relying on the agent re-narrating the result. The conclusion
+    # leads with a parseable marker so the gate's regex is trivial.
+    conclusion = (
+        f"READY_TO_REPORT: {'true' if ready else 'false'}\n"
+        f"BLOCKING_ISSUES ({len(issues)}): {'; '.join(issues) if issues else 'none'}\n"
+        f"WARNINGS ({len(warnings)}): {'; '.join(warnings) if warnings else 'none'}"
+    )
+    try:
+        # Auto-derive lineage: the pre-report check by nature reads the entire
+        # trace, so its upstream lineage is "every finding + every synthesize".
+        synthesized_cids = [
+            e.get("call_id") for e in entries
+            if e.get("call_id") and (
+                e.get("type") == "finding"
+                or (e.get("type") == "reason_call" and e.get("tool") == "reason_synthesize")
+            )
+        ]
+        log.record_reason_call(
+            tool="reason_pre_report_check",
+            success=True,
+            conclusion=conclusion,
+            directives={},
+            input_call_ids=synthesized_cids or None,
+        )
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] pre_report_check trace write failed: {_e}", file=_sys.stderr)
+
+    return {
+        "ready_to_report": ready,
+        "blocking_issues": issues,
+        "warnings": warnings,
+        "trace_entries": len(entries),
+        "tool_calls": tool_calls,
+        "confirmed_findings": confirmed_findings,
+        "evaluate_finding_calls": evaluate_calls,
+        "has_plan": has_plan,
+        "has_synthesize": has_synthesize,
+        "has_hypothesize": has_hypothesize,
+        "audit_summary": audit_summary,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+    }
