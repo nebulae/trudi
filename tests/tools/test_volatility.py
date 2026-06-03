@@ -170,13 +170,25 @@ class TestProcessPlugins:
         vol_handles(IMG)
         assert "windows.handles" in get_cmd(mock_run)
 
-    def test_vol_handles_with_pid_and_type(self, mock_run):
+    def test_vol_handles_with_pid(self, mock_run):
         from tools.volatility import vol_handles
-        vol_handles(IMG, pid=100, object_type="File")
+        vol_handles(IMG, pid=100)
         cmd = get_cmd(mock_run)
         assert "--pid" in cmd
-        assert "--object-type" in cmd
-        assert "File" in cmd
+
+    def test_vol_handles_does_not_accept_object_type(self):
+        # Regression: windows.handles only supports --pid/--offset. The old
+        # object_type kwarg was passed as --object-type which Vol3 rejects.
+        import inspect
+        from tools.volatility import vol_handles
+        sig = inspect.signature(vol_handles)
+        assert "object_type" not in sig.parameters
+
+    def test_vol_handles_never_emits_object_type_flag(self, mock_run):
+        from tools.volatility import vol_handles
+        vol_handles(IMG, pid=100)
+        cmd = get_cmd(mock_run)
+        assert "--object-type" not in cmd
 
     def test_vol_ldrmodules(self, mock_run):
         from tools.volatility import vol_ldrmodules

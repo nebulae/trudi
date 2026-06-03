@@ -133,3 +133,29 @@ class TestResolvePathCI:
         from tools.strings_tools import strings_extract
         result = strings_extract(str(real))
         assert "stderr" in result
+
+
+class TestFlossExtract:
+    def test_floss_missing_binary(self, monkeypatch):
+        from tools.strings_tools import floss_extract
+        monkeypatch.setattr("tools.strings_tools.shutil.which", lambda name: None)
+        r = floss_extract("/tmp/x.exe")
+        assert r["success"] is False
+        assert "flare-floss" in r["error"]
+
+    def test_floss_invokes_binary(self, monkeypatch):
+        from tools.strings_tools import floss_extract
+        monkeypatch.setattr("tools.strings_tools.shutil.which", lambda name: "/usr/local/bin/floss")
+        captured = {}
+        monkeypatch.setattr("tools.strings_tools.run",
+                            lambda cmd, **kw: captured.setdefault("cmd", cmd) or {"success": True})
+        floss_extract("/tmp/x.exe", min_length=10)
+        assert captured["cmd"][0] == "/usr/local/bin/floss"
+        assert "-n" in captured["cmd"]
+        assert "10" in captured["cmd"]
+        assert "/tmp/x.exe" in captured["cmd"]
+
+    def test_floss_refuses_evidence_output_path(self):
+        from tools.strings_tools import floss_extract
+        with pytest.raises(ValueError):
+            floss_extract("/tmp/x.exe", output_path="/mnt/rd01/out.json")

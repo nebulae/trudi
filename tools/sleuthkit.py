@@ -1,18 +1,22 @@
 """The Sleuth Kit — filesystem navigation and timeline tools."""
+import shutil
 from typing import Optional
 from fastmcp import FastMCP
-from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
+from core import run, run_with_output_file, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
+from core.paths import assert_output_safe
 
 mcp = FastMCP("sleuthkit")
 
 
 @mcp.tool()
+@output_safe
 def tsk_mmls(image: str) -> dict:
     """Display partition table (MBR and GPT) — get sector offsets for mounting."""
     return run(["mmls", image], needs_sudo=True)
 
 
 @mcp.tool()
+@output_safe
 def tsk_fsstat(image: str, offset_sectors: Optional[int] = None) -> dict:
     """
     Filesystem metadata: NTFS version, cluster size, MFT offset, volume ID.
@@ -26,6 +30,7 @@ def tsk_fsstat(image: str, offset_sectors: Optional[int] = None) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def tsk_fls(
     image: str,
     offset_sectors: Optional[int] = None,
@@ -58,6 +63,7 @@ def tsk_fls(
 
 
 @mcp.tool()
+@output_safe
 def tsk_istat(image: str, inode: int, offset_sectors: Optional[int] = None) -> dict:
     """
     Display inode metadata: MAC times, size, allocated blocks, file type.
@@ -71,6 +77,7 @@ def tsk_istat(image: str, inode: int, offset_sectors: Optional[int] = None) -> d
 
 
 @mcp.tool()
+@output_safe
 def tsk_icat(
     image: str,
     inode: str,
@@ -85,8 +92,6 @@ def tsk_icat(
     recover_deleted: attempt recovery of deleted file data.
     slack_space: extract file slack space.
     """
-    from core.paths import assert_output_safe
-    assert_output_safe(output_path)
     cmd = ["icat"]
     if recover_deleted:
         cmd.append("-r")
@@ -95,34 +100,13 @@ def tsk_icat(
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd += [image, str(inode)]
-    # icat outputs to stdout — redirect via shell
-    result = run(cmd + [">", output_path], needs_sudo=True)
-    # fallback: run with proper redirection
-    import subprocess
-    full_cmd = ["sudo", "icat"]
-    if recover_deleted:
-        full_cmd.append("-r")
-    if slack_space:
-        full_cmd.append("-s")
-    if offset_sectors:
-        full_cmd += ["-o", str(offset_sectors)]
-    full_cmd += [image, str(inode)]
-    try:
-        with open(output_path, "wb") as f:
-            proc = subprocess.run(full_cmd, stdout=f, stderr=subprocess.PIPE, timeout=120)
-        return {
-            "success": proc.returncode == 0,
-            "stdout": f"Extracted to {output_path}",
-            "stderr": proc.stderr.decode("utf-8", errors="replace")[:4096],
-            "exit_code": proc.returncode,
-            "truncated": False,
-            "cmd": " ".join(full_cmd),
-        }
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1, "truncated": False, "cmd": ""}
+    return run_with_output_file(
+        cmd, output_path=output_path, mode="wb", timeout=120, needs_sudo=True,
+    )
 
 
 @mcp.tool()
+@output_safe
 def tsk_ils(
     image: str,
     offset_sectors: Optional[int] = None,
@@ -150,6 +134,7 @@ def tsk_ils(
 
 
 @mcp.tool()
+@output_safe
 def tsk_ffind(image: str, inode: int, offset_sectors: Optional[int] = None) -> dict:
     """Find the filename(s) for a given inode number."""
     cmd = ["ffind"]
@@ -160,6 +145,7 @@ def tsk_ffind(image: str, inode: int, offset_sectors: Optional[int] = None) -> d
 
 
 @mcp.tool()
+@output_safe
 def tsk_blkls(
     image: str,
     output_path: str,
@@ -171,31 +157,19 @@ def tsk_blkls(
     unallocated_only: extract only unallocated blocks (default — for carving).
     output_path: destination file for raw block data.
     """
-    from core.paths import assert_output_safe
-    assert_output_safe(output_path)
-    import subprocess
-    cmd = ["sudo", "blkls"]
+    cmd = ["blkls"]
     if unallocated_only:
         cmd.append("-A")
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd.append(image)
-    try:
-        with open(output_path, "wb") as f:
-            proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=VOL_TIMEOUT)
-        return {
-            "success": proc.returncode == 0,
-            "stdout": f"Blocks written to {output_path}",
-            "stderr": proc.stderr.decode("utf-8", errors="replace")[:4096],
-            "exit_code": proc.returncode,
-            "truncated": False,
-            "cmd": " ".join(cmd),
-        }
-    except Exception as e:
-        return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1, "truncated": False, "cmd": ""}
+    return run_with_output_file(
+        cmd, output_path=output_path, mode="wb", timeout=VOL_TIMEOUT, needs_sudo=True,
+    )
 
 
 @mcp.tool()
+@output_safe
 def tsk_recover(
     image: str,
     output_dir: str,
@@ -206,8 +180,6 @@ def tsk_recover(
     Bulk extract files from a disk image.
     include_unallocated: also recover deleted/unallocated files.
     """
-    from core.paths import assert_output_safe
-    assert_output_safe(output_dir)
     cmd = ["tsk_recover"]
     if include_unallocated:
         cmd.append("-e")
@@ -220,6 +192,7 @@ def tsk_recover(
 
 
 @mcp.tool()
+@output_safe
 def tsk_mactime(
     bodyfile: str,
     output_path: Optional[str] = None,
@@ -240,26 +213,14 @@ def tsk_mactime(
     if end_date:
         cmd.append(end_date)
     if output_path:
-        from core.paths import assert_output_safe
-        assert_output_safe(output_path)
-        import subprocess
-        try:
-            with open(output_path, "w") as f:
-                proc = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=VOL_TIMEOUT)
-            return {
-                "success": proc.returncode == 0,
-                "stdout": f"Timeline written to {output_path}",
-                "stderr": proc.stderr.decode("utf-8", errors="replace")[:4096],
-                "exit_code": proc.returncode,
-                "truncated": False,
-                "cmd": " ".join(cmd),
-            }
-        except Exception as e:
-            return {"success": False, "stdout": "", "stderr": str(e), "exit_code": -1, "truncated": False, "cmd": ""}
+        return run_with_output_file(
+            cmd, output_path=output_path, mode="w", timeout=VOL_TIMEOUT,
+        )
     return run(cmd, timeout=VOL_TIMEOUT)
 
 
 @mcp.tool()
+@output_safe
 def tsk_blkcat(image: str, block_number: int, offset_sectors: Optional[int] = None) -> dict:
     """Extract raw content of a specific data block."""
     cmd = ["blkcat"]
@@ -270,6 +231,7 @@ def tsk_blkcat(image: str, block_number: int, offset_sectors: Optional[int] = No
 
 
 @mcp.tool()
+@output_safe
 def tsk_blkstat(image: str, block_number: int, offset_sectors: Optional[int] = None) -> dict:
     """Display statistics on a specific data block (allocation status, containing file)."""
     cmd = ["blkstat"]
@@ -280,6 +242,7 @@ def tsk_blkstat(image: str, block_number: int, offset_sectors: Optional[int] = N
 
 
 @mcp.tool()
+@output_safe
 def tsk_blkcalc(image: str, block_number: int, offset_sectors: Optional[int] = None) -> dict:
     """Convert between disk and image block addresses."""
     cmd = ["blkcalc"]
@@ -290,18 +253,21 @@ def tsk_blkcalc(image: str, block_number: int, offset_sectors: Optional[int] = N
 
 
 @mcp.tool()
+@output_safe
 def tsk_mmcat(image: str, partition_slot: int) -> dict:
     """Output the contents of a partition slot (raw partition data)."""
     return run(["mmcat", image, str(partition_slot)], needs_sudo=True)
 
 
 @mcp.tool()
+@output_safe
 def tsk_mmstat(image: str) -> dict:
     """Display statistics about the volume system (disk layout metadata)."""
     return run(["mmstat", image], needs_sudo=True)
 
 
 @mcp.tool()
+@output_safe
 def tsk_hfind(
     hash_db: str,
     hash_value: str,
@@ -317,6 +283,7 @@ def tsk_hfind(
 
 
 @mcp.tool()
+@output_safe
 def tsk_sigfind(image: str, signature_hex: str, offset_sectors: Optional[int] = None) -> dict:
     """
     Find a hex byte signature in a disk image.
@@ -331,6 +298,7 @@ def tsk_sigfind(image: str, signature_hex: str, offset_sectors: Optional[int] = 
 
 
 @mcp.tool()
+@output_safe
 def tsk_sorter(
     image: str,
     output_dir: str,
@@ -342,8 +310,6 @@ def tsk_sorter(
     output_dir: destination for sorted file categories.
     category: limit to a specific category e.g. 'images', 'exec', 'audio', 'documents'.
     """
-    from core.paths import assert_output_safe
-    assert_output_safe(output_dir)
     cmd = ["sorter", "-d", output_dir]
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
@@ -354,6 +320,7 @@ def tsk_sorter(
 
 
 @mcp.tool()
+@output_safe
 def tsk_jls(image: str, offset_sectors: Optional[int] = None) -> dict:
     """
     List journal entries from an ext3/ext4 filesystem.
@@ -367,6 +334,7 @@ def tsk_jls(image: str, offset_sectors: Optional[int] = None) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def tsk_jcat(image: str, journal_inode: int, offset_sectors: Optional[int] = None) -> dict:
     """
     Output the contents of an ext3/ext4 journal entry by inode number.
@@ -377,3 +345,26 @@ def tsk_jcat(image: str, journal_inode: int, offset_sectors: Optional[int] = Non
         cmd += ["-o", str(offset_sectors)]
     cmd += [image, str(journal_inode)]
     return run(cmd, needs_sudo=True)
+
+
+@mcp.tool()
+@output_safe
+def tsk_indxparse(mft_path: str, output_path: Optional[str] = None) -> dict:
+    """
+    Parse NTFS $INDX records (directory index slack) using INDXParse.py.
+    Recovers deleted directory entries that MFTECmd and Vol3 miss.
+
+    mft_path: path to the $MFT file (or any file containing $INDX records).
+    output_path: optional output destination (analysis/exports/reports).
+    """
+    binary = shutil.which("INDXParse.py") or "/usr/local/bin/INDXParse.py"
+    cmd = [binary, "-d", "-f", mft_path]
+    result = run(cmd, timeout=600)
+    if output_path and result.get("success") and result.get("stdout"):
+        try:
+            with open(output_path, "w") as f:
+                f.write(result["stdout"])
+            result["output_path"] = output_path
+        except OSError as e:
+            result["write_error"] = str(e)
+    return result

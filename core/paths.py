@@ -1,5 +1,7 @@
 """Evidence path constants and read-only enforcement."""
+import inspect
 import os
+from functools import wraps
 from pathlib import Path
 
 # Paths that must never be written to
@@ -23,7 +25,12 @@ MAX_TOOL_OUTPUT_LINES = 150
 DEFAULT_TIMEOUT  = int(os.environ.get("TRUDI_DEFAULT_TIMEOUT")  or "300")
 VOL_TIMEOUT      = int(os.environ.get("TRUDI_VOL_TIMEOUT")      or "600")
 PLASO_TIMEOUT    = int(os.environ.get("TRUDI_PLASO_TIMEOUT")    or "21600")
-REASON_TIMEOUT   = int(os.environ.get("TRUDI_REASON_TIMEOUT")   or "120")
+REASON_TIMEOUT   = int(os.environ.get("TRUDI_REASON_TIMEOUT")   or "90")
+DAIR_TIMEOUT     = int(os.environ.get("TRUDI_DAIR_TIMEOUT")     or "120")
+# Watchdog budget for pure-Python hashing of large evidence files (memory raws,
+# multi-GB E01s). Subprocess hashers (ssdeep, hashdeep) inherit DEFAULT_TIMEOUT
+# from `core.executor.run`.
+HASH_TIMEOUT     = int(os.environ.get("TRUDI_HASH_TIMEOUT")     or "900")
 
 
 def is_evidence_path(path: str) -> bool:
@@ -43,6 +50,53 @@ def assert_output_safe(path: str) -> None:
             f"Output path '{path}' is inside a protected evidence directory. "
             "Write outputs to ./analysis/, ./exports/, or ./reports/ only."
         )
+
+
+# Common output-parameter names across tool modules. The @output_safe
+# decorator scans wrapped function signatures for any of these and validates
+# the value at call-time. Centralising this means tool bodies do not need to
+# repeat assert_output_safe() for every output param.
+_OUTPUT_PARAM_NAMES = (
+    "output_path",
+    "output_dir",
+    "output_file",
+    "output_pcap",
+    "output_csv",
+    "output_json",
+    "output_manifest",
+    "storage_file",
+)
+
+
+def output_safe(func):
+    """Decorator that validates any output_* / storage_file kwarg against the
+    evidence read-only policy before calling the wrapped function.
+
+    Apply BELOW @mcp.tool() so MCP introspects the original signature:
+
+        @mcp.tool()
+        @output_safe
+        def my_tool(image: str, output_dir: str) -> dict: ...
+    """
+    sig = inspect.signature(func)
+    relevant = tuple(n for n in _OUTPUT_PARAM_NAMES if n in sig.parameters)
+    if not relevant:
+        return func
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            bound = sig.bind_partial(*args, **kwargs)
+        except TypeError:
+            # Signature mismatch — let the wrapped function raise its own error.
+            return func(*args, **kwargs)
+        for name in relevant:
+            value = bound.arguments.get(name)
+            if value:
+                assert_output_safe(value)
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 def resolve_path_ci(path: str) -> tuple[str, bool]:

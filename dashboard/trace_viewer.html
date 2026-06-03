@@ -1,0 +1,1226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TRUDI Trace Viewer</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-2: #161a21;
+    --bg-3: #1c2230;
+    --bg-hl: #2a3550;
+    --fg: #e6e9ef;
+    --fg-dim: #8a93a6;
+    --border: #28303f;
+    --accent: #6ea8ff;
+    --tool: #8a93a6;
+    --reason: #6ea8ff;
+    --dair: #b48cff;
+    --finding-confirmed: #ff6b6b;
+    --finding-likely: #ffa86b;
+    --finding-suspected: #ffd86b;
+    --finding-unconfirmed: #8a93a6;
+    --self-correct: #ffcb6b;
+    --error: #ff6b6b;
+    --ok: #4ad295;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Segoe UI,
+                   "Helvetica Neue",sans-serif;
+  }
+  code, pre, .mono { font-family: "SF Mono","Menlo","Consolas",monospace; font-size: 12px; }
+
+  /* Layout */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 16px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+    height: 44px;
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; }
+  header .case-id { color: var(--accent); }
+  header .stat { color: var(--fg-dim); }
+  header .picker {
+    background: var(--bg-3); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 8px; font-size: 12px; max-width: 220px;
+  }
+  header .picker:focus { outline: 1px solid var(--accent); }
+  header .picker:disabled { color: var(--fg-dim); opacity: 0.6; }
+  header .metric {
+    display: inline-flex; align-items: center;
+    padding: 2px 8px; border-radius: 10px;
+    background: var(--bg-3); border: 1px solid var(--border);
+    font-family: "SF Mono","Menlo","Consolas",monospace;
+    font-size: 11px; color: var(--fg); white-space: nowrap;
+  }
+  header .metric.fired { background: rgba(74, 210, 149, 0.18); border-color: var(--ok); color: var(--ok); }
+  header .metric-bench { color: var(--fg-dim); font-style: italic; }
+  header .graph-btn {
+    display: inline-flex; align-items: center;
+    padding: 3px 10px; border-radius: 6px;
+    background: var(--bg-3); border: 1px solid var(--border);
+    color: var(--accent); text-decoration: none; font-size: 12px;
+    cursor: pointer;
+  }
+  header .graph-btn:hover { background: var(--bg-hl); }
+  header .live {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 8px; border-radius: 10px;
+    background: var(--bg-3); font-size: 12px;
+  }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--fg-dim); transition: background .2s;
+  }
+  .live.on .live-dot { background: var(--ok); animation: pulse 1.4s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr) minmax(360px, 480px);
+    height: calc(100vh - 44px);
+  }
+  .pane { overflow: auto; }
+  .pane.filters { background: var(--bg-2); border-right: 1px solid var(--border); padding: 12px; }
+  .pane.entries { padding: 0; }
+  .pane.detail  { background: var(--bg-2); border-left: 1px solid var(--border); padding: 12px; }
+
+  /* Filters */
+  .filter-group { margin-bottom: 14px; }
+  .filter-group h3 {
+    margin: 0 0 6px 0; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--fg-dim); font-weight: 600;
+  }
+  .filter-group label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; cursor: pointer;
+  }
+  .filter-group input[type=text],
+  .filter-group input[type=number],
+  .filter-group select {
+    width: 100%; padding: 5px 8px;
+    background: var(--bg-3); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 4px; font-size: 12px;
+  }
+  .filter-group .count { color: var(--fg-dim); margin-left: auto; font-size: 11px; }
+  .pill {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+  }
+  .pill.tool { background: rgba(138,147,166,.15); color: var(--tool); }
+  .pill.reason { background: rgba(110,168,255,.15); color: var(--reason); }
+  .pill.dair { background: rgba(180,140,255,.15); color: var(--dair); }
+  .pill.finding-confirmed { background: rgba(255,107,107,.15); color: var(--finding-confirmed); }
+  .pill.finding-likely { background: rgba(255,168,107,.15); color: var(--finding-likely); }
+  .pill.finding-suspected { background: rgba(255,216,107,.15); color: var(--finding-suspected); }
+  .pill.finding-unconfirmed { background: rgba(138,147,166,.15); color: var(--finding-unconfirmed); }
+  .pill.self-correction { background: rgba(255,203,107,.15); color: var(--self-correct); }
+  .pill.narration { background: rgba(138,147,166,.10); color: var(--fg-dim); }
+  .pill.error { background: rgba(255,107,107,.15); color: var(--error); }
+  .pill.ok { background: rgba(74,210,149,.15); color: var(--ok); }
+
+  /* Entries list */
+  .entry {
+    display: grid; grid-template-columns: 60px 76px 90px 1fr; gap: 8px;
+    padding: 6px 12px; border-bottom: 1px solid var(--border);
+    cursor: pointer; transition: background .15s;
+  }
+  .entry:hover { background: var(--bg-2); }
+  .entry.selected { background: var(--bg-hl); }
+  .entry.new { animation: flashin 1.2s ease-out; }
+  @keyframes flashin {
+    from { background: rgba(110,168,255,.25); }
+    to   { background: transparent; }
+  }
+  .entry .cid { color: var(--fg-dim); font-family: "SF Mono","Menlo",monospace; font-size: 11px; }
+  .entry .ts {
+    color: var(--fg-dim); font-family: "SF Mono","Menlo",monospace; font-size: 11px;
+    white-space: nowrap;
+  }
+  .entry .type-col { display: flex; }
+  .entry .text { min-width: 0; }
+  .entry .text .line {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .entry .text .meta { color: var(--fg-dim); font-size: 11px; }
+  .entry.protocol-violation { border-left: 3px solid var(--error); padding-left: 9px; }
+  .entry.linked-highlight { outline: 1px solid var(--accent); outline-offset: -1px; animation: linkpulse 1.6s ease-out; }
+  @keyframes linkpulse {
+    0%, 100% { background: transparent; }
+    20%      { background: rgba(110,168,255,.30); }
+  }
+  /* Clickable inline reference to another entry's call_id. */
+  .chip-link {
+    display: inline-block; padding: 1px 6px; margin: 0 2px;
+    border: 1px solid var(--accent); border-radius: 10px;
+    color: var(--accent); background: rgba(110,168,255,.08);
+    font-family: "SF Mono","Menlo",monospace; font-size: 11px;
+    cursor: pointer; text-decoration: none;
+    transition: background .12s, color .12s;
+  }
+  .chip-link:hover { background: var(--accent); color: var(--bg); }
+  .chip-link.reverse { border-color: var(--ok); color: var(--ok); background: rgba(74,210,149,.08); }
+  .chip-link.reverse:hover { background: var(--ok); color: var(--bg); }
+
+  /* Phase headers */
+  .phase-header {
+    padding: 8px 12px; background: var(--bg-3);
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    font-weight: 600; font-size: 12px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--fg-dim); position: sticky; top: 0; z-index: 1;
+  }
+  .phase-header .phase-name { color: var(--dair); margin-left: 6px; }
+  .phase-header .range { float: right; color: var(--fg-dim); font-weight: 400; text-transform: none; }
+
+  /* Detail pane */
+  .detail h2 {
+    margin: 0 0 6px 0; font-size: 14px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .detail h3 {
+    margin: 14px 0 6px 0; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--fg-dim); font-weight: 600;
+  }
+  .detail pre {
+    background: var(--bg); border: 1px solid var(--border);
+    padding: 8px 10px; border-radius: 4px; max-height: 360px; overflow: auto;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .detail .kv {
+    display: grid; grid-template-columns: 140px 1fr; gap: 4px 12px;
+    font-size: 12px;
+  }
+  .detail .kv .k { color: var(--fg-dim); }
+  .detail .kv .v { word-break: break-word; }
+  .detail .link {
+    color: var(--accent); cursor: pointer; text-decoration: underline dotted;
+  }
+  .detail .link:hover { text-decoration: underline; }
+  .detail table { border-collapse: collapse; width: 100%; margin: 6px 0; }
+  .detail th, .detail td {
+    text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border);
+    font-size: 11px; vertical-align: top;
+  }
+  .detail th { color: var(--fg-dim); font-weight: 500; }
+  .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.pending { background: rgba(255,216,107,.15); color: var(--finding-suspected); }
+  .badge.confirmed { background: rgba(74,210,149,.15); color: var(--ok); }
+  .badge.refuted { background: rgba(255,107,107,.15); color: var(--error); }
+
+  .empty {
+    padding: 32px; text-align: center; color: var(--fg-dim);
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--bg-hl); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TRUDI Trace</h1>
+  <select id="case-select" class="picker" title="Select case">
+    <option value="">— case —</option>
+  </select>
+  <select id="trace-select" class="picker" title="Select trace" disabled>
+    <option value="">— trace —</option>
+  </select>
+  <span class="case-id" id="case-id"></span>
+  <span class="stat"><span id="entry-count">0</span> entries</span>
+  <span class="metric" id="metric-ttf" title="Time to first CONFIRMED finding">TTF: —</span>
+  <span class="metric" id="metric-tta" title="Time to attribution (first HIGH-confidence attribute_actors)">TT-A: —</span>
+  <span class="metric" id="metric-tts" title="Time to enter Analyze phase">TT-S: —</span>
+  <span class="metric" id="metric-wall" title="Wall-clock time since first entry">Total: —</span>
+  <span class="metric metric-bench" title="Industry breakout benchmarks (machine-speed adversary frame)">vs CrowdStrike 7m / Horizon3 60s</span>
+  <span class="stat" style="margin-left:auto" id="clock-local" title="local time"></span>
+  <span class="stat" id="clock-utc" title="UTC (trace timestamps use UTC)"></span>
+  <span class="stat" id="last-fetch" title="last successful trace fetch"></span>
+  <span class="live" id="live"><span class="live-dot"></span><span id="live-text">offline</span></span>
+  <a id="graph-link" class="graph-btn" target="_blank" title="Open Investigation Chain blueprint view">Chain ↗</a>
+  <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
+    <input type="checkbox" id="follow-tail" checked /> follow new
+  </label>
+</header>
+
+<div class="layout">
+
+  <aside class="pane filters">
+    <div class="filter-group">
+      <h3>Types</h3>
+      <label><input type="checkbox" class="type-filter" value="dair_call" checked><span class="pill dair">DAIR</span><span class="count" data-count="dair_call">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="reason_call" checked><span class="pill reason">REASON</span><span class="count" data-count="reason_call">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="tool_call" checked><span class="pill tool">TOOL</span><span class="count" data-count="tool_call">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="finding" checked><span class="pill finding-confirmed">FIND</span><span class="count" data-count="finding">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="self_correction" checked><span class="pill self-correction">🔄 SC</span><span class="count" data-count="self_correction">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="investigation_narration" checked><span class="pill narration">NOTE</span><span class="count" data-count="investigation_narration">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="call_initiated"><span class="pill narration">init</span><span class="count" data-count="call_initiated">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="call_abandoned" checked><span class="pill error">abort</span><span class="count" data-count="call_abandoned">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="system_error" checked><span class="pill error">SYS</span><span class="count" data-count="system_error">0</span></label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Search</h3>
+      <input type="text" id="search" placeholder="text anywhere…" />
+    </div>
+
+    <div class="filter-group">
+      <h3>Jump to call</h3>
+      <input type="number" id="jump" placeholder="#" min="1" />
+    </div>
+
+    <div class="filter-group">
+      <h3>Phase</h3>
+      <select id="phase-select"><option value="">all phases</option></select>
+    </div>
+
+    <div class="filter-group">
+      <h3>Only show</h3>
+      <label><input type="checkbox" id="filter-errors"> errors + violations</label>
+      <label><input type="checkbox" id="filter-has-finding"> calls linked to findings</label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Source</h3>
+      <input type="text" id="trace-url" />
+      <label style="margin-top:6px;"><input type="checkbox" id="autorefresh" checked> auto-refresh (2s)</label>
+    </div>
+  </aside>
+
+  <main class="pane entries">
+    <div id="entries-list"></div>
+    <div class="empty" id="empty-state">Load a trace to begin.</div>
+  </main>
+
+  <aside class="pane detail" id="detail">
+    <div class="empty">Click an entry on the left to see its details.</div>
+  </aside>
+
+</div>
+
+<script>
+'use strict';
+
+// ── State ────────────────────────────────────────────────────────────────────
+const State = {
+  traceUrl: null,
+  caseId: '',
+  entries: [],
+  entriesById: new Map(),
+  phaseBlocks: [],
+  selectedId: null,
+  followTail: true,
+  autorefresh: true,
+  filters: {
+    types: new Set(),
+    search: '',
+    jump: null,
+    phase: '',
+    errorsOnly: false,
+    hasFindingOnly: false,
+  },
+  prevEntryCount: 0,
+  refreshTimer: null,
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+function escapeHtml(s) {
+  if (s === undefined || s === null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function shorten(s, n) {
+  if (!s) return '';
+  s = String(s);
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+function _fmtEntryTs(ts) {
+  // Compact UTC HH:MM:SS for the entry row. Trace timestamps are already UTC
+  // (either `+00:00` or `Z` suffix from the PostToolUse hook). Falls back to
+  // raw value on parse error. Full timestamp is in the row's title attribute.
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return ts.slice(0, 19);
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    const ss = String(d.getUTCSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+  } catch (_e) {
+    return ts.slice(0, 19);
+  }
+}
+// All entries (MCP server + PostToolUse hook) share a single monotonic call_id
+// sequence via a shared counter file under fcntl lock. Just render as #N.
+function _fmtCid(cid) {
+  return `#${cid}`;
+}
+function getQueryParam(name) {
+  const p = new URLSearchParams(location.search);
+  return p.get(name);
+}
+function paneEmpty(html) { return `<div class="empty">${html}</div>`; }
+
+// ── Phase index ──────────────────────────────────────────────────────────────
+//
+// Groups entries by per-entry `dair_phase` (the active phase at write time,
+// stamped by ExecutionLog._append_entry). Falls back to the older
+// dair_call.current_phase boundary logic when entries don't carry dair_phase
+// (older traces written before the per-entry stamping landed).
+function buildPhaseIndex(entries) {
+  // Prefer per-entry dair_phase if any entry has it set.
+  const hasPerEntryPhase = entries.some(e => e && e.dair_phase);
+  const blocks = [];
+  let currentPhase = '';
+  let currentBlock = null;
+  const phaseCount = {};
+
+  const startBlock = (phase, cid) => {
+    if (currentBlock) currentBlock.endCid = cid - 1;
+    phaseCount[phase] = (phaseCount[phase] || 0) + 1;
+    currentBlock = {
+      phase, startCid: cid,
+      endCid: entries[entries.length - 1].call_id,
+      anchor: `phase-${phase.toLowerCase()}-${phaseCount[phase]}`,
+    };
+    blocks.push(currentBlock);
+    currentPhase = phase;
+  };
+
+  if (hasPerEntryPhase) {
+    for (const e of entries) {
+      const phase = e.dair_phase || '';
+      if (!phase) continue;                  // pre-DAIR entries don't get a header
+      if (phase !== currentPhase) startBlock(phase, e.call_id);
+    }
+  } else {
+    // Legacy traces: derive from dair_call current_phase boundaries.
+    for (const e of entries) {
+      if (e.type !== 'dair_call') continue;
+      const phase = e.current_phase || 'unknown';
+      if (phase !== currentPhase) startBlock(phase, e.call_id);
+    }
+  }
+  if (currentBlock && entries.length) {
+    currentBlock.endCid = entries[entries.length - 1].call_id;
+  }
+  return blocks;
+}
+
+// ── Link chips ───────────────────────────────────────────────────────────────
+// Clickable chip referencing another entry by call_id. event.stopPropagation
+// in the row-level click handler keeps it from also opening the parent row.
+function _linkChip(cid, label, opts) {
+  opts = opts || {};
+  const cls = opts.reverse ? 'chip-link reverse' : 'chip-link';
+  const text = label ? `${label}` : `→ #${cid}`;
+  const title = opts.title ? ` title="${escapeHtml(opts.title)}"` : '';
+  return `<span class="${cls}" data-jump="${cid}"${title}>${escapeHtml(text)}</span>`;
+}
+
+function _toolLabel(linked) {
+  // Build a short label for a chip pointing at a linked entry.
+  if (!linked) return '';
+  if (linked.type === 'tool_call') {
+    const cmd = (linked.cmd || '').trim();
+    // Pull the first token (binary name) and, if present, the next non-flag token.
+    const parts = cmd.split(/\s+/);
+    const bin = parts[0] ? parts[0].split('/').pop() : '';
+    return bin;
+  }
+  if (linked.type === 'reason_call') return linked.tool || 'reason';
+  if (linked.type === 'dair_call') return `dair ${linked.current_phase || ''}`.trim();
+  return linked.type || '';
+}
+
+// Build a call_id → [finding call_ids] reverse index so tool_call rows can
+// show "✓ N finding(s) linked".
+function buildReverseFindingIndex(entries) {
+  const idx = new Map();
+  for (const e of entries) {
+    if (e.type !== 'finding') continue;
+    const t = e.linked_call_id;
+    if (!t) continue;
+    if (!idx.has(t)) idx.set(t, []);
+    idx.get(t).push(e);
+  }
+  return idx;
+}
+
+// ── Render entry rows ────────────────────────────────────────────────────────
+function entrySummary(e) {
+  switch (e.type) {
+    case 'tool_call': {
+      const status = e.timed_out ? 'TIMEOUT' : (e.success ? 'OK' : 'FAIL');
+      const elapsed = e.elapsed_seconds ? ` ${e.elapsed_seconds.toFixed(1)}s` : '';
+      const violation = e.protocol_violation ? ` ⚠ ${e.protocol_violation}` : '';
+      // Reverse link: how many findings linked back to this tool_call.
+      const linkedFindings = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
+      const reverseChip = linkedFindings.length
+        ? ' ' + _linkChip(linkedFindings[0].call_id,
+                          `✓ ${linkedFindings.length} finding${linkedFindings.length>1?'s':''}`,
+                          {reverse: true,
+                           title: linkedFindings.map(f => `#${f.call_id} ${f.description}`).join('\n')})
+        : '';
+      return {
+        pill: '<span class="pill tool">TOOL</span>',
+        line: `<code>${escapeHtml(shorten(e.cmd, 80))}</code>`,
+        meta: `${status}${elapsed}${violation}${reverseChip}`,
+      };
+    }
+    case 'reason_call': {
+      const verdict = (() => {
+        const c = e.conclusion || '';
+        const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)/i);
+        return m ? ` [${m[1].toUpperCase()}]` : '';
+      })();
+      const status = e.success ? '' : ' FAIL';
+      const linkedFindings = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
+      const reverseChip = linkedFindings.length
+        ? ' ' + _linkChip(linkedFindings[0].call_id,
+                          `✓ ${linkedFindings.length} finding${linkedFindings.length>1?'s':''}`,
+                          {reverse: true})
+        : '';
+      return {
+        pill: '<span class="pill reason">REASON</span>',
+        line: `<code>${escapeHtml(e.tool)}</code>${escapeHtml(verdict)}`,
+        meta: `${status} tokens=${(e.input_tokens||0)+(e.output_tokens||0)}` +
+              (e.hypothesis_id ? ` ${e.hypothesis_id}` : '') + reverseChip,
+      };
+    }
+    case 'dair_call': {
+      const transition = e.transition_recommended
+        ? ` → ${escapeHtml(e.next_phase)}` : '';
+      return {
+        pill: '<span class="pill dair">DAIR</span>',
+        line: `${escapeHtml(e.current_phase)}${transition}`,
+        meta: `${escapeHtml(e.stack_action)}` +
+              (e.verification_satisfied ? ' ✓ satisfied' : ''),
+      };
+    }
+    case 'finding': {
+      const conf = (e.confidence || '').toUpperCase();
+      const cls = `finding-${conf.toLowerCase()}`;
+      const linked = e.linked_call_id ? State.entriesById.get(e.linked_call_id) : null;
+      const chip = e.linked_call_id
+        ? _linkChip(e.linked_call_id,
+                    `→ #${e.linked_call_id}${linked ? ' ' + _toolLabel(linked) : ''}`,
+                    {title: linked ? (linked.cmd || linked.tool || '') : ''})
+        : '<span class="chip-link" style="border-color:var(--error);color:var(--error);background:rgba(255,107,107,.08);cursor:default;">no link</span>';
+      return {
+        pill: `<span class="pill ${cls}">${conf}</span>`,
+        line: escapeHtml(e.description),
+        meta: chip,
+      };
+    }
+    case 'self_correction': {
+      const chip = e.linked_call_id
+        ? ' ' + _linkChip(e.linked_call_id, `→ #${e.linked_call_id}`)
+        : '';
+      return {
+        pill: '<span class="pill self-correction">🔄 SC</span>',
+        line: escapeHtml(shorten(e.prior_belief, 100)),
+        meta: escapeHtml(e.trigger) + chip,
+      };
+    }
+    case 'investigation_narration': {
+      const refs = e.input_call_ids || [];
+      const chips = refs.length
+        ? refs.slice(0, 5).map(c => _linkChip(c, `→ #${c}`)).join('')
+          + (refs.length > 5 ? ` +${refs.length - 5}` : '')
+        : '';
+      return {
+        pill: '<span class="pill narration">NOTE</span>',
+        line: escapeHtml(shorten(e.content, 120)),
+        meta: chips,
+      };
+    }
+    case 'call_initiated':
+      return {
+        pill: '<span class="pill narration">init</span>',
+        line: escapeHtml(e.tool),
+        meta: escapeHtml(e.backend),
+      };
+    case 'call_abandoned':
+      return {
+        pill: '<span class="pill error">abort</span>',
+        line: escapeHtml(e.tool),
+        meta: escapeHtml(shorten(e.reason, 80)),
+      };
+    case 'system_error':
+      return {
+        pill: '<span class="pill error">SYS</span>',
+        line: `<code>[${escapeHtml(e.category || 'unknown')}]</code> ${escapeHtml(shorten(e.detail || '', 120))}`,
+        meta: '',
+      };
+    default:
+      return {
+        pill: '<span class="pill">?</span>',
+        line: escapeHtml(e.type),
+        meta: '',
+      };
+  }
+}
+
+function entryMatchesFilters(e) {
+  const F = State.filters;
+  if (F.types.size && !F.types.has(e.type)) return false;
+  if (F.jump !== null) return e.call_id === F.jump;
+  if (F.phase) {
+    const blk = State.phaseBlocks.find(b => b.anchor === F.phase);
+    if (blk && (e.call_id < blk.startCid || e.call_id > blk.endCid)) return false;
+  }
+  if (F.errorsOnly) {
+    const isError =
+      (e.type === 'tool_call' && (!e.success || e.protocol_violation)) ||
+      (e.type === 'reason_call' && /CHALLENGED/i.test(e.conclusion || '')) ||
+      e.type === 'self_correction' ||
+      e.type === 'call_abandoned' ||
+      e.type === 'system_error';
+    if (!isError) return false;
+  }
+  if (F.hasFindingOnly) {
+    // A call is "linked to a finding" if some finding's linked_call_id equals e.call_id
+    const linked = State.entries.some(x => x.type === 'finding' && x.linked_call_id === e.call_id);
+    if (!linked) return false;
+  }
+  if (F.search) {
+    const hay = JSON.stringify(e).toLowerCase();
+    if (!hay.includes(F.search.toLowerCase())) return false;
+  }
+  return true;
+}
+
+function _phaseBlockForCid(cid) {
+  for (const b of State.phaseBlocks) {
+    if (cid >= b.startCid && cid <= b.endCid) return b;
+  }
+  return null;
+}
+
+function renderEntries() {
+  const container = $('#entries-list');
+  const empty = $('#empty-state');
+  if (!State.entries.length) {
+    container.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+
+  // Newest-on-top: iterate in reverse. Emit a phase header at the boundary
+  // between consecutive (reverse) entries whose phase block differs — the
+  // header sits at the TOP of each phase block as read down the page.
+  let html = '';
+  let visibleCount = 0;
+  let prevBlockAnchor = null;
+  for (let i = State.entries.length - 1; i >= 0; i--) {
+    const e = State.entries[i];
+    const block = _phaseBlockForCid(e.call_id);
+    // Hook entries (call_ids >= 1e9) fall outside every block range — treat
+    // them as inheriting the previous block so they don't fragment the header.
+    if (block) {
+      if (block.anchor !== prevBlockAnchor) {
+        html += `<div class="phase-header" id="${block.anchor}">PHASE: <span class="phase-name">${escapeHtml(block.phase)}</span><span class="range">#${block.startCid}–#${block.endCid}</span></div>`;
+        prevBlockAnchor = block.anchor;
+      }
+    }
+    if (!entryMatchesFilters(e)) continue;
+    const s = entrySummary(e);
+    const cls = [
+      'entry',
+      State.selectedId === e.call_id ? 'selected' : '',
+      e.protocol_violation ? 'protocol-violation' : '',
+    ].filter(Boolean).join(' ');
+    html += `<div class="${cls}" data-cid="${e.call_id}" title="${escapeHtml(e.ts || '')}">
+      <span class="cid">${_fmtCid(e.call_id)}</span>
+      <span class="ts">${escapeHtml(_fmtEntryTs(e.ts))}</span>
+      <span class="type-col">${s.pill}</span>
+      <span class="text">
+        <div class="line">${s.line}</div>
+        ${s.meta ? `<div class="meta">${s.meta}</div>` : ''}
+      </span>
+    </div>`;
+    visibleCount += 1;
+  }
+  container.innerHTML = html || paneEmpty('No entries match the current filters.');
+
+  // Update count badges per type
+  const counts = {};
+  for (const e of State.entries) counts[e.type] = (counts[e.type] || 0) + 1;
+  for (const el of $$('.count')) {
+    el.textContent = counts[el.dataset.count] || 0;
+  }
+  $('#entry-count').textContent = State.entries.length;
+
+  if (State.followTail) {
+    // Newest-on-top: "follow new" scrolls to the TOP (where newest entries
+    // appear). Scroll the parent (.pane.entries) since #entries-list itself
+    // isn't the scrollable element.
+    requestAnimationFrame(() => {
+      const scroller = container.parentElement;
+      if (scroller) scroller.scrollTop = 0;
+    });
+  }
+}
+
+// ── Render detail pane ──────────────────────────────────────────────────────
+function renderDetail(e) {
+  if (!e) {
+    $('#detail').innerHTML = paneEmpty('Click an entry on the left to see its details.');
+    return;
+  }
+  const phaseTag = e.dair_phase
+    ? ` <span class="pill dair" style="font-weight:400;font-size:10px;">phase: ${escapeHtml(e.dair_phase)}${e.dair_depth ? ' d='+e.dair_depth : ''}</span>`
+    : '';
+  const head = `
+    <h2>${entrySummary(e).pill} <code>${_fmtCid(e.call_id)}</code>${phaseTag} <span style="color:var(--fg-dim);font-weight:400;font-size:11px;">${escapeHtml(e.ts || '')}</span></h2>
+  `;
+  let body = '';
+  switch (e.type) {
+    case 'tool_call': body = renderToolCall(e); break;
+    case 'reason_call': body = renderReasonCall(e); break;
+    case 'dair_call': body = renderDairCall(e); break;
+    case 'finding': body = renderFinding(e); break;
+    case 'self_correction': body = renderSelfCorrection(e); break;
+    case 'investigation_narration': body = renderNarration(e); break;
+    case 'call_initiated':
+    case 'call_abandoned': body = renderInit(e); break;
+    case 'system_error': body = renderSystemError(e); break;
+    default: body = `<pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
+  }
+  $('#detail').innerHTML = head + body;
+  $('#detail').querySelectorAll('.link[data-jump]').forEach(el => {
+    el.addEventListener('click', () => selectEntry(parseInt(el.dataset.jump, 10)));
+  });
+}
+
+function _findingsLinkedHere(cid) {
+  const rev = (State.reverseIndex && State.reverseIndex.get(cid)) || [];
+  if (!rev.length) return '';
+  return `<h3>findings linked to this call</h3><ul>` +
+    rev.map(f => `<li>${_linkChip(f.call_id, `→ #${f.call_id}`)} <span class="pill finding-${(f.confidence||'').toLowerCase()}">${escapeHtml((f.confidence||'').toUpperCase())}</span> ${escapeHtml(f.description || '')}</li>`).join('') +
+    `</ul>`;
+}
+
+function renderToolCall(e) {
+  return `
+    <div class="kv">
+      <span class="k">cmd</span><span class="v"><code>${escapeHtml(e.cmd)}</code></span>
+      <span class="k">status</span><span class="v">${e.success ? '<span class="pill ok">OK</span>' : '<span class="pill error">FAIL</span>'} ${e.exit_code !== undefined ? `exit=${e.exit_code}` : ''}${e.timed_out ? ' TIMEOUT' : ''}</span>
+      <span class="k">elapsed</span><span class="v">${e.elapsed_seconds || 0}s</span>
+      <span class="k">retries</span><span class="v">${e.retries || 0}</span>
+      ${e.protocol_violation ? `<span class="k">protocol</span><span class="v"><span class="pill error">${escapeHtml(e.protocol_violation)}</span></span>` : ''}
+      ${e.truncated ? `<span class="k">truncated</span><span class="v">true</span>` : ''}
+    </div>
+    ${e.stdout_excerpt ? `<h3>stdout excerpt</h3><pre>${escapeHtml(e.stdout_excerpt)}</pre>` : ''}
+    ${e.stderr ? `<h3>stderr</h3><pre>${escapeHtml(e.stderr)}</pre>` : ''}
+    ${_findingsLinkedHere(e.call_id)}
+  `;
+}
+
+function renderReasonCall(e) {
+  const inputs = e.inputs || {};
+  const directives = e.directives || {};
+  const audit = e.evidence_audit || [];
+  return `
+    <div class="kv">
+      <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool)}</code></span>
+      <span class="k">success</span><span class="v">${e.success ? '<span class="pill ok">OK</span>' : '<span class="pill error">FAIL</span>'}</span>
+      <span class="k">tokens</span><span class="v">in=${e.input_tokens || 0} out=${e.output_tokens || 0}</span>
+      ${e.hypothesis_id ? `<span class="k">hypothesis</span><span class="v"><code>${escapeHtml(e.hypothesis_id)}</code></span>` : ''}
+    </div>
+    ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
+    ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
+    ${e.conclusion ? `<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
+    ${directives.priority_tools && directives.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(directives.priority_tools, null, 2))}</pre>` : ''}
+    ${audit.length ? `<h3>evidence audit</h3><pre>${escapeHtml(JSON.stringify(audit, null, 2))}</pre>` : ''}
+    ${_findingsLinkedHere(e.call_id)}
+  `;
+}
+
+function renderDairCall(e) {
+  const inputs = e.inputs || {};
+  const challenges = e.verification_challenges || [];
+  const dirs = e.directives || {};
+  const rec = e.recommended_actions || [];
+  return `
+    <div class="kv">
+      <span class="k">phase</span><span class="v"><strong>${escapeHtml(e.current_phase)}</strong></span>
+      <span class="k">stack_action</span><span class="v">${escapeHtml(e.stack_action)}</span>
+      <span class="k">transition</span><span class="v">${e.transition_recommended ? `→ ${escapeHtml(e.next_phase)}` : 'none'}</span>
+      ${e.verification_satisfied ? `<span class="k">satisfied</span><span class="v">✓</span>` : ''}
+      ${e.investigation_focus ? `<span class="k">focus</span><span class="v">${escapeHtml(e.investigation_focus)}</span>` : ''}
+    </div>
+    ${e.phase_rationale ? `<h3>phase rationale</h3><pre>${escapeHtml(e.phase_rationale)}</pre>` : ''}
+    ${e.transition_rationale ? `<h3>transition rationale</h3><pre>${escapeHtml(e.transition_rationale)}</pre>` : ''}
+    ${inputs.tool_results_summary ? `<h3>input — tool_results_summary</h3><pre>${escapeHtml(inputs.tool_results_summary)}</pre>` : ''}
+    ${inputs.phase_stack !== undefined ? `<h3>input — phase_stack</h3><pre>${escapeHtml(JSON.stringify(inputs.phase_stack, null, 2))}</pre>` : ''}
+    ${inputs.case_context ? `<h3>input — case_context</h3><pre>${escapeHtml(inputs.case_context)}</pre>` : ''}
+    ${challenges.length ? renderChallenges(challenges) : ''}
+    ${dirs.priority_tools && dirs.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(dirs.priority_tools, null, 2))}</pre>` : ''}
+    ${rec.length ? `<h3>recommended actions (advisory)</h3><ul>${rec.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
+  `;
+}
+
+function renderChallenges(challenges) {
+  return `<h3>verification challenges</h3><table>
+    <thead><tr><th>claim</th><th>method</th><th>result</th><th>impact</th></tr></thead>
+    <tbody>
+      ${challenges.map(c => {
+        const r = c.verified === true ? '<span class="badge confirmed">✓</span>'
+               : c.verified === false ? '<span class="badge refuted">✗</span>'
+               : '<span class="badge pending">⏳</span>';
+        return `<tr>
+          <td>${escapeHtml(c.claim || '')}</td>
+          <td><code>${escapeHtml(c.challenge_method || '')}</code></td>
+          <td>${r}${c.notes ? '<br/><span style="color:var(--fg-dim);font-size:10px;">'+escapeHtml(c.notes)+'</span>' : ''}</td>
+          <td>${escapeHtml(c.confidence_impact || '—')}</td>
+        </tr>`;
+      }).join('')}
+    </tbody>
+  </table>`;
+}
+
+function renderFinding(e) {
+  const conf = (e.confidence || '').toUpperCase();
+  const cls = `finding-${conf.toLowerCase()}`;
+  return `
+    <div class="kv">
+      <span class="k">confidence</span><span class="v"><span class="pill ${cls}">${conf}</span></span>
+      ${e.source ? `<span class="k">source</span><span class="v"><code>${escapeHtml(e.source)}</code></span>` : ''}
+      ${e.linked_call_id ? `<span class="k">linked call</span><span class="v"><span class="link" data-jump="${e.linked_call_id}">#${e.linked_call_id}</span></span>` : ''}
+      ${e.tested_hypothesis_id ? `<span class="k">hypothesis</span><span class="v"><code>${escapeHtml(e.tested_hypothesis_id)}</code></span>` : ''}
+    </div>
+    <h3>description</h3>
+    <pre>${escapeHtml(e.description)}</pre>
+  `;
+}
+
+function renderSelfCorrection(e) {
+  return `
+    <div class="kv">
+      <span class="k">trigger</span><span class="v"><code>${escapeHtml(e.trigger)}</code></span>
+      ${e.linked_call_id ? `<span class="k">from call</span><span class="v"><span class="link" data-jump="${e.linked_call_id}">#${e.linked_call_id}</span></span>` : ''}
+    </div>
+    <h3>prior belief</h3><pre>${escapeHtml(e.prior_belief)}</pre>
+    <h3>revised belief</h3><pre>${escapeHtml(e.new_belief)}</pre>
+    ${e.evidence ? `<h3>evidence</h3><pre>${escapeHtml(e.evidence)}</pre>` : ''}
+  `;
+}
+
+function renderNarration(e) {
+  const refs = e.input_call_ids || [];
+  return `
+    ${refs.length ? `<div class="kv"><span class="k">refers to</span><span class="v">${refs.map(c => `<span class="link" data-jump="${c}">#${c}</span>`).join(' ')}</span></div>` : ''}
+    <h3>content</h3><pre>${escapeHtml(e.content)}</pre>
+  `;
+}
+
+function renderInit(e) {
+  const inputs = e.inputs || {};
+  return `
+    <div class="kv">
+      <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool)}</code></span>
+      ${e.backend ? `<span class="k">backend</span><span class="v">${escapeHtml(e.backend)}</span>` : ''}
+      ${e.reason ? `<span class="k">reason</span><span class="v">${escapeHtml(e.reason)}</span>` : ''}
+    </div>
+    ${Object.keys(inputs).length ? `<h3>inputs</h3><pre>${escapeHtml(JSON.stringify(inputs, null, 2))}</pre>` : ''}
+  `;
+}
+
+function renderSystemError(e) {
+  return `
+    <div class="kv">
+      <span class="k">category</span><span class="v"><code>${escapeHtml(e.category || 'unknown')}</code></span>
+    </div>
+    <h3>detail</h3><pre>${escapeHtml(e.detail || '')}</pre>
+  `;
+}
+
+// ── Selection ────────────────────────────────────────────────────────────────
+function selectEntry(cid) {
+  State.selectedId = cid;
+  renderEntries();
+  const e = State.entriesById.get(cid);
+  if (e) {
+    renderDetail(e);
+    const row = document.querySelector(`.entry[data-cid="${cid}"]`);
+    if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Pulse-highlight the linked entry so the eye can follow the link.
+    pulseLinked(e);
+  }
+}
+
+function pulseLinked(e) {
+  const targets = [];
+  if (e.linked_call_id) targets.push(e.linked_call_id);
+  if (Array.isArray(e.input_call_ids)) targets.push(...e.input_call_ids);
+  // For tool_call/reason_call entries, also highlight findings linked TO them.
+  if (e.type === 'tool_call' || e.type === 'reason_call') {
+    const rev = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
+    for (const f of rev) targets.push(f.call_id);
+  }
+  for (const cid of targets) {
+    const row = document.querySelector(`.entry[data-cid="${cid}"]`);
+    if (!row) continue;
+    row.classList.remove('linked-highlight');
+    // re-trigger CSS animation by forcing reflow
+    void row.offsetWidth;
+    row.classList.add('linked-highlight');
+    setTimeout(() => row.classList.remove('linked-highlight'), 1700);
+  }
+}
+
+// ── IR velocity metrics ──────────────────────────────────────────────────────
+// Frames TRUDI's autonomous-IR velocity against industry breakout benchmarks:
+// CrowdStrike fastest breakout 7m, Horizon3 autonomous priv-esc 60s, MIT 2024
+// AI attacks 47× human pace. Computed client-side from trace entries.
+function _parseTs(ts) {
+  if (!ts) return null;
+  // ISO 8601 with timezone; trace stamps are always UTC.
+  const t = Date.parse(String(ts).replace(' ', 'T'));
+  return Number.isFinite(t) ? t : null;
+}
+function _fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return rem ? `${m}m ${rem}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+function updateIrVelocityMetrics(entries) {
+  if (!entries || entries.length === 0) return;
+  const firstTs = _parseTs(entries[0].ts);
+  if (firstTs === null) return;
+  let ttfMs = null, ttaMs = null, ttsMs = null, wallMs = null;
+  let lastTs = firstTs;
+  for (const e of entries) {
+    const t = _parseTs(e.ts);
+    if (t === null) continue;
+    lastTs = Math.max(lastTs, t);
+    if (ttfMs === null && e.type === 'finding' &&
+        (e.confidence || '').toUpperCase() === 'CONFIRMED') {
+      ttfMs = t - firstTs;
+    }
+    if (ttaMs === null && e.type === 'reason_call' && e.tool === 'attribute_actors') {
+      const conc = (e.conclusion || '').toUpperCase();
+      if (conc.includes('CONFIDENCE_BAND') && conc.includes('HIGH')) {
+        ttaMs = t - firstTs;
+      }
+    }
+    if (ttsMs === null && e.type === 'dair_call' &&
+        (e.current_phase === 'Analyze' || e.next_phase === 'Analyze')) {
+      ttsMs = t - firstTs;
+    }
+  }
+  wallMs = lastTs - firstTs;
+  const setMetric = (id, label, ms) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (ms === null) {
+      el.textContent = `${label}: —`;
+      el.classList.remove('fired');
+    } else {
+      el.textContent = `${label}: ${_fmtDuration(ms)}`;
+      el.classList.add('fired');
+    }
+  };
+  setMetric('metric-ttf', 'TTF', ttfMs);
+  setMetric('metric-tta', 'TT-A', ttaMs);
+  setMetric('metric-tts', 'TT-S', ttsMs);
+  setMetric('metric-wall', 'Total', wallMs);
+}
+function updateGraphLink() {
+  const link = document.getElementById('graph-link');
+  if (!link || !State.traceUrl) return;
+  // Sibling page shares the ?trace=… param.
+  const params = new URLSearchParams(window.location.search);
+  const trace = params.get('trace');
+  if (trace) link.href = `chain_view.html?trace=${encodeURIComponent(trace)}`;
+  else link.href = 'chain_view.html';
+}
+
+// ── Data load ────────────────────────────────────────────────────────────────
+async function load() {
+  if (!State.traceUrl) return;
+  try {
+    const resp = await fetch(State.traceUrl, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    State.caseId = data.case_id || '';
+    const newEntries = data.entries || [];
+    const oldCount = State.prevEntryCount;
+    State.entries = newEntries;
+    State.entriesById = new Map(newEntries.map(e => [e.call_id, e]));
+    State.reverseIndex = buildReverseFindingIndex(newEntries);
+    State.phaseBlocks = buildPhaseIndex(newEntries);
+    $('#case-id').textContent = State.caseId;
+    $('#last-fetch').textContent = `fetched ${_fmtLocalHMS(new Date())}`;
+    $('#live').classList.add('on');
+    $('#live-text').textContent = 'live';
+    updateIrVelocityMetrics(newEntries);
+    updateGraphLink();
+    // Phase select options
+    const sel = $('#phase-select');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">all phases</option>' +
+      State.phaseBlocks.map(b => `<option value="${b.anchor}">${escapeHtml(b.phase)} (#${b.startCid}–#${b.endCid})</option>`).join('');
+    sel.value = cur;
+    renderEntries();
+    if (newEntries.length > oldCount) {
+      // Flash new entries
+      requestAnimationFrame(() => {
+        for (let i = oldCount; i < newEntries.length; i++) {
+          const row = document.querySelector(`.entry[data-cid="${newEntries[i].call_id}"]`);
+          if (row) row.classList.add('new');
+        }
+      });
+    }
+    State.prevEntryCount = newEntries.length;
+  } catch (err) {
+    $('#live').classList.remove('on');
+    $('#live-text').textContent = `error: ${err.message}`;
+  }
+}
+
+// ── Wiring ───────────────────────────────────────────────────────────────────
+function setupFilters() {
+  const updateTypes = () => {
+    State.filters.types = new Set(
+      $$('.type-filter:checked').map(el => el.value)
+    );
+    renderEntries();
+  };
+  $$('.type-filter').forEach(el => el.addEventListener('change', updateTypes));
+  updateTypes();
+
+  $('#search').addEventListener('input', (ev) => {
+    State.filters.search = ev.target.value.trim();
+    renderEntries();
+  });
+  $('#jump').addEventListener('input', (ev) => {
+    const v = parseInt(ev.target.value, 10);
+    State.filters.jump = Number.isFinite(v) && v > 0 ? v : null;
+    renderEntries();
+    if (State.filters.jump !== null) selectEntry(State.filters.jump);
+  });
+  $('#phase-select').addEventListener('change', (ev) => {
+    State.filters.phase = ev.target.value;
+    renderEntries();
+  });
+  $('#filter-errors').addEventListener('change', (ev) => {
+    State.filters.errorsOnly = ev.target.checked;
+    renderEntries();
+  });
+  $('#filter-has-finding').addEventListener('change', (ev) => {
+    State.filters.hasFindingOnly = ev.target.checked;
+    renderEntries();
+  });
+  $('#follow-tail').addEventListener('change', (ev) => {
+    State.followTail = ev.target.checked;
+  });
+  $('#autorefresh').addEventListener('change', (ev) => {
+    State.autorefresh = ev.target.checked;
+    setupRefreshTimer();
+  });
+  $('#trace-url').addEventListener('change', (ev) => {
+    State.traceUrl = ev.target.value.trim();
+    State.prevEntryCount = 0;
+    load();
+  });
+  $('#entries-list').addEventListener('click', (ev) => {
+    // Chip click → jump to that entry instead of opening the parent row.
+    const chip = ev.target.closest('.chip-link[data-jump]');
+    if (chip) {
+      ev.stopPropagation();
+      selectEntry(parseInt(chip.dataset.jump, 10));
+      return;
+    }
+    const row = ev.target.closest('.entry');
+    if (row && row.dataset.cid) selectEntry(parseInt(row.dataset.cid, 10));
+  });
+}
+
+function setupRefreshTimer() {
+  if (State.refreshTimer) clearInterval(State.refreshTimer);
+  if (State.autorefresh) {
+    State.refreshTimer = setInterval(load, 2000);
+  }
+}
+
+// ── Header clocks ────────────────────────────────────────────────────────────
+function _pad(n) { return String(n).padStart(2, '0'); }
+
+function _tzAbbrev() {
+  // e.g. "PDT", "EST", "UTC+5". Falls back to a numeric offset on browsers
+  // that don't expose a TZ short name.
+  try {
+    const parts = new Intl.DateTimeFormat([], {
+      timeZoneName: 'short', hour: '2-digit'
+    }).formatToParts(new Date());
+    const tz = parts.find(p => p.type === 'timeZoneName');
+    if (tz && tz.value) return tz.value;
+  } catch (_e) { /* fall through */ }
+  const off = -new Date().getTimezoneOffset();
+  const sign = off >= 0 ? '+' : '-';
+  const h = Math.floor(Math.abs(off) / 60);
+  const m = Math.abs(off) % 60;
+  return `UTC${sign}${h}${m ? ':' + _pad(m) : ''}`;
+}
+
+function _fmtLocalHMS(d) {
+  return `${_pad(d.getHours())}:${_pad(d.getMinutes())}:${_pad(d.getSeconds())} ${_tzAbbrev()}`;
+}
+
+function _fmtUtcHMS(d) {
+  return `${_pad(d.getUTCHours())}:${_pad(d.getUTCMinutes())}:${_pad(d.getUTCSeconds())} UTC`;
+}
+
+function tickClocks() {
+  const now = new Date();
+  const local = $('#clock-local');
+  const utc = $('#clock-utc');
+  if (local) local.textContent = _fmtLocalHMS(now);
+  if (utc)   utc.textContent   = _fmtUtcHMS(now);
+}
+
+// ── Case picker ─────────────────────────────────────────────────────────────
+// Populates the case + trace dropdowns from /_dashboard/api/cases. The API
+// is only available when the dashboard is served by the persistent
+// multi-case server; when missing (e.g. opening dashboard.html via file://),
+// the dropdowns hide and the dashboard falls back to the ?trace= URL param.
+const CasePicker = {
+  cases: [],
+  init() {
+    const caseSel = $('#case-select');
+    const traceSel = $('#trace-select');
+    caseSel.addEventListener('change', () => this.onCaseChange());
+    traceSel.addEventListener('change', () => this.onTraceChange());
+    this.refresh();
+  },
+  async refresh() {
+    try {
+      const resp = await fetch('/_dashboard/api/cases', { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      this.cases = data.cases || [];
+      this.populateCases();
+      this.syncFromUrl();
+    } catch (_e) {
+      // API not available — hide the pickers and let ?trace= drive things.
+      $('#case-select').style.display = 'none';
+      $('#trace-select').style.display = 'none';
+    }
+  },
+  populateCases() {
+    const sel = $('#case-select');
+    const cur = sel.value;
+    const opts = ['<option value="">— case —</option>'];
+    for (const c of this.cases) {
+      const n = c.traces.length;
+      const label = `${c.case_id}${n ? ` (${n})` : ''}`;
+      opts.push(`<option value="${escapeHtml(c.case_dir)}">${escapeHtml(label)}</option>`);
+    }
+    sel.innerHTML = opts.join('');
+    if (cur) sel.value = cur;
+  },
+  populateTraces(caseDir) {
+    const sel = $('#trace-select');
+    const c = this.cases.find(x => x.case_dir === caseDir);
+    if (!c || !c.traces.length) {
+      sel.innerHTML = '<option value="">— no traces —</option>';
+      sel.disabled = true;
+      return;
+    }
+    const opts = ['<option value="">— trace —</option>'];
+    for (const t of c.traces) {
+      opts.push(`<option value="${escapeHtml(t.path)}">${escapeHtml(t.name)}</option>`);
+    }
+    sel.innerHTML = opts.join('');
+    sel.disabled = false;
+  },
+  onCaseChange() {
+    const caseDir = $('#case-select').value;
+    if (!caseDir) {
+      $('#trace-select').innerHTML = '<option value="">— trace —</option>';
+      $('#trace-select').disabled = true;
+      return;
+    }
+    this.populateTraces(caseDir);
+    const c = this.cases.find(x => x.case_dir === caseDir);
+    if (c && c.traces.length === 1) {
+      $('#trace-select').value = c.traces[0].path;
+      this.navigateTo(c.traces[0].path);
+    }
+  },
+  onTraceChange() {
+    const path = $('#trace-select').value;
+    if (path) this.navigateTo(path);
+  },
+  navigateTo(tracePath) {
+    const u = new URL(window.location.href);
+    u.searchParams.set('trace', tracePath);
+    window.location.href = u.toString();
+  },
+  syncFromUrl() {
+    const trace = State.traceUrl;
+    if (!trace) return;
+    // trace path format is /<case_dir>/analysis/<file>
+    const m = trace.match(/^\/?([^/]+)\/analysis\/([^/]+)$/);
+    if (!m) return;
+    const [_, caseDir, file] = m;
+    const caseSel = $('#case-select');
+    const traceSel = $('#trace-select');
+    if ([...caseSel.options].some(o => o.value === caseDir)) {
+      caseSel.value = caseDir;
+      this.populateTraces(caseDir);
+      const tracePath = `/${caseDir}/analysis/${file}`;
+      if ([...traceSel.options].some(o => o.value === tracePath)) {
+        traceSel.value = tracePath;
+      }
+    }
+  },
+};
+
+function init() {
+  const url = getQueryParam('trace');
+  if (url) {
+    State.traceUrl = url;
+    $('#trace-url').value = url;
+  } else {
+    $('#trace-url').placeholder = '/path/to/trace.json or ?trace=...';
+  }
+  setupFilters();
+  CasePicker.init();
+  tickClocks();
+  setInterval(tickClocks, 1000);
+  if (State.traceUrl) {
+    load();
+    setupRefreshTimer();
+  }
+}
+init();
+</script>
+</body>
+</html>

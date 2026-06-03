@@ -183,3 +183,26 @@ class TestJournalTools:
         cmd = mock_run.call_args[0][0]
         assert "jcat" in cmd
         assert "5" in cmd
+
+
+class TestTskIndxparse:
+    def test_indxparse_invokes_binary(self, mock_run):
+        from tools.sleuthkit import tsk_indxparse
+        tsk_indxparse("/tmp/mft.bin")
+        cmd = mock_run.call_args[0][0]
+        assert "INDXParse.py" in cmd[0]
+        assert "/tmp/mft.bin" in cmd
+
+    def test_indxparse_refuses_evidence_output(self):
+        from tools.sleuthkit import tsk_indxparse
+        with pytest.raises(ValueError):
+            tsk_indxparse("/tmp/mft.bin", output_path="/mnt/rd01/dump.txt")
+
+    def test_indxparse_writes_output(self, mock_run, tmp_path):
+        from tools.sleuthkit import tsk_indxparse
+        mock_run.return_value = {**mock_run.return_value, "success": True, "stdout": "indx data"}
+        out_dir = tmp_path / "analysis"
+        out_dir.mkdir()
+        out = out_dir / "indx.txt"
+        tsk_indxparse("/tmp/mft.bin", output_path=str(out))
+        assert out.read_text() == "indx data"

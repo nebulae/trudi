@@ -43,6 +43,121 @@ fi
 CLAUDE_BIN="$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")"
 ok "Claude Code at $CLAUDE_BIN"
 
+# ── 1b. System packages (apt) ─────────────────────────────────────────────────
+
+step "Installing system forensic packages"
+
+APT_PACKAGES=(
+    pff-tools          # pffexport — PST/OST email extraction
+    libpst-utils       # readpst — PST→mbox conversion
+    binwalk            # firmware / embedded carving
+    tcpxtract          # network stream carving (already covered)
+    sleuthkit          # TSK tools
+    ewf-tools          # ewfmount, ewfinfo, ewfverify
+)
+
+MISSING_PKGS=()
+for pkg in "${APT_PACKAGES[@]}"; do
+    if ! dpkg -s "$pkg" &>/dev/null; then
+        MISSING_PKGS+=("$pkg")
+    fi
+done
+if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    sudo apt-get update -qq
+    sudo apt-get install -y "${MISSING_PKGS[@]}" || \
+        warn "Some apt packages failed to install — see output above"
+    ok "Installed: ${MISSING_PKGS[*]}"
+else
+    ok "All apt forensic packages already present"
+fi
+
+
+# ── 1c. Chainsaw (Sigma rule engine for EVTX) ────────────────────────────────
+
+step "Installing chainsaw (optional: Sigma rule engine)"
+
+CHAINSAW_BIN="/usr/local/bin/chainsaw"
+CHAINSAW_VERSION="2.10.2"
+
+if [ -x "$CHAINSAW_BIN" ]; then
+    ok "chainsaw already installed at $CHAINSAW_BIN"
+else
+    CHAINSAW_URL="https://github.com/WithSecureLabs/chainsaw/releases/download/v${CHAINSAW_VERSION}/chainsaw_x86_64-unknown-linux-gnu.tar.gz"
+    TMPDIR=$(mktemp -d)
+    if curl -fsSL "$CHAINSAW_URL" -o "$TMPDIR/chainsaw.tgz" 2>/dev/null; then
+        tar -xzf "$TMPDIR/chainsaw.tgz" -C "$TMPDIR"
+        # Release ships as chainsaw/chainsaw + sigma rules
+        if [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
+            sudo install -m 0755 "$TMPDIR/chainsaw/chainsaw" "$CHAINSAW_BIN"
+            if [ -d "$TMPDIR/chainsaw/sigma" ]; then
+                sudo mkdir -p /usr/local/share/chainsaw
+                sudo cp -r "$TMPDIR/chainsaw/sigma" /usr/local/share/chainsaw/sigma
+            fi
+            if [ -d "$TMPDIR/chainsaw/mappings" ]; then
+                sudo cp -r "$TMPDIR/chainsaw/mappings" /usr/local/share/chainsaw/mappings
+            fi
+            ok "Installed chainsaw v${CHAINSAW_VERSION} → $CHAINSAW_BIN"
+        else
+            warn "chainsaw archive layout unexpected; skipping"
+        fi
+    else
+        warn "Could not download chainsaw (offline?). Skip — TRUDI works without it."
+    fi
+    rm -rf "$TMPDIR"
+fi
+
+
+# ── 1cc. Trace dashboard ─────────────────────────────────────────────────────
+
+step "Verifying trace dashboard"
+
+DASHBOARD_HTML="$TRUDI_DIR/dashboard/trace_viewer.html"
+DASHBOARD_BIN_SRC="$TRUDI_DIR/bin/trudi-dashboard"
+DASHBOARD_BIN_DEST="/usr/local/bin/trudi-dashboard"
+
+if [ -f "$DASHBOARD_HTML" ]; then
+    ok "Trace dashboard HTML at $DASHBOARD_HTML"
+else
+    warn "Trace dashboard HTML not found — dashboard will not work"
+fi
+
+if [ -f "$DASHBOARD_BIN_SRC" ]; then
+    if [ -L "$DASHBOARD_BIN_DEST" ] || [ -f "$DASHBOARD_BIN_DEST" ]; then
+        ok "trudi-dashboard already installed at $DASHBOARD_BIN_DEST"
+    else
+        sudo install -m 0755 "$DASHBOARD_BIN_SRC" "$DASHBOARD_BIN_DEST" 2>/dev/null \
+            && ok "Installed trudi-dashboard → $DASHBOARD_BIN_DEST" \
+            || warn "Could not install $DASHBOARD_BIN_DEST (sudo needed); use $DASHBOARD_BIN_SRC directly"
+    fi
+    echo "    Launch once:      trudi-dashboard           # serves ~/cases on :8765"
+    echo "    Custom root:      trudi-dashboard --cases-root /path/to/cases"
+    echo "    Pick case+trace in the dashboard dropdown."
+else
+    warn "trudi-dashboard wrapper missing at $DASHBOARD_BIN_SRC"
+fi
+
+
+# ── 1d. MITRE ATT&CK reference table ─────────────────────────────────────────
+
+step "Installing MITRE ATT&CK reference table"
+
+MITRE_DEST="$HOME/cases/.common/mitre_techniques.json"
+MITRE_SRC="$TRUDI_DIR/cases/.common/mitre_techniques.json"
+mkdir -p "$HOME/cases/.common"
+# Prefer in-repo copy; fall back to the one bundled with TRUDI if cases/ is missing.
+if [ -f "$MITRE_DEST" ]; then
+    ok "MITRE reference table already at $MITRE_DEST"
+elif [ -f "$MITRE_SRC" ]; then
+    cp "$MITRE_SRC" "$MITRE_DEST"
+    ok "Installed MITRE reference table → $MITRE_DEST"
+elif [ -f "/home/trin/cases/.common/mitre_techniques.json" ]; then
+    cp "/home/trin/cases/.common/mitre_techniques.json" "$MITRE_DEST"
+    ok "Copied MITRE reference table → $MITRE_DEST"
+else
+    warn "MITRE reference table not found in repo; mitre_map will be a no-op"
+fi
+
+
 # ── 2. Passwordless sudo for forensic tools ───────────────────────────────────
 
 step "Configuring passwordless sudo for forensic tools"
@@ -75,7 +190,7 @@ fi
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
 "$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements.txt"
 "$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements-dev.txt"
-ok "Dependencies installed (fastmcp, httpx, python-dotenv, yara-python, pytest)"
+ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, pytest)"
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
 

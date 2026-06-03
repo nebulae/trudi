@@ -1,0 +1,1461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TRUDI Investigation Chain</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-2: #161a21;
+    --bg-3: #1c2230;
+    --bg-hl: #2a3550;
+    --fg: #e6e9ef;
+    --fg-dim: #8a93a6;
+    --border: #28303f;
+    --accent: #6ea8ff;
+    --tool: #8a93a6;
+    --reason: #6ea8ff;
+    --dair: #b48cff;
+    --finding-confirmed: #ff6b6b;
+    --finding-likely: #ffa86b;
+    --finding-suspected: #ffd86b;
+    --finding-unconfirmed: #8a93a6;
+    --self-correct: #ffcb6b;
+    --ok: #4ad295;
+    --warn: #ffa86b;
+    --err: #ff6b6b;
+
+    /* Edge colours */
+    --edge-supports: #ff6b6b;
+    --edge-tests: #6ea8ff;
+    --edge-consumes: #8a93a6;
+    --edge-instigates: #4ad295;
+    --edge-evaluates: #ffa86b;
+    --edge-directs: #b48cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",Segoe UI,
+                   "Helvetica Neue",sans-serif;
+  }
+  code, pre, .mono { font-family: "SF Mono","Menlo","Consolas",monospace; font-size: 11px; }
+
+  /* Header */
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 16px; background: var(--bg-2);
+    border-bottom: 1px solid var(--border); height: 44px;
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; }
+  header h1 a { color: var(--fg); text-decoration: none; }
+  header .case-id { color: var(--accent); margin-left: 4px; }
+  header .stat { color: var(--fg-dim); font-size: 12px; }
+  header .live {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 8px; border-radius: 10px;
+    background: var(--bg-3); font-size: 12px;
+  }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--fg-dim); transition: background .2s;
+  }
+  .live.on .live-dot { background: var(--ok); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .back-btn, .ctrl-btn {
+    padding: 3px 10px; border-radius: 6px;
+    background: var(--bg-3); border: 1px solid var(--border);
+    color: var(--accent); text-decoration: none; font-size: 12px;
+    cursor: pointer;
+  }
+  .back-btn:hover, .ctrl-btn:hover { background: var(--bg-hl); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 220px 1fr minmax(360px, 460px);
+    height: calc(100vh - 44px);
+  }
+  .pane { overflow: auto; }
+  aside.filters {
+    background: var(--bg-2); border-right: 1px solid var(--border); padding: 12px;
+  }
+  aside.detail {
+    background: var(--bg-2); border-left: 1px solid var(--border); padding: 12px;
+    overflow: auto;
+  }
+  aside.detail .empty { color: var(--fg-dim); font-style: italic; }
+
+  .filter-group { margin-bottom: 14px; }
+  .filter-group h3 {
+    margin: 0 0 6px 0; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--fg-dim); font-weight: 600;
+  }
+  .filter-group label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; cursor: pointer; font-size: 12px;
+  }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 2px; display: inline-block;
+  }
+
+  /* Phase chronology strip — the DAIR state machine, visualised */
+  .phase-strip {
+    display: flex; align-items: stretch;
+    height: 32px; background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    font-size: 11px;
+  }
+  .phase-strip .ps-label {
+    padding: 0 12px; display: flex; align-items: center;
+    color: var(--fg-dim); font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.08em; font-size: 10px;
+    border-right: 1px solid var(--border); white-space: nowrap;
+  }
+  .phase-strip .ps-segments {
+    display: flex; flex: 1; min-width: 0;
+  }
+  .phase-strip .ps-seg {
+    display: flex; align-items: center; justify-content: center;
+    padding: 0 10px; cursor: pointer;
+    color: var(--fg); font-weight: 600;
+    border-right: 1px solid var(--border);
+    background: var(--bg-3);
+    min-width: 60px;
+    transition: filter .15s;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    position: relative;
+  }
+  .phase-strip .ps-seg:hover { filter: brightness(1.3); }
+  .phase-strip .ps-seg .ps-depth {
+    position: absolute; top: 1px; right: 4px;
+    font-size: 8px; color: rgba(255,255,255,0.55); font-weight: 400;
+  }
+  .phase-strip .ps-seg.phase-Triage   { background: rgba(255,134,103,0.30); }
+  .phase-strip .ps-seg.phase-Collect  { background: rgba(74,210,149,0.30); }
+  .phase-strip .ps-seg.phase-Analyze  { background: rgba(110,168,255,0.30); }
+  .phase-strip .ps-seg.phase-Scan     { background: rgba(255,216,107,0.30); }
+  .phase-strip .ps-seg.phase-Report   { background: rgba(180,140,255,0.30); }
+  .phase-strip .ps-seg.phase-Verification { background: rgba(255,107,107,0.30); }
+
+  /* Canvas — pannable, zoomable */
+  main.canvas {
+    position: relative; overflow: hidden;
+    background:
+      radial-gradient(circle, rgba(40,48,63,0.55) 1px, transparent 1px) 0 0 / 24px 24px,
+      var(--bg);
+    cursor: grab;
+    user-select: none;
+  }
+  main.canvas.dragging { cursor: grabbing; }
+  .world {
+    position: absolute; top: 0; left: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+  svg.wires {
+    position: absolute; top: 0; left: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .stats-bar {
+    position: absolute; bottom: 8px; left: 8px;
+    background: rgba(15, 17, 21, 0.85); padding: 4px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11px; color: var(--fg-dim); font-family: monospace;
+    z-index: 10;
+  }
+  .canvas-ctrl {
+    position: absolute; top: 8px; right: 8px;
+    display: flex; gap: 4px; z-index: 10;
+  }
+
+  /* Blueprint card */
+  .block {
+    position: absolute;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    border-radius: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    font-size: 11px;
+    overflow: hidden;
+    transition: box-shadow .15s, transform .15s, border-color .15s;
+  }
+  .block:hover {
+    box-shadow: 0 0 0 1px var(--accent), 0 4px 16px rgba(0,0,0,0.4);
+  }
+  .block.selected {
+    box-shadow: 0 0 0 2px var(--accent), 0 6px 20px rgba(0,0,0,0.5);
+  }
+  .block .b-head {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-weight: 600; font-size: 11px; color: var(--fg);
+    margin-bottom: 4px;
+  }
+  .block .b-cid {
+    color: var(--fg-dim); font-family: monospace; font-weight: 400;
+  }
+  .block .b-title {
+    color: var(--fg); margin-bottom: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .block .b-section {
+    display: flex; gap: 6px;
+    margin-top: 4px; padding-top: 4px;
+    border-top: 1px dashed var(--border);
+    color: var(--fg-dim);
+    font-family: monospace; font-size: 10px;
+  }
+  .block .b-section-label {
+    color: var(--fg-dim); font-weight: 600;
+    flex-shrink: 0; width: 30px; text-align: right;
+  }
+  .block .b-section-body {
+    flex: 1; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--fg);
+  }
+  .block .b-batch-row {
+    font-family: monospace; font-size: 10px;
+    padding: 1px 0; color: var(--fg);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .block .b-batch-row.fail { color: var(--err); }
+
+  /* Block colours by kind */
+  .block.kind-reason_plan             { border-left-color: var(--ok); }
+  .block.kind-reason_hypothesize      { border-left-color: var(--reason); }
+  .block.kind-reason_evaluate_finding { border-left-color: var(--err); }
+  .block.terminal-challenge {
+    border-left-color: var(--err);
+    border-left-width: 6px;
+    background: linear-gradient(90deg, rgba(255,107,107,0.15) 0%, var(--bg-2) 70%);
+    box-shadow: inset 0 0 0 1px rgba(255,107,107,0.30);
+  }
+  .block.terminal-challenge::after {
+    content: "✗ refused — no downstream entry";
+    display: block;
+    margin-top: 4px;
+    padding-top: 3px;
+    border-top: 1px dashed rgba(255,107,107,0.30);
+    color: var(--err); font-size: 9px;
+    font-family: "SF Mono","Menlo","Consolas",monospace;
+    letter-spacing: 0.04em;
+  }
+  .block.kind-reason_confidence_score { border-left-color: var(--finding-suspected); }
+  .block.kind-reason_cite_check       { border-left-color: var(--warn); }
+  .block.kind-reason_synthesize,
+  .block.kind-reason_pre_report_check,
+  .block.kind-reason_audit_findings   { border-left-color: #b48cff; }
+  .block.kind-dair_call {
+    border-left-color: var(--dair);
+    border-left-width: 6px;
+    background: linear-gradient(90deg, rgba(180,140,255,0.10) 0%, var(--bg-2) 60%);
+    box-shadow: inset 0 0 0 1px rgba(180,140,255,0.18);
+  }
+  .block.kind-dair_call .b-head { color: #d6c2ff; }
+  .block.kind-dair_call .state-pill {
+    display: inline-block; padding: 0 6px; margin-right: 6px;
+    background: var(--dair); color: #1c1029;
+    border-radius: 3px; font-size: 9px; font-weight: 700;
+    letter-spacing: 0.06em;
+  }
+  .block.kind-tool_batch              { border-left-color: var(--tool); }
+  .block.kind-finding                 { border-left-color: var(--finding-confirmed); }
+  .block.kind-finding.tier-CONFIRMED  { border-left-color: var(--finding-confirmed); }
+  .block.kind-finding.tier-LIKELY     { border-left-color: var(--finding-likely); }
+  .block.kind-finding.tier-SUSPECTED  { border-left-color: var(--finding-suspected); }
+  .block.kind-finding.tier-UNCONFIRMED{ border-left-color: var(--finding-unconfirmed); }
+  .block.kind-self_correction         { border-left-color: var(--self-correct); }
+  .block.kind-narration               { border-left-color: var(--fg-dim); }
+
+  /* Tier pill on findings */
+  .tier-pill {
+    display: inline-block; padding: 0 5px; border-radius: 3px;
+    font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+    margin-right: 4px;
+  }
+  .tier-pill.CONFIRMED  { background: var(--finding-confirmed); color: #1c0606; }
+  .tier-pill.LIKELY     { background: var(--finding-likely);    color: #2a1408; }
+  .tier-pill.SUSPECTED  { background: var(--finding-suspected); color: #2a2008; }
+  .tier-pill.UNCONFIRMED{ background: var(--finding-unconfirmed); color: #131722; }
+
+  /* Detail pane */
+  aside.detail h3 { margin: 0 0 8px 0; font-size: 13px; color: var(--accent); }
+  aside.detail .d-section {
+    margin: 12px 0 4px 0; font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-dim);
+  }
+  aside.detail .d-row {
+    margin: 4px 0; padding: 4px 8px;
+    background: var(--bg-3); border-radius: 4px;
+    font-family: "SF Mono","Menlo","Consolas",monospace; font-size: 11px;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+  aside.detail .d-link {
+    display: inline-block; margin-right: 8px; padding: 2px 6px;
+    background: var(--bg-3); border: 1px solid var(--border);
+    border-radius: 4px; color: var(--accent); text-decoration: none;
+    font-family: monospace; font-size: 11px; cursor: pointer;
+  }
+  aside.detail .d-link:hover { background: var(--bg-hl); }
+  aside.detail pre {
+    background: var(--bg-3); padding: 8px; border-radius: 4px;
+    overflow-x: auto; max-height: 320px; margin: 0;
+    font-family: "SF Mono","Menlo","Consolas",monospace; font-size: 10px;
+  }
+  aside.detail details { margin-top: 6px; }
+  aside.detail details summary {
+    cursor: pointer; color: var(--accent); font-size: 11px;
+    padding: 2px 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><a href="trace_viewer.html">← TRUDI Trace</a> · Investigation Chain — <span class="case-id" id="case-id">…</span></h1>
+  <span class="stat"><span id="block-count">0</span> blocks / <span id="edge-count">0</span> wires</span>
+  <span class="stat" style="margin-left:auto" id="last-fetch"></span>
+  <span class="live" id="live"><span class="live-dot"></span><span id="live-text">offline</span></span>
+  <a class="back-btn" id="back-link" href="trace_viewer.html">List view ↗</a>
+</header>
+
+<div class="layout">
+
+  <aside class="pane filters">
+    <div class="filter-group">
+      <h3>Block Types</h3>
+      <label><input type="checkbox" class="kind-filter" value="reason_plan" checked> <span class="legend-dot" style="background:var(--ok)"></span> reason.plan</label>
+      <label><input type="checkbox" class="kind-filter" value="dair_call" checked> <span class="legend-dot" style="background:var(--dair)"></span> DAIR phases</label>
+      <label><input type="checkbox" class="kind-filter" value="tool_batch" checked> <span class="legend-dot" style="background:var(--tool)"></span> Tool batches</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_hypothesize" checked> <span class="legend-dot" style="background:var(--reason)"></span> reason.hypothesize</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_evaluate_finding" checked> <span class="legend-dot" style="background:var(--err)"></span> reason.evaluate</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_confidence_score" checked> <span class="legend-dot" style="background:var(--finding-suspected)"></span> reason.confidence</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_cite_check" checked> <span class="legend-dot" style="background:var(--warn)"></span> reason.cite_check</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_synthesize" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.synthesize</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_pre_report_check" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.pre_report</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_audit_findings" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.audit</label>
+      <label><input type="checkbox" class="kind-filter" value="finding" checked> <span class="legend-dot" style="background:var(--finding-confirmed)"></span> Findings</label>
+      <label><input type="checkbox" class="kind-filter" value="self_correction" checked> <span class="legend-dot" style="background:var(--self-correct)"></span> Self-corrections</label>
+      <label><input type="checkbox" class="kind-filter" value="narration"> <span class="legend-dot" style="background:var(--fg-dim)"></span> Agent notes</label>
+      <label><input type="checkbox" id="show-hook-ops"> <span class="legend-dot" style="background:var(--fg-dim);opacity:0.5"></span> Agent shell ops (Bash/Read/Edit)</label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Wire Legend</h3>
+      <label><span style="display:inline-block;width:24px;height:0;border-top:3px solid var(--edge-instigates)"></span> instigates (agent-declared lineage)</label>
+      <label><span style="display:inline-block;width:24px;height:0;border-top:2px solid var(--edge-directs)"></span> directs (plan/DAIR → next)</label>
+      <label><span style="display:inline-block;width:24px;height:0;border-top:2px solid var(--edge-consumes)"></span> consumes (data flow)</label>
+      <label><span style="display:inline-block;width:24px;height:0;border-top:2px solid var(--edge-supports)"></span> supports (finding ← evidence)</label>
+      <label><span style="display:inline-block;width:24px;height:0;border-top:2px dashed var(--edge-tests)"></span> tests (hypothesis)</label>
+      <label><span style="display:inline-block;width:24px;height:0;border-top:2px dotted var(--edge-evaluates)"></span> evaluates (gate)</label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Layout</h3>
+      <button class="ctrl-btn" id="fit-btn" style="width:100%;margin-bottom:4px;">Fit to screen</button>
+      <button class="ctrl-btn" id="relayout-btn" style="width:100%;">Re-layout</button>
+    </div>
+  </aside>
+
+  <main class="canvas pane" id="canvas">
+    <div class="phase-strip" id="phase-strip" style="position:absolute;top:0;left:0;right:0;z-index:5;">
+      <div class="ps-label">DAIR state machine</div>
+      <div class="ps-segments" id="ps-segments"></div>
+    </div>
+    <div class="world" id="world" style="margin-top:32px;">
+      <svg class="wires" id="wires" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="blocks"></div>
+    </div>
+    <div class="canvas-ctrl">
+      <button class="ctrl-btn" id="zoom-out-btn">−</button>
+      <button class="ctrl-btn" id="zoom-in-btn">+</button>
+      <button class="ctrl-btn" id="reset-zoom-btn">100%</button>
+    </div>
+    <div class="stats-bar" id="stats-bar">Loading…</div>
+  </main>
+
+  <aside class="pane detail" id="detail">
+    <div class="empty">Click a block to see its inputs, outputs, and connections.</div>
+  </aside>
+
+</div>
+
+<script src="vendor/dagre.min.js"></script>
+<script>
+'use strict';
+
+const State = {
+  traceUrl: null,
+  caseId: '',
+  entries: [],
+  blocks: [],
+  edges: [],
+  blockOfCid: new Map(),  // call_id → block id
+  byCid: new Map(),       // call_id → entry
+  laidOut: null,          // dagre layout output
+  selectedBlockId: null,
+  prevEntryCount: 0,
+  view: { tx: 0, ty: 0, scale: 1 },
+  filters: {
+    kinds: new Set([
+      'reason_plan', 'dair_call', 'tool_batch',
+      'reason_hypothesize', 'reason_evaluate_finding',
+      'reason_confidence_score', 'reason_cite_check',
+      'reason_synthesize', 'reason_pre_report_check', 'reason_audit_findings',
+      'finding', 'self_correction',
+    ]),
+    showHookOps: false,  // PostToolUse hook entries (Bash/Read/Edit/Write) — off by default
+  },
+};
+
+// Hook entries are tool_calls injected by ~/.claude/hooks/log_narration.py
+// when the agent invokes Claude Code's own Bash/Read/Edit/Write tools.
+// They carry _source_tool_use_id or _source_uuid; MCP tool_calls don't.
+function isHookEntry(e) {
+  return !!(e._source_tool_use_id || e._source_uuid || e.source === 'claude_code_bash');
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+function truncate(s, n) {
+  s = String(s ?? '');
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+function parseToolLabel(cmd) {
+  if (!cmd) return 'tool';
+  let s = cmd.replace(/^sudo\s+/, '');
+  const parts = s.split(/\s+/);
+  const head = parts[0] || '';
+  const headBase = head.split('/').pop();
+  if (headBase === 'vol' || head.endsWith('/vol')) {
+    const m = s.match(/\b(?:windows|linux|mac)\.(\S+)/);
+    return m ? `vol ${m[1]}` : 'vol';
+  }
+  if (headBase === 'dotnet') {
+    const m = s.match(/([A-Za-z0-9_]+)\.dll/);
+    return m ? `ez ${m[1]}` : 'dotnet';
+  }
+  if (['fls','icat','istat','ils','blkls','mactime','tsk_recover','sigfind','sorter',
+       'jls','jcat','blkcat','blkstat','blkcalc','mmls','fsstat','ffind','hfind',
+       'mmcat','mmstat'].includes(headBase)) return `tsk ${headBase}`;
+  if (headBase === 'log2timeline.py' || headBase === 'log2timeline') return 'plaso log2timeline';
+  if (headBase === 'psort.py' || headBase === 'psort') return 'plaso psort';
+  if (headBase === 'yara') return 'yara scan';
+  if (['bulk_extractor','foremost','scalpel','photorec'].includes(headBase)) return `carve ${headBase}`;
+  if (['tcpdump','ngrep','tcpxtract'].includes(headBase)) return `net ${headBase}`;
+  if (s.includes('rip.pl')) return 'misc regripper';
+  if (s.includes('evtx_dump')) return 'misc evtx_dump';
+  if (s.includes('usnparser')) return 'misc usnparser';
+  return headBase || 'tool';
+}
+
+// ── Group entries into blocks ────────────────────────────────────────────────
+// Adjacent tool_call entries sharing dair_phase fold into one tool_batch block.
+// Everything else is one block per entry.
+function buildBlocks(entries) {
+  const blocks = [];
+  let batch = null;
+  let dairStateCount = 0;
+  // Track whether the batch-in-progress is hook-sourced — never mix hook ops
+  // and MCP tool calls in the same batch (different semantics, different fates
+  // under the "Agent shell ops" filter).
+  for (const e of entries) {
+    const kind = entryKind(e);
+    if (kind === 'tool_call') {
+      const phase = e.dair_phase || '';
+      const isHook = isHookEntry(e);
+      // Drop hook entries entirely when the toggle is off.
+      if (isHook && !State.filters.showHookOps) continue;
+      if (batch && batch.phase === phase && batch.isHook === isHook) {
+        batch.entries.push(e);
+        continue;
+      }
+      if (batch) blocks.push(batch);
+      batch = {
+        id: `batch-${e.call_id}`,
+        kind: 'tool_batch',
+        phase,
+        isHook,
+        entries: [e],
+        firstCid: e.call_id,
+      };
+    } else {
+      if (batch) { blocks.push(batch); batch = null; }
+      const block = {
+        id: `n${e.call_id}`,
+        kind,
+        entry: e,
+        firstCid: e.call_id,
+      };
+      if (kind === 'dair_call') {
+        dairStateCount++;
+        block._stateNum = dairStateCount;
+      }
+      blocks.push(block);
+    }
+  }
+  if (batch) blocks.push(batch);
+  return blocks;
+}
+
+function entryKind(e) {
+  if (e.type === 'reason_call') return e.tool || 'reason_call';
+  if (e.type === 'investigation_narration') return 'narration';
+  return e.type;
+}
+
+// ── Build edges (wires) ──────────────────────────────────────────────────────
+function buildEdges(blocks, byCid, blockOfCid) {
+  const edges = [];
+  const seen = new Set();
+  const addEdge = (from, to, kind) => {
+    if (!from || !to || from === to) return;
+    const key = `${from}|${to}|${kind}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    edges.push({ from, to, kind });
+  };
+
+  // hypothesis_id index for tested_hypothesis_id wiring
+  const hypBlockByHid = new Map();
+  for (const b of blocks) {
+    if (b.kind === 'reason_hypothesize' && b.entry?.hypothesis_id) {
+      hypBlockByHid.set(b.entry.hypothesis_id, b.id);
+    }
+  }
+
+  // Build a "finding → gate calls" index. Prefer explicit foreign keys stamped
+  // by the gates (gated_by_evaluate_call_id, gated_by_confidence_call_id,
+  // gated_by_cite_check_call_id, gated_by_hypothesize_call_id). Fall back to
+  // substring → word-overlap match on user_message for legacy entries.
+  const normalize = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').slice(0, 60);
+  // Word-overlap (Jaccard-like, biased toward "is finding text contained in
+  // user_message"): handles cases where the agent rephrased the finding
+  // between the eval call and the record_finding call.
+  const tokenize = s => new Set(
+    String(s || '').toLowerCase().match(/[a-z0-9_.\-]{4,}/g) || []
+  );
+  const wordOverlap = (a, b) => {
+    const wa = tokenize(a), wb = tokenize(b);
+    if (wa.size === 0 || wb.size === 0) return 0;
+    let inter = 0;
+    for (const w of wa) if (wb.has(w)) inter++;
+    return inter / Math.min(wa.size, wb.size);
+  };
+  const WORD_OVERLAP_THRESHOLD = 0.4;
+  const gateLookbackByFinding = new Map();  // cid → {evaluate, confidence, cite, hypothesize}
+  for (const f of (byCid.values())) {
+    if (f.type !== 'finding') continue;
+    const lookback = {
+      evaluate:    f.gated_by_evaluate_call_id    || null,
+      confidence:  f.gated_by_confidence_call_id  || null,
+      cite:        f.gated_by_cite_check_call_id  || null,
+      hypothesize: f.gated_by_hypothesize_call_id || null,
+    };
+    // Fallback: substring → word-overlap for legacy entries (no explicit FKs)
+    const needsFallback = !lookback.evaluate && !lookback.confidence && !lookback.cite;
+    if (needsFallback) {
+      const fdesc = (f.description || '').toLowerCase();
+      const fdescNorm = normalize(f.description);
+      if (fdesc) {
+        const window = [];
+        for (const [cid, x] of byCid) {
+          if (cid < f.call_id && cid >= f.call_id - 30) window.push(x);
+        }
+        window.sort((a, b) => b.call_id - a.call_id);
+        // Per gate-tool, track the best candidate (substring wins over word-overlap;
+        // newest call_id wins on ties)
+        const best = { evaluate: null, confidence: null, cite: null };
+        for (const x of window) {
+          if (x.type !== 'reason_call') continue;
+          const tool = x.tool;
+          if (!['reason_evaluate_finding','reason_confidence_score','reason_cite_check'].includes(tool)) continue;
+          const um = ((x.inputs && x.inputs.user_message) || '').toLowerCase();
+          if (!um) continue;
+          const key = tool === 'reason_evaluate_finding' ? 'evaluate'
+                    : tool === 'reason_confidence_score' ? 'confidence' : 'cite';
+          let score = 0;
+          if (fdescNorm && um.includes(fdescNorm.slice(0, 40))) {
+            score = 1.0;  // substring hit — strongest signal
+          } else {
+            const ov = wordOverlap(fdesc, um);
+            if (ov >= WORD_OVERLAP_THRESHOLD) score = ov;
+          }
+          if (score > 0 && (!best[key] || score > best[key].score)) {
+            best[key] = { call_id: x.call_id, score };
+          }
+        }
+        if (best.evaluate)   lookback.evaluate   = best.evaluate.call_id;
+        if (best.confidence) lookback.confidence = best.confidence.call_id;
+        if (best.cite)       lookback.cite       = best.cite.call_id;
+      }
+    }
+    gateLookbackByFinding.set(f.call_id, lookback);
+  }
+
+  for (const b of blocks) {
+    const entriesToScan = b.kind === 'tool_batch' ? b.entries : [b.entry];
+    for (const e of entriesToScan) {
+      // linked_call_id (finding → tool, evidence link)
+      if (e.linked_call_id) {
+        const src = blockOfCid.get(e.linked_call_id);
+        if (src) addEdge(src, b.id, 'supports');
+      }
+      // Findings ← their gate clearers (evaluate/confidence/cite/hypothesize)
+      if (e.type === 'finding') {
+        const lb = gateLookbackByFinding.get(e.call_id);
+        if (lb) {
+          for (const cid of [lb.evaluate, lb.confidence, lb.cite]) {
+            if (cid) {
+              const src = blockOfCid.get(cid);
+              if (src) addEdge(src, b.id, 'evaluates');
+            }
+          }
+          if (lb.hypothesize) {
+            const src = blockOfCid.get(lb.hypothesize);
+            if (src) addEdge(src, b.id, 'tests');
+          }
+        }
+      }
+      // tested_hypothesis_id (finding ← hypothesis)
+      if (e.tested_hypothesis_id) {
+        const src = hypBlockByHid.get(e.tested_hypothesis_id);
+        if (src) addEdge(src, b.id, 'tests');
+      }
+      // input_call_ids — the agent-declared upstream lineage. Drawn as
+      // `instigates` (load-bearing, primary wire kind) rather than the legacy
+      // `consumes` so it visually outranks heuristic edges in the chain view.
+      if (Array.isArray(e.input_call_ids)) {
+        for (const inp of e.input_call_ids) {
+          const src = blockOfCid.get(inp);
+          if (src) addEdge(src, b.id, 'instigates');
+        }
+      }
+      // reason.evaluate/cite/confidence run BEFORE record_finding — they are
+      // the gate the finding must clear. So look FORWARD for the finding whose
+      // description appears in this reason call's user_message; fall back to
+      // backward if forward doesn't match (eg agent re-evaluated a prior tier).
+      if (e.type === 'reason_call' &&
+          ['reason_evaluate_finding','reason_cite_check','reason_confidence_score']
+            .includes(e.tool)) {
+        const user_msg = ((e.inputs && e.inputs.user_message) || '').toLowerCase();
+        if (user_msg) {
+          // Forward search (preferred): earliest finding after this eval whose
+          // description appears in user_message. This is the gate→finding flow.
+          let forwardMatch = null;
+          for (const [cid, target] of byCid) {
+            if (target.type !== 'finding') continue;
+            if (cid <= e.call_id) continue;
+            const desc = (target.description || '').toLowerCase();
+            if (desc && user_msg.includes(desc.slice(0, 40))) {
+              if (!forwardMatch || cid < forwardMatch.call_id) forwardMatch = target;
+            }
+          }
+          if (forwardMatch) {
+            addEdge(b.id, blockOfCid.get(forwardMatch.call_id), 'evaluates');
+          } else {
+            // Backward fallback (re-evaluation of an existing finding)
+            let backMatch = null;
+            for (const [cid, target] of byCid) {
+              if (target.type !== 'finding') continue;
+              if (cid >= e.call_id) continue;
+              const desc = (target.description || '').toLowerCase();
+              if (desc && user_msg.includes(desc.slice(0, 40))) {
+                if (!backMatch || cid > backMatch.call_id) backMatch = target;
+              }
+            }
+            if (backMatch) addEdge(blockOfCid.get(backMatch.call_id), b.id, 'evaluates');
+          }
+        }
+      }
+    }
+  }
+
+  // Sequential "directs" edges: reason.plan → next DAIR; each DAIR → next DAIR
+  // and DAIR → tool batches in its phase.
+  let prevDair = null;
+  let prevPlan = null;
+  // Buffer of pre-plan tool batches awaiting wire-up to their downstream reason.plan
+  let prePlanBatches = [];
+  for (const b of blocks) {
+    if (b.kind === 'reason_plan') {
+      // Wire any tool batches that ran BEFORE this plan as `consumes` —
+      // they fed the plan via the agent's evidence_available summary.
+      // This catches the pre-plan reads (vol_symbol_check, ez_recmd_hive × 3,
+      // strings_stat_file, hash_verify_evidence_hash) that have no dair_phase
+      // yet but informed the plan.
+      for (const pre of prePlanBatches) {
+        addEdge(pre.id, b.id, 'consumes');
+      }
+      prePlanBatches = [];
+      prevPlan = b;
+    } else if (b.kind === 'dair_call') {
+      if (prevPlan && !edges.some(e => e.from === prevPlan.id && e.to === b.id)) {
+        addEdge(prevPlan.id, b.id, 'directs');
+        prevPlan = null;
+      } else if (prevDair) {
+        addEdge(prevDair.id, b.id, 'directs');
+      }
+      prevDair = b;
+    } else if (b.kind === 'tool_batch') {
+      // Phase-matched DAIR → batch (normal tool execution)
+      if (prevDair && prevDair.entry?.current_phase === b.phase) {
+        addEdge(prevDair.id, b.id, 'directs');
+      } else if (!prevDair && !prevPlan && !b.isHook) {
+        // Pre-plan MCP batches — hold until the reason.plan card and wire then.
+        prePlanBatches.push(b);
+      } else if (prevDair && b.phase === '') {
+        // MCP batch with no dair_phase that happens after first DAIR —
+        // probably a mid-phase parallel call that lost its phase stamp;
+        // attribute to the most recent DAIR anyway.
+        addEdge(prevDair.id, b.id, 'directs');
+      }
+    }
+  }
+
+  // Edge case: pre-plan batches that exist but no reason.plan was ever called.
+  // Wire them to the first DAIR call instead so they're not orphan.
+  if (prePlanBatches.length) {
+    const firstDair = blocks.find(b => b.kind === 'dair_call');
+    if (firstDair) {
+      for (const pre of prePlanBatches) {
+        addEdge(pre.id, firstDair.id, 'consumes');
+      }
+    }
+  }
+
+  return edges;
+}
+
+// ── Block rendering ──────────────────────────────────────────────────────────
+const BLOCK_WIDTH = 240;
+const BLOCK_WIDTH_DAIR = 280;
+const BLOCK_HEIGHT_DEFAULT = 88;
+const BLOCK_HEIGHT_FINDING = 100;
+const BLOCK_HEIGHT_BATCH = 110;
+const BLOCK_HEIGHT_SYNTH = 100;
+const BLOCK_HEIGHT_DAIR = 110;
+
+function blockWidth(b) {
+  return b.kind === 'dair_call' ? BLOCK_WIDTH_DAIR : BLOCK_WIDTH;
+}
+function blockHeight(b) {
+  if (b.kind === 'finding') return BLOCK_HEIGHT_FINDING;
+  if (b.kind === 'tool_batch') return BLOCK_HEIGHT_BATCH;
+  if (b.kind === 'reason_synthesize' || b.kind === 'reason_pre_report_check') return BLOCK_HEIGHT_SYNTH;
+  if (b.kind === 'dair_call') return BLOCK_HEIGHT_DAIR;
+  return BLOCK_HEIGHT_DEFAULT;
+}
+
+function blockTitle(b) {
+  if (b.kind === 'tool_batch') {
+    return `Tool batch · ${b.phase || 'no phase'}`;
+  }
+  const e = b.entry;
+  switch (b.kind) {
+    case 'reason_plan':             return 'reason.plan';
+    case 'reason_hypothesize':      return `reason.hypothesize · ${e.hypothesis_id || ''}`;
+    case 'reason_evaluate_finding': return 'reason.evaluate_finding';
+    case 'reason_confidence_score': return 'reason.confidence_score';
+    case 'reason_cite_check':       return 'reason.cite_check';
+    case 'reason_synthesize':       return 'reason.synthesize';
+    case 'reason_pre_report_check': return 'reason.pre_report_check';
+    case 'reason_audit_findings':   return 'reason.audit_findings';
+    case 'dair_call': {
+      const phase = e.current_phase || '?';
+      const next = e.next_phase && e.next_phase !== phase ? ` → ${e.next_phase}` : '';
+      const action = e.stack_action ? ` ${e.stack_action}` : '';
+      const stateNum = b._stateNum != null ? `STATE ${b._stateNum} · ` : '';
+      return `${stateNum}DAIR ${phase}${next}${action}`;
+    }
+    case 'finding':                 return 'finding';
+    case 'self_correction':         return `self-correction · ${e.trigger || ''}`;
+    case 'narration':               return 'agent note';
+    default:                        return e.type || 'entry';
+  }
+}
+
+function blockBody(b) {
+  if (b.kind === 'tool_batch') {
+    const rows = [];
+    const cap = 4;
+    for (const e of b.entries.slice(0, cap)) {
+      const tool = parseToolLabel(e.cmd);
+      const ok = e.success !== false;
+      rows.push(`<div class="b-batch-row${ok ? '' : ' fail'}">#${e.call_id} ${escapeHtml(tool)} ${ok ? '✓' : '✗'}</div>`);
+    }
+    if (b.entries.length > cap) {
+      rows.push(`<div class="b-batch-row" style="color:var(--fg-dim);">… +${b.entries.length - cap} more</div>`);
+    }
+    const okCount = b.entries.filter(e => e.success !== false).length;
+    rows.push(`<div class="b-section"><div class="b-section-label">out</div><div class="b-section-body">${b.entries.length} calls · ${okCount} ok · ${b.entries.length - okCount} fail</div></div>`);
+    return rows.join('');
+  }
+
+  const e = b.entry;
+  switch (b.kind) {
+    case 'reason_plan': {
+      const pri = (e.directives && e.directives.priority_tools) || [];
+      const concl = truncate((e.conclusion || '').replace(/\s+/g, ' '), 80);
+      return inOutBody(
+        truncate(((e.inputs && e.inputs.case_description) || '').replace(/\s+/g, ' '), 60),
+        `${pri.length} priority_tools · "${escapeHtml(concl)}"`,
+      );
+    }
+    case 'reason_hypothesize':
+      return inOutBody(
+        truncate(((e.inputs && e.inputs.observation) || '').replace(/\s+/g, ' '), 60),
+        truncate((e.conclusion || '').replace(/\s+/g, ' '), 60),
+      );
+    case 'reason_evaluate_finding': {
+      const verdict = (e.conclusion || '').match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)/i);
+      const v = verdict ? verdict[1].toUpperCase() : '?';
+      return inOutBody(
+        truncate(((e.inputs && e.inputs.user_message) || '').replace(/\s+/g, ' '), 60),
+        `VERDICT: ${v}`,
+      );
+    }
+    case 'reason_confidence_score': {
+      const tier = (e.conclusion || '').match(/"tier"\s*:\s*"(\w+)"/i)
+                || (e.conclusion || '').match(/TIER\s*[:=]\s*(\w+)/i);
+      const score = (e.conclusion || '').match(/"score"\s*:\s*([0-9.]+)/i);
+      return inOutBody(
+        truncate(((e.inputs && e.inputs.user_message) || '').replace(/\s+/g, ' '), 60),
+        `tier: ${tier ? tier[1].toUpperCase() : '?'}${score ? ` · ${score[1]}` : ''}`,
+      );
+    }
+    case 'reason_cite_check': {
+      const v = (e.conclusion || '').match(/(ALL_CITED|UNCITED_CLAIMS_PRESENT|INSUFFICIENT_EVIDENCE)/i);
+      return inOutBody(
+        truncate(((e.inputs && e.inputs.user_message) || '').replace(/\s+/g, ' '), 60),
+        v ? v[1].toUpperCase() : '?',
+      );
+    }
+    case 'reason_synthesize':
+    case 'reason_pre_report_check':
+    case 'reason_audit_findings':
+      return inOutBody(
+        `${(e.evidence_audit || []).length} audit refs`,
+        truncate((e.conclusion || '').replace(/\s+/g, ' '), 90),
+      );
+    case 'dair_call': {
+      const pri = (e.directives && e.directives.priority_tools) || [];
+      const summary = truncate(
+        ((e.inputs && e.inputs.tool_results_summary)
+         || e.investigation_focus
+         || e.phase_rationale
+         || '').replace(/\s+/g, ' '),
+        60);
+      return inOutBody(
+        summary,
+        `${pri.length} priority_tools${e.verification_satisfied ? ' · verified' : ''}`,
+      );
+    }
+    case 'finding': {
+      const tier = (e.confidence || '').toUpperCase();
+      const desc = truncate((e.description || '').replace(/\s+/g, ' '), 80);
+      let footer = '';
+      const refs = [];
+      if (e.linked_call_id) refs.push(`supports: #${e.linked_call_id}`);
+      if (e.tested_hypothesis_id) refs.push(`tests: ${e.tested_hypothesis_id}`);
+      if (refs.length) footer = `<div class="b-section"><div class="b-section-label">refs</div><div class="b-section-body">${escapeHtml(refs.join(' · '))}</div></div>`;
+      return `<div class="b-title"><span class="tier-pill ${tier}">${tier}</span>${escapeHtml(desc)}</div>${footer}`;
+    }
+    case 'self_correction':
+      return inOutBody(
+        truncate((e.prior_belief || '').replace(/\s+/g, ' '), 60),
+        truncate((e.new_belief || '').replace(/\s+/g, ' '), 60),
+      );
+    case 'narration':
+      return inOutBody('', truncate((e.content || '').replace(/\s+/g, ' '), 80));
+    default:
+      return '';
+  }
+}
+
+function inOutBody(inText, outText) {
+  const inRow = inText
+    ? `<div class="b-section"><div class="b-section-label">in</div><div class="b-section-body">${escapeHtml(inText)}</div></div>`
+    : '';
+  const outRow = outText
+    ? `<div class="b-section"><div class="b-section-label">out</div><div class="b-section-body">${escapeHtml(outText)}</div></div>`
+    : '';
+  return inRow + outRow;
+}
+
+function blockHTML(b, extraClasses = '') {
+  const tier = b.kind === 'finding' ? ` tier-${(b.entry.confidence || '').toUpperCase()}` : '';
+  const cid = b.kind === 'tool_batch'
+    ? `#${b.entries[0].call_id}-#${b.entries[b.entries.length - 1].call_id}`
+    : `#${b.entry.call_id}`;
+  return `
+    <div class="block kind-${b.kind}${tier}${extraClasses ? ' ' + extraClasses : ''}" data-block-id="${b.id}"
+         style="width:${blockWidth(b)}px;height:${blockHeight(b)}px;">
+      <div class="b-head">
+        <span>${escapeHtml(blockTitle(b))}</span>
+        <span class="b-cid">${cid}</span>
+      </div>
+      ${blockBody(b)}
+    </div>`;
+}
+
+// Detect "terminal-challenge" blocks: CHALLENGED evals that have no outgoing
+// edge (no recorded finding, no auto-self_correction in legacy traces).
+// After B1 lands, new traces will rarely hit this because every CHALLENGED
+// gets an auto self_correction. This is the legacy / edge-case visual.
+function isTerminalChallenge(b, edges) {
+  if (b.kind !== 'reason_evaluate_finding') return false;
+  const conc = (b.entry && b.entry.conclusion) || '';
+  if (!/VERDICT:\s*CHALLENGED/i.test(conc)) return false;
+  return !edges.some(e => e.from === b.id);
+}
+
+// ── Layout via dagre ────────────────────────────────────────────────────────
+function layout(blocks, edges) {
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({
+    rankdir: 'LR',
+    nodesep: 40,
+    ranksep: 110,
+    edgesep: 24,
+    marginx: 30, marginy: 30,
+  });
+  g.setDefaultEdgeLabel(() => ({}));
+
+  for (const b of blocks) {
+    g.setNode(b.id, { width: blockWidth(b), height: blockHeight(b) });
+  }
+  for (const e of edges) {
+    g.setEdge(e.from, e.to, { kind: e.kind });
+  }
+  dagre.layout(g);
+  return g;
+}
+
+// ── Wire (SVG path) rendering ────────────────────────────────────────────────
+function wirePath(points) {
+  // points are dagre's polyline waypoints (each {x,y}).
+  // Convert to a smooth curve via successive cubic beziers (Catmull-Rom-ish).
+  if (!points || points.length === 0) return '';
+  if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
+  if (points.length === 2) {
+    const [a, b] = points;
+    const mx = (a.x + b.x) / 2;
+    return `M ${a.x} ${a.y} C ${mx} ${a.y}, ${mx} ${b.y}, ${b.x} ${b.y}`;
+  }
+  // 3+ points: chain bezier segments
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const mx = (prev.x + curr.x) / 2;
+    d += ` C ${mx} ${prev.y}, ${mx} ${curr.y}, ${curr.x} ${curr.y}`;
+  }
+  return d;
+}
+
+function wireStyle(kind) {
+  const colour = {
+    supports:   'var(--edge-supports)',
+    tests:      'var(--edge-tests)',
+    consumes:   'var(--edge-consumes)',
+    instigates: 'var(--edge-instigates)',
+    evaluates:  'var(--edge-evaluates)',
+    directs:    'var(--edge-directs)',
+  }[kind] || 'var(--edge-consumes)';
+  const dash = {
+    tests:     '6 4',
+    evaluates: '2 3',
+  }[kind] || '';
+  // instigates is the agent-declared primary lineage — drawn 1px thicker so
+  // it visually outranks heuristic edges (consumes, evaluates) when both
+  // are present on the same chain view.
+  const width = (kind === 'instigates') ? 3 : 2.5;
+  return { colour, dash, width };
+}
+
+// ── Render full canvas ──────────────────────────────────────────────────────
+function render() {
+  const blocksEl = document.getElementById('blocks');
+  const wiresEl = document.getElementById('wires');
+  blocksEl.innerHTML = '';
+  wiresEl.innerHTML = '';
+
+  if (State.blocks.length === 0) {
+    document.getElementById('stats-bar').textContent = 'No entries yet';
+    return;
+  }
+
+  // Filter blocks by kind
+  const visible = State.blocks.filter(b => State.filters.kinds.has(b.kind));
+  const visibleIds = new Set(visible.map(b => b.id));
+  const visibleEdges = State.edges.filter(e =>
+    visibleIds.has(e.from) && visibleIds.has(e.to));
+
+  if (visible.length === 0) {
+    document.getElementById('stats-bar').textContent = 'Nothing matches the current filters';
+    return;
+  }
+
+  // Layout
+  const g = layout(visible, visibleEdges);
+  State.laidOut = g;
+
+  // Determine world size from layout extent
+  let maxX = 0, maxY = 0;
+  for (const id of g.nodes()) {
+    const n = g.node(id);
+    maxX = Math.max(maxX, n.x + n.width / 2);
+    maxY = Math.max(maxY, n.y + n.height / 2);
+  }
+  const worldW = Math.ceil(maxX + 40);
+  const worldH = Math.ceil(maxY + 40);
+
+  // Position SVG
+  wiresEl.setAttribute('width', worldW);
+  wiresEl.setAttribute('height', worldH);
+  wiresEl.style.width = worldW + 'px';
+  wiresEl.style.height = worldH + 'px';
+  // Arrow markers per kind — defined once
+  const markers = `
+    <defs>
+      <marker id="ar-supports"  viewBox="-6 -4 8 8" refX="0" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M-6,-4 L0,0 L-6,4 z" fill="var(--edge-supports)"/></marker>
+      <marker id="ar-tests"     viewBox="-6 -4 8 8" refX="0" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M-6,-4 L0,0 L-6,4 z" fill="var(--edge-tests)"/></marker>
+      <marker id="ar-consumes"  viewBox="-6 -4 8 8" refX="0" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M-6,-4 L0,0 L-6,4 z" fill="var(--edge-consumes)"/></marker>
+      <marker id="ar-evaluates" viewBox="-6 -4 8 8" refX="0" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M-6,-4 L0,0 L-6,4 z" fill="var(--edge-evaluates)"/></marker>
+      <marker id="ar-directs"   viewBox="-6 -4 8 8" refX="0" refY="0" markerWidth="6" markerHeight="6" orient="auto"><path d="M-6,-4 L0,0 L-6,4 z" fill="var(--edge-directs)"/></marker>
+      <marker id="ar-instigates" viewBox="-6 -4 8 8" refX="0" refY="0" markerWidth="7" markerHeight="7" orient="auto"><path d="M-6,-4 L0,0 L-6,4 z" fill="var(--edge-instigates)"/></marker>
+    </defs>`;
+
+  // Build wire paths
+  const wirePaths = [];
+  for (const ed of g.edges()) {
+    const data = g.edge(ed);
+    const kind = data.kind || 'consumes';
+    const { colour, dash, width } = wireStyle(kind);
+    const d = wirePath(data.points);
+    wirePaths.push(
+      `<path d="${d}" fill="none" stroke="${colour}" stroke-width="${width}"`
+      + (dash ? ` stroke-dasharray="${dash}"` : '')
+      + ` marker-end="url(#ar-${kind})" data-edge="${ed.v}|${ed.w}|${kind}" />`
+    );
+  }
+  wiresEl.innerHTML = markers + wirePaths.join('');
+
+  // Position blocks (annotate terminal CHALLENGED evals with a class so the
+  // CSS surfaces them as "✗ refused — no downstream entry" instead of
+  // looking accidentally orphan)
+  for (const b of visible) {
+    const n = g.node(b.id);
+    if (!n) continue;
+    const extra = isTerminalChallenge(b, visibleEdges) ? 'terminal-challenge' : '';
+    const html = blockHTML(b, extra);
+    const wrap = document.createElement('div');
+    wrap.innerHTML = html;
+    const el = wrap.firstElementChild;
+    el.style.left = (n.x - n.width / 2) + 'px';
+    el.style.top  = (n.y - n.height / 2) + 'px';
+    blocksEl.appendChild(el);
+  }
+
+  // Stats
+  document.getElementById('block-count').textContent = visible.length;
+  document.getElementById('edge-count').textContent = visibleEdges.length;
+  document.getElementById('stats-bar').textContent =
+    `${visible.length} blocks · ${visibleEdges.length} wires · drag to pan · wheel to zoom`;
+
+  renderPhaseStrip();
+}
+
+// ── Phase chronology strip — surfaces DAIR as the first-class state machine ──
+// Walks all DAIR cards, collapses adjacent same-phase calls into segments,
+// renders a clickable chip per segment. Click → fit-to-screen on that span.
+function renderPhaseStrip() {
+  const stripEl = document.getElementById('ps-segments');
+  if (!stripEl) return;
+  const dairBlocks = State.blocks.filter(b => b.kind === 'dair_call');
+  if (dairBlocks.length === 0) {
+    stripEl.innerHTML = '<div style="padding:0 12px;display:flex;align-items:center;color:var(--fg-dim);font-style:italic;">No DAIR phase transitions yet.</div>';
+    return;
+  }
+  // Group adjacent DAIR cards into "phase segments" — a segment runs until
+  // current_phase changes (or stack_action pushes/pops a different phase).
+  const segments = [];
+  for (const b of dairBlocks) {
+    const e = b.entry;
+    const phase = e.current_phase || '?';
+    const depth = e.dair_depth ?? 0;
+    const prev = segments[segments.length - 1];
+    if (prev && prev.phase === phase && prev.depth === depth) {
+      prev.blocks.push(b);
+    } else {
+      segments.push({ phase, depth, blocks: [b] });
+    }
+  }
+  // Render as proportional chips: each gets width proportional to # calls in segment
+  const total = segments.reduce((s, x) => s + x.blocks.length, 0);
+  const html = segments.map((seg, i) => {
+    const pct = (seg.blocks.length / total) * 100;
+    const tooltip = `${seg.phase} · ${seg.blocks.length} dair_assess call(s) · stack depth ${seg.depth}`;
+    return `<div class="ps-seg phase-${seg.phase}" data-first-block="${seg.blocks[0].id}"
+                title="${escapeHtml(tooltip)}"
+                style="flex-basis:${pct}%;flex-grow:1;">
+              STATE ${seg.blocks[0]._stateNum || i + 1} · ${escapeHtml(seg.phase)}
+              ${seg.blocks.length > 1 ? ` ×${seg.blocks.length}` : ''}
+              ${seg.depth > 0 ? `<span class="ps-depth">↳${seg.depth}</span>` : ''}
+            </div>`;
+  }).join('');
+  stripEl.innerHTML = html;
+  // Click handlers — zoom to the first DAIR card of the segment
+  stripEl.querySelectorAll('.ps-seg').forEach(el => {
+    el.addEventListener('click', () => {
+      const bid = el.dataset.firstBlock;
+      focusBlock(bid);
+    });
+  });
+}
+
+// ── Pan / zoom ───────────────────────────────────────────────────────────────
+function applyTransform() {
+  const world = document.getElementById('world');
+  world.style.transform = `translate(${State.view.tx}px, ${State.view.ty}px) scale(${State.view.scale})`;
+}
+function fitToScreen() {
+  if (!State.laidOut) return;
+  const canvasRect = document.getElementById('canvas').getBoundingClientRect();
+  let maxX = 0, maxY = 0;
+  for (const id of State.laidOut.nodes()) {
+    const n = State.laidOut.node(id);
+    if (!n) continue;
+    maxX = Math.max(maxX, n.x + n.width / 2);
+    maxY = Math.max(maxY, n.y + n.height / 2);
+  }
+  const padding = 40;
+  const scaleX = (canvasRect.width - padding * 2) / (maxX + padding);
+  const scaleY = (canvasRect.height - padding * 2) / (maxY + padding);
+  State.view.scale = Math.min(scaleX, scaleY, 1);
+  State.view.tx = padding;
+  State.view.ty = padding;
+  applyTransform();
+}
+function zoomBy(factor, cx, cy) {
+  const newScale = Math.min(3, Math.max(0.1, State.view.scale * factor));
+  if (cx !== undefined && cy !== undefined) {
+    // zoom-to-cursor
+    const wx = (cx - State.view.tx) / State.view.scale;
+    const wy = (cy - State.view.ty) / State.view.scale;
+    State.view.scale = newScale;
+    State.view.tx = cx - wx * newScale;
+    State.view.ty = cy - wy * newScale;
+  } else {
+    State.view.scale = newScale;
+  }
+  applyTransform();
+}
+function setupCanvasInteraction() {
+  const canvas = document.getElementById('canvas');
+  let dragging = false, lastX = 0, lastY = 0;
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.target.closest('.block') || e.target.closest('.ctrl-btn')) return;
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    canvas.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    State.view.tx += e.clientX - lastX;
+    State.view.ty += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    applyTransform();
+  });
+  window.addEventListener('mouseup', () => {
+    dragging = false;
+    canvas.classList.remove('dragging');
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, cx, cy);
+  }, { passive: false });
+}
+
+// ── Block click ──────────────────────────────────────────────────────────────
+function setupBlockClicks() {
+  document.getElementById('blocks').addEventListener('click', (e) => {
+    const blockEl = e.target.closest('.block');
+    if (!blockEl) return;
+    const id = blockEl.dataset.blockId;
+    selectBlock(id);
+  });
+}
+
+function selectBlock(id) {
+  document.querySelectorAll('.block.selected').forEach(el => el.classList.remove('selected'));
+  const el = document.querySelector(`.block[data-block-id="${id}"]`);
+  if (el) el.classList.add('selected');
+  State.selectedBlockId = id;
+  const b = State.blocks.find(b => b.id === id);
+  if (b) renderDetail(b);
+}
+
+function focusBlock(id) {
+  const el = document.querySelector(`.block[data-block-id="${id}"]`);
+  if (!el) return;
+  selectBlock(id);
+  // centre the block in the canvas
+  const canvas = document.getElementById('canvas').getBoundingClientRect();
+  const n = State.laidOut && State.laidOut.node(id);
+  if (n) {
+    State.view.tx = canvas.width / 2 - n.x * State.view.scale;
+    State.view.ty = canvas.height / 2 - n.y * State.view.scale;
+    applyTransform();
+  }
+}
+
+// ── Detail pane ──────────────────────────────────────────────────────────────
+function renderDetail(b) {
+  const detail = document.getElementById('detail');
+  const lines = [];
+  lines.push(`<h3>${escapeHtml(blockTitle(b))}</h3>`);
+
+  if (b.kind === 'tool_batch') {
+    lines.push(`<div style="color:var(--fg-dim);font-size:11px;">${b.entries.length} tool calls in phase <b>${escapeHtml(b.phase || '—')}</b></div>`);
+    lines.push('<div class="d-section">Calls</div>');
+    for (const e of b.entries) {
+      const tool = parseToolLabel(e.cmd);
+      const ok = e.success !== false;
+      lines.push(`<div class="d-row" style="color:${ok ? 'var(--fg)' : 'var(--err)'}">#${e.call_id} ${escapeHtml(tool)} ${ok ? '✓' : '✗ exit ' + e.exit_code} <span style="color:var(--fg-dim);">${escapeHtml(truncate(e.cmd || '', 120))}</span></div>`);
+      if (e.stdout_excerpt) {
+        lines.push(`<details><summary>#${e.call_id} stdout excerpt</summary><pre>${escapeHtml(truncate(e.stdout_excerpt, 2000))}</pre></details>`);
+      }
+    }
+  } else {
+    const e = b.entry;
+    lines.push(`<div style="color:var(--fg-dim);font-size:11px;">call_id #${e.call_id} · ${escapeHtml(e.ts || '')}</div>`);
+    renderEntryDetail(e, b.kind, lines);
+  }
+
+  // Connections section
+  const connsOut = State.edges.filter(ed => ed.from === b.id);
+  const connsIn = State.edges.filter(ed => ed.to === b.id);
+  if (connsIn.length || connsOut.length) {
+    lines.push('<div class="d-section">Connections</div>');
+    for (const ed of connsIn) {
+      const src = State.blocks.find(x => x.id === ed.from);
+      if (!src) continue;
+      lines.push(`<a class="d-link" onclick="focusBlock('${ed.from}')">← ${escapeHtml(ed.kind)} from ${escapeHtml(blockTitle(src))} (#${src.firstCid})</a>`);
+    }
+    for (const ed of connsOut) {
+      const tgt = State.blocks.find(x => x.id === ed.to);
+      if (!tgt) continue;
+      lines.push(`<a class="d-link" onclick="focusBlock('${ed.to}')">→ ${escapeHtml(ed.kind)} to ${escapeHtml(blockTitle(tgt))} (#${tgt.firstCid})</a>`);
+    }
+  }
+
+  // Raw JSON
+  if (b.kind === 'tool_batch') {
+    lines.push('<details><summary>Raw batch entries</summary><pre>' + escapeHtml(JSON.stringify(b.entries, null, 2)) + '</pre></details>');
+  } else {
+    lines.push('<details><summary>Raw entry</summary><pre>' + escapeHtml(JSON.stringify(b.entry, null, 2)) + '</pre></details>');
+  }
+
+  detail.innerHTML = lines.join('');
+}
+
+function renderEntryDetail(e, kind, lines) {
+  // INPUTS
+  lines.push('<div class="d-section">Inputs</div>');
+  if (e.inputs && Object.keys(e.inputs).length) {
+    for (const [k, v] of Object.entries(e.inputs)) {
+      lines.push(`<div class="d-row"><b>${escapeHtml(k)}</b>: ${escapeHtml(typeof v === 'string' ? v : JSON.stringify(v))}</div>`);
+    }
+  } else if (kind === 'finding') {
+    if (e.linked_call_id) lines.push(`<div class="d-row"><b>linked_call_id</b>: <a class="d-link" onclick="focusBlock('${State.blockOfCid.get(e.linked_call_id) || ''}')">#${e.linked_call_id}</a></div>`);
+    if (e.tested_hypothesis_id) lines.push(`<div class="d-row"><b>tested_hypothesis_id</b>: ${escapeHtml(e.tested_hypothesis_id)}</div>`);
+    if (e.source) lines.push(`<div class="d-row"><b>source</b>: ${escapeHtml(e.source)}</div>`);
+  } else if (kind === 'dair_call') {
+    for (const k of ['current_phase','next_phase','stack_action','phase_rationale','investigation_focus']) {
+      if (e[k]) lines.push(`<div class="d-row"><b>${k}</b>: ${escapeHtml(String(e[k]))}</div>`);
+    }
+  } else if (kind === 'self_correction') {
+    if (e.trigger) lines.push(`<div class="d-row"><b>trigger</b>: ${escapeHtml(e.trigger)}</div>`);
+    if (e.prior_belief) lines.push(`<div class="d-row"><b>prior_belief</b>: ${escapeHtml(e.prior_belief)}</div>`);
+    if (e.evidence) lines.push(`<div class="d-row"><b>evidence</b>: ${escapeHtml(e.evidence)}</div>`);
+  } else {
+    lines.push('<div class="d-row" style="color:var(--fg-dim);">(no captured inputs)</div>');
+  }
+
+  // BODY / CONCLUSION
+  const body = e.conclusion || e.description || e.content || e.new_belief || '';
+  if (body) {
+    lines.push('<div class="d-section">Output / Conclusion</div>');
+    lines.push(`<div class="d-row">${escapeHtml(body)}</div>`);
+  }
+
+  // DIRECTIVES (reason.* and dair_call)
+  if (e.directives && Object.keys(e.directives).length) {
+    const dir = e.directives;
+    const interesting = {};
+    for (const k of ['priority_tools','skip_tools','focus_pids','focus_paths','next_hypothesis_triggers']) {
+      if (Array.isArray(dir[k]) && dir[k].length) interesting[k] = dir[k];
+    }
+    if (Object.keys(interesting).length) {
+      lines.push('<div class="d-section">Directives</div>');
+      for (const [k, v] of Object.entries(interesting)) {
+        lines.push(`<div class="d-row"><b>${k}</b> (${v.length}): ${escapeHtml(v.slice(0, 10).join(', '))}${v.length > 10 ? '…' : ''}</div>`);
+      }
+    }
+  }
+
+  // DAIR phase context
+  if (e.dair_phase) {
+    lines.push(`<div class="d-section">Phase context</div>`);
+    lines.push(`<div class="d-row">phase: <b>${escapeHtml(e.dair_phase)}</b> (depth ${e.dair_depth ?? '?'})</div>`);
+  }
+
+  // Verification challenges (dair_call)
+  if (Array.isArray(e.verification_challenges) && e.verification_challenges.length) {
+    lines.push('<div class="d-section">Verification challenges</div>');
+    for (const c of e.verification_challenges) {
+      const v = c.verified === true ? '✓' : c.verified === false ? '✗' : '⏳';
+      lines.push(`<div class="d-row">${v} <b>${escapeHtml(c.claim || '')}</b><br/><span style="color:var(--fg-dim);">${escapeHtml(c.challenge_method || '')}</span></div>`);
+    }
+  }
+
+  // Recommended actions (dair_call → Report)
+  if (Array.isArray(e.recommended_actions) && e.recommended_actions.length) {
+    lines.push('<div class="d-section">Recommended actions (advisory)</div>');
+    for (const a of e.recommended_actions) {
+      lines.push(`<div class="d-row">${escapeHtml(String(a))}</div>`);
+    }
+  }
+
+  // Validated techniques (finding)
+  if (Array.isArray(e.validated_techniques) && e.validated_techniques.length) {
+    lines.push('<div class="d-section">Validated ATT&CK techniques</div>');
+    for (const t of e.validated_techniques) {
+      lines.push(`<div class="d-row"><b>${escapeHtml(t.technique_id)}</b> ${escapeHtml(t.name)} <span style="color:var(--fg-dim);">(${escapeHtml(t.tactic)})</span></div>`);
+    }
+  }
+
+  // Token usage
+  if (e.input_tokens || e.output_tokens) {
+    lines.push(`<div class="d-section">Token usage</div>`);
+    lines.push(`<div class="d-row">in ${e.input_tokens || 0} · out ${e.output_tokens || 0}</div>`);
+  }
+}
+
+// expose for inline onclick handlers
+window.focusBlock = focusBlock;
+
+// ── Live load ────────────────────────────────────────────────────────────────
+async function load() {
+  if (!State.traceUrl) return;
+  try {
+    const resp = await fetch(State.traceUrl, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    State.caseId = data.case_id || '';
+    const newEntries = data.entries || [];
+    document.getElementById('case-id').textContent = State.caseId;
+    document.getElementById('last-fetch').textContent =
+      `fetched ${new Date().toLocaleTimeString()}`;
+    document.getElementById('live').classList.add('on');
+    document.getElementById('live-text').textContent = 'live';
+
+    if (newEntries.length !== State.prevEntryCount) {
+      State.entries = newEntries;
+      State.prevEntryCount = newEntries.length;
+      State.byCid = new Map(newEntries.map(e => [e.call_id, e]));
+      State.blocks = buildBlocks(newEntries);
+      State.blockOfCid = new Map();
+      for (const b of State.blocks) {
+        if (b.kind === 'tool_batch') {
+          for (const e of b.entries) State.blockOfCid.set(e.call_id, b.id);
+        } else {
+          State.blockOfCid.set(b.entry.call_id, b.id);
+        }
+      }
+      State.edges = buildEdges(State.blocks, State.byCid, State.blockOfCid);
+      render();
+      // Fit to screen on first render only
+      if (!State._initialFit) {
+        fitToScreen();
+        State._initialFit = true;
+      }
+    }
+  } catch (err) {
+    document.getElementById('live').classList.remove('on');
+    document.getElementById('live-text').textContent = `error: ${err.message}`;
+  }
+}
+
+// ── Wiring ───────────────────────────────────────────────────────────────────
+function setupFilters() {
+  document.querySelectorAll('.kind-filter').forEach(el => {
+    el.addEventListener('change', () => {
+      State.filters.kinds = new Set(
+        Array.from(document.querySelectorAll('.kind-filter:checked')).map(e => e.value)
+      );
+      render();
+    });
+  });
+  document.getElementById('show-hook-ops').addEventListener('change', (e) => {
+    State.filters.showHookOps = e.target.checked;
+    // Show/hide changes which entries become blocks → rebuild from raw entries
+    State.byCid = new Map(State.entries.map(x => [x.call_id, x]));
+    State.blocks = buildBlocks(State.entries);
+    State.blockOfCid = new Map();
+    for (const b of State.blocks) {
+      if (b.kind === 'tool_batch') {
+        for (const x of b.entries) State.blockOfCid.set(x.call_id, b.id);
+      } else {
+        State.blockOfCid.set(b.entry.call_id, b.id);
+      }
+    }
+    State.edges = buildEdges(State.blocks, State.byCid, State.blockOfCid);
+    render();
+  });
+  document.getElementById('fit-btn').addEventListener('click', fitToScreen);
+  document.getElementById('relayout-btn').addEventListener('click', render);
+  document.getElementById('zoom-in-btn').addEventListener('click', () => zoomBy(1.2));
+  document.getElementById('zoom-out-btn').addEventListener('click', () => zoomBy(1 / 1.2));
+  document.getElementById('reset-zoom-btn').addEventListener('click', () => {
+    State.view = { tx: 30, ty: 30, scale: 1 }; applyTransform();
+  });
+}
+
+function init() {
+  const params = new URLSearchParams(window.location.search);
+  const trace = params.get('trace');
+  if (!trace) {
+    document.getElementById('blocks').innerHTML =
+      '<div style="padding:32px;color:var(--fg-dim);">No <code>?trace=…</code> URL param. Open from trace_viewer.html.</div>';
+    return;
+  }
+  State.traceUrl = trace;
+  document.getElementById('back-link').href = `trace_viewer.html?trace=${encodeURIComponent(trace)}`;
+  setupFilters();
+  setupCanvasInteraction();
+  setupBlockClicks();
+  applyTransform();
+  load();
+  setInterval(load, 2000);
+}
+
+window.addEventListener('DOMContentLoaded', init);
+</script>
+
+</body>
+</html>

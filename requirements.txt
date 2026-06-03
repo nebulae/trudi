@@ -3,3 +3,10 @@ httpx>=0.28.0
 python-dotenv>=1.0.0
 yara-python>=4.3.0
 anthropic>=0.40.0
+
+# Malware analysis (FLARE)
+flare-capa>=7.0.0      # capability analysis → MITRE ATT&CK mapping
+flare-floss>=3.0.0     # obfuscated/stacked string extraction
+
+# Office document forensics (phishing initial access)
+oletools>=0.60         # olevba, mraptor — Office macro detection

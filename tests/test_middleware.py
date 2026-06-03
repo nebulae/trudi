@@ -26,7 +26,10 @@ async def test_note_extracted_and_logged(mock_context):
     with patch("core.execution_log.log") as mock_log:
         from core.middleware import NarrationMiddleware
         await NarrationMiddleware().on_call_tool(mock_context, call_next)
-    mock_log.record_agent_message.assert_called_once_with("my narration")
+    # Middleware now passes input_call_ids=[_last_dair_cid] for lineage.
+    call_args = mock_log.record_agent_message.call_args
+    assert call_args is not None
+    assert call_args.args[0] == "my narration"
 
 
 @pytest.mark.asyncio

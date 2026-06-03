@@ -5,6 +5,10 @@ from unittest.mock import patch, MagicMock
 from core.executor import run, run_dotnet, _apply_line_cap
 from core.paths import OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES
 
+# Note: the autouse `isolate_session_file` fixture in tests/conftest.py now
+# also configures the global trace log to a tmp path, so run() can call
+# _log_tool() without tripping the new _require_configured raise.
+
 
 def make_proc(returncode=0, stdout=b"", stderr=b""):
     m = MagicMock()

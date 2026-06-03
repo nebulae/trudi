@@ -1,13 +1,16 @@
 """String extraction, file identification, and metadata tools."""
 import os
+import shutil
 from typing import Optional
 from fastmcp import FastMCP
-from core import run
+from core import run, output_safe
+from core.paths import assert_output_safe
 
 mcp = FastMCP("strings")
 
 
 @mcp.tool()
+@output_safe
 def strings_extract(
     file_path: str,
     min_length: int = 8,
@@ -66,6 +69,7 @@ def strings_extract(
 
 
 @mcp.tool()
+@output_safe
 def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensitive: bool = True) -> dict:
     """
     Extract strings from a file and filter by regex pattern.
@@ -105,18 +109,21 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
 
 
 @mcp.tool()
+@output_safe
 def file_identify(file_path: str) -> dict:
     """Identify file type using magic bytes (libmagic). More reliable than extension."""
     return run(["file", file_path])
 
 
 @mcp.tool()
+@output_safe
 def file_identify_directory(directory: str) -> dict:
     """Identify file types for all files in a directory."""
     return run(["file", "-r", directory], timeout=120)
 
 
 @mcp.tool()
+@output_safe
 def hexdump(file_path: str, length: int = 256, offset: int = 0) -> dict:
     """
     Display file content as hex dump.
@@ -128,6 +135,7 @@ def hexdump(file_path: str, length: int = 256, offset: int = 0) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def xxd_dump(file_path: str, length: int = 256, offset: int = 0) -> dict:
     """
     Display file content as xxd hex dump (more readable than hexdump for some cases).
@@ -139,12 +147,14 @@ def xxd_dump(file_path: str, length: int = 256, offset: int = 0) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def exiftool_metadata(file_path: str) -> dict:
     """Extract EXIF and metadata from files (images, Office docs, PDFs, executables)."""
     return run(["exiftool", file_path])
 
 
 @mcp.tool()
+@output_safe
 def exiftool_batch(directory: str, recursive: bool = True) -> dict:
     """Extract EXIF metadata from all files in a directory."""
     cmd = ["exiftool"]
@@ -155,6 +165,36 @@ def exiftool_batch(directory: str, recursive: bool = True) -> dict:
 
 
 @mcp.tool()
+@output_safe
 def stat_file(file_path: str) -> dict:
     """Display filesystem metadata for a file: timestamps, permissions, inode, size."""
     return run(["stat", file_path])
+
+
+@mcp.tool()
+@output_safe
+def floss_extract(
+    file_path: str,
+    min_length: int = 6,
+    output_path: Optional[str] = None,
+) -> dict:
+    """
+    Extract obfuscated, stacked, and decoded strings from a malware sample
+    using FLARE's floss. Catches C2 URLs, decoded keys, and stack-built strings
+    that plain `strings` misses.
+
+    file_path: PE/ELF binary or shellcode buffer.
+    min_length: minimum reported string length.
+    output_path: optional JSON report destination (under analysis/exports/reports).
+    """
+    if output_path:
+        assert_output_safe(output_path)
+    binary = shutil.which("floss")
+    if not binary:
+        return {"success": False, "error":
+                "floss not installed — pip install flare-floss"}
+    cmd = [binary, "-n", str(min_length)]
+    if output_path:
+        cmd += ["-j", output_path]
+    cmd.append(file_path)
+    return run(cmd, timeout=600)

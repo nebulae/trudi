@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TRUDI Investigation Graph</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-2: #161a21;
+    --bg-3: #1c2230;
+    --bg-hl: #2a3550;
+    --fg: #e6e9ef;
+    --fg-dim: #8a93a6;
+    --border: #28303f;
+    --accent: #6ea8ff;
+    --tool: #8a93a6;
+    --reason: #6ea8ff;
+    --dair: #b48cff;
+    --finding-confirmed: #ff6b6b;
+    --finding-likely: #ffa86b;
+    --finding-suspected: #ffd86b;
+    --finding-unconfirmed: #8a93a6;
+    --self-correct: #ffcb6b;
+    --ok: #4ad295;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",Segoe UI,
+                   "Helvetica Neue",sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 16px; background: var(--bg-2); border-bottom: 1px solid var(--border);
+    height: 44px;
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; }
+  header h1 a { color: var(--fg); text-decoration: none; }
+  header .case-id { color: var(--accent); margin-left: 4px; }
+  header .stat { color: var(--fg-dim); font-size: 12px; }
+  header .live {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 2px 8px; border-radius: 10px;
+    background: var(--bg-3); font-size: 12px;
+  }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--fg-dim); transition: background .2s;
+  }
+  .live.on .live-dot { background: var(--ok); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .back-btn {
+    padding: 3px 10px; border-radius: 6px;
+    background: var(--bg-3); border: 1px solid var(--border);
+    color: var(--accent); text-decoration: none; font-size: 12px;
+  }
+  .back-btn:hover { background: var(--bg-hl); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 220px 1fr minmax(320px, 420px);
+    height: calc(100vh - 44px);
+  }
+  .pane { overflow: auto; }
+  aside.filters {
+    background: var(--bg-2); border-right: 1px solid var(--border); padding: 12px;
+  }
+  aside.detail {
+    background: var(--bg-2); border-left: 1px solid var(--border); padding: 12px;
+    font-family: "SF Mono","Menlo","Consolas",monospace; font-size: 12px;
+  }
+  aside.detail pre { white-space: pre-wrap; word-break: break-word; margin: 0; }
+  aside .empty { color: var(--fg-dim); font-style: italic; }
+
+  .filter-group { margin-bottom: 14px; }
+  .filter-group h3 {
+    margin: 0 0 6px 0; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--fg-dim); font-weight: 600;
+  }
+  .filter-group label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 3px 0; cursor: pointer; font-size: 12px;
+  }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+  }
+  .legend-edge {
+    width: 24px; height: 2px; display: inline-block; vertical-align: middle;
+  }
+
+  #cy { width: 100%; height: 100%; background: var(--bg); }
+  .stats-bar {
+    position: absolute; bottom: 8px; left: 240px;
+    background: rgba(15, 17, 21, 0.85); padding: 4px 10px;
+    border: 1px solid var(--border); border-radius: 6px;
+    font-size: 11px; color: var(--fg-dim);
+    font-family: "SF Mono","Menlo","Consolas",monospace;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><a href="trace_viewer.html">← TRUDI Trace</a> · Investigation Graph — <span class="case-id" id="case-id">…</span></h1>
+  <span class="stat"><span id="node-count">0</span> nodes / <span id="edge-count">0</span> edges</span>
+  <span class="stat" style="margin-left:auto" id="last-fetch"></span>
+  <span class="live" id="live"><span class="live-dot"></span><span id="live-text">offline</span></span>
+  <a class="back-btn" id="back-link" href="trace_viewer.html">List view ↗</a>
+</header>
+
+<div class="layout">
+
+  <aside class="pane filters">
+    <div class="filter-group">
+      <h3>Node Types</h3>
+      <label><input type="checkbox" class="node-filter" value="finding" checked> <span class="legend-dot" style="background:var(--finding-confirmed)"></span> Findings</label>
+      <label><input type="checkbox" class="node-filter" value="reason_plan" checked> <span class="legend-dot" style="background:#4ad295"></span> reason.plan</label>
+      <label><input type="checkbox" class="node-filter" value="reason_hypothesize" checked> <span class="legend-dot" style="background:#6ea8ff"></span> reason.hypothesize</label>
+      <label><input type="checkbox" class="node-filter" value="reason_evaluate_finding" checked> <span class="legend-dot" style="background:#ff6b6b"></span> reason.evaluate</label>
+      <label><input type="checkbox" class="node-filter" value="reason_confidence_score" checked> <span class="legend-dot" style="background:#ffd86b"></span> reason.confidence</label>
+      <label><input type="checkbox" class="node-filter" value="reason_cite_check" checked> <span class="legend-dot" style="background:#ffa86b"></span> reason.cite_check</label>
+      <label><input type="checkbox" class="node-filter" value="reason_synthesize" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.synthesize</label>
+      <label><input type="checkbox" class="node-filter" value="reason_pre_report_check" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.pre_report</label>
+      <label><input type="checkbox" class="node-filter" value="reason_audit_findings" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.audit</label>
+      <label><input type="checkbox" class="node-filter" value="dair_call" checked> <span class="legend-dot" style="background:var(--dair)"></span> DAIR phases</label>
+      <label><input type="checkbox" class="node-filter" value="self_correction" checked> <span class="legend-dot" style="background:var(--self-correct)"></span> Self-corrections</label>
+      <label><input type="checkbox" class="node-filter" value="tool_call"> <span class="legend-dot" style="background:var(--tool)"></span> Tool calls (noisy)</label>
+      <label><input type="checkbox" class="node-filter" value="narration"> <span class="legend-dot" style="background:var(--tool)"></span> Agent notes</label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Tier Filter</h3>
+      <label><input type="checkbox" class="tier-filter" value="CONFIRMED" checked> CONFIRMED</label>
+      <label><input type="checkbox" class="tier-filter" value="LIKELY" checked> LIKELY</label>
+      <label><input type="checkbox" class="tier-filter" value="SUSPECTED" checked> SUSPECTED</label>
+      <label><input type="checkbox" class="tier-filter" value="UNCONFIRMED" checked> UNCONFIRMED</label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Edge Types</h3>
+      <label>
+        <span class="legend-edge" style="background:var(--finding-confirmed)"></span>
+        finding → tool (supports)
+      </label>
+      <label>
+        <span class="legend-edge" style="background:var(--reason)"></span>
+        finding → hypothesis (tests)
+      </label>
+      <label>
+        <span class="legend-edge" style="background:var(--fg-dim)"></span>
+        tool → tool (consumes)
+      </label>
+      <label>
+        <span class="legend-edge" style="background:var(--self-correct);border-top:1px dashed var(--self-correct)"></span>
+        self-correction
+      </label>
+    </div>
+
+    <div class="filter-group">
+      <h3>Layout</h3>
+      <button id="relayout-btn" style="padding:4px 10px;background:var(--bg-3);color:var(--fg);border:1px solid var(--border);border-radius:4px;cursor:pointer;width:100%;">Re-layout</button>
+    </div>
+  </aside>
+
+  <main class="pane" style="position:relative;">
+    <div id="cy"></div>
+    <div class="stats-bar" id="stats-bar">Loading…</div>
+  </main>
+
+  <aside class="pane detail" id="detail">
+    <div class="empty">Click a node to see details.</div>
+  </aside>
+
+</div>
+
+<script src="vendor/cytoscape.min.js"></script>
+<script>
+const State = {
+  traceUrl: null,
+  caseId: '',
+  entries: [],
+  cy: null,
+  prevEntryCount: 0,
+  filters: {
+    // Default: ALL reason calls, findings, dair, self-correction. Tool calls + narration off
+    // (toggle them on for full-fidelity audit view; they swamp the layout otherwise).
+    types: new Set([
+      'finding', 'dair_call', 'self_correction',
+      'reason_plan', 'reason_hypothesize', 'reason_evaluate_finding',
+      'reason_confidence_score', 'reason_cite_check', 'reason_synthesize',
+      'reason_pre_report_check', 'reason_audit_findings',
+    ]),
+    tiers: new Set(['CONFIRMED','LIKELY','SUSPECTED','UNCONFIRMED']),
+  },
+};
+
+function findingColor(tier) {
+  const t = String(tier || '').toUpperCase();
+  if (t === 'CONFIRMED')   return '#ff6b6b';
+  if (t === 'LIKELY')      return '#ffa86b';
+  if (t === 'SUSPECTED')   return '#ffd86b';
+  if (t === 'UNCONFIRMED') return '#8a93a6';
+  return '#8a93a6';
+}
+
+// ── Tool-call label parser ──────────────────────────────────────────────────
+// Parses cmd into a semantic "vol pslist" / "ez MFTECmd" / "tsk fls" label
+// instead of the useless "vol" / "dotnet" / "sudo" first-token shorthand.
+function parseToolLabel(cmd) {
+  if (!cmd) return 'tool';
+  // Strip leading `sudo `
+  let s = cmd.replace(/^sudo\s+/, '');
+  const parts = s.split(/\s+/);
+  const head = parts[0] || '';
+  const headBase = head.split('/').pop();
+
+  // Volatility: `vol -s ... -f X -r json windows.pslist [--pid N]` → "vol pslist"
+  if (headBase === 'vol' || head.endsWith('/vol')) {
+    const m = s.match(/\b(?:windows|linux|mac)\.(\S+)/);
+    if (m) return `vol ${m[1]}`;
+    return 'vol';
+  }
+  // EZ Tools via dotnet: `dotnet /opt/zimmermantools/.../<Name>.dll ...` → "ez Name"
+  if (headBase === 'dotnet') {
+    const m = s.match(/([A-Za-z0-9_]+)\.dll/);
+    if (m) return `ez ${m[1]}`;
+    return 'dotnet';
+  }
+  // Sleuth Kit: keep binary + first non-flag argument summary
+  if (['fls','icat','istat','ils','blkls','mactime','tsk_recover','sigfind','sorter',
+       'jls','jcat','blkcat','blkstat','blkcalc','mmls','fsstat','ffind','hfind',
+       'mmcat','mmstat'].includes(headBase)) {
+    return `tsk ${headBase}`;
+  }
+  // Plaso
+  if (headBase === 'log2timeline.py' || headBase === 'log2timeline') return 'plaso log2timeline';
+  if (headBase === 'psort.py' || headBase === 'psort') return 'plaso psort';
+  if (headBase === 'pinfo.py' || headBase === 'pinfo') return 'plaso pinfo';
+  // Yara
+  if (headBase === 'yara') return 'yara scan';
+  // Carving
+  if (['bulk_extractor','foremost','scalpel','photorec','tcpxtract'].includes(headBase))
+    return `carve ${headBase}`;
+  // EWF / imaging
+  if (['ewfmount','vshadowmount','bdemount','xmount','ewfinfo','ewfverify','losetup',
+       'partprobe'].includes(headBase)) return `img ${headBase}`;
+  // Net
+  if (['tcpdump','ngrep'].includes(headBase)) return `net ${headBase}`;
+  // Hashing
+  if (['md5sum','sha1sum','sha256sum','hashdeep','md5deep','ssdeep'].includes(headBase))
+    return `hash ${headBase}`;
+  // Strings / static
+  if (['strings','hexdump','xxd','exiftool','file','stat'].includes(headBase))
+    return `strings ${headBase}`;
+  // RegRipper / misc
+  if (headBase === 'rip.pl' || s.includes('rip.pl')) return 'misc regripper';
+  if (s.includes('evtx_dump')) return 'misc evtx_dump';
+  if (s.includes('usnparser')) return 'misc usnparser';
+  if (s.includes('analyzemft')) return 'misc analyzemft';
+  if (s.includes('clamscan')) return 'misc clamscan';
+  if (s.includes('hindsight')) return 'misc hindsight';
+  return headBase || 'tool';
+}
+
+// Reason-call colour palette — each reason tool gets a distinct shade so
+// the eye can quickly spot adversarial review density vs. tactical planning.
+const REASON_COLORS = {
+  reason_plan:             '#4ad295',  // green — direction setter
+  reason_hypothesize:      '#6ea8ff',  // blue — observation
+  reason_evaluate_finding: '#ff6b6b',  // red — adversarial gate
+  reason_confidence_score: '#ffd86b',  // yellow — grading
+  reason_cite_check:       '#ffa86b',  // orange — citation
+  reason_synthesize:       '#b48cff',  // violet — terminal
+  reason_pre_report_check: '#b48cff',  // violet — terminal
+  reason_audit_findings:   '#b48cff',  // violet — terminal
+};
+
+function reasonShortName(tool) {
+  return String(tool || '').replace(/^reason_/, '');
+}
+
+function nodeFor(entry) {
+  const cid = entry.call_id;
+  const t = entry.type;
+  let label, color, kind = t;
+  switch (t) {
+    case 'tool_call': {
+      const op = parseToolLabel(entry.cmd || '');
+      label = `#${cid} ${op}`;
+      color = entry.success === false ? '#ff6b6b' : '#8a93a6';
+      break;
+    }
+    case 'reason_call': {
+      const tool = entry.tool || 'reason';
+      kind = tool;  // distinguishes reason_plan / reason_evaluate / etc. in style + filter
+      const short = reasonShortName(tool);
+      // Tail of hypothesis_id or first 32 chars of the conclusion as semantic hint
+      let hint = '';
+      if (tool === 'reason_hypothesize') {
+        hint = ` ${entry.hypothesis_id || ''}`.trim();
+      } else {
+        const conc = (entry.conclusion || '').replace(/\s+/g, ' ').slice(0, 32);
+        if (conc) hint = ` ${conc}…`;
+      }
+      label = `#${cid} reason ${short}${hint}`;
+      color = REASON_COLORS[tool] || '#6ea8ff';
+      break;
+    }
+    case 'finding':
+      label = `#${cid} [${(entry.confidence || '').slice(0,4)}] ${(entry.description || '').slice(0,48)}`;
+      color = findingColor(entry.confidence);
+      break;
+    case 'dair_call': {
+      const phase = entry.current_phase || '?';
+      const next = entry.next_phase;
+      const arrow = next && next !== phase ? ` → ${next}` : '';
+      label = `#${cid} DAIR ${phase}${arrow}`;
+      color = '#b48cff';
+      break;
+    }
+    case 'self_correction':
+      label = `#${cid} ⟲ ${entry.trigger || 'self-correction'}`;
+      color = '#ffcb6b';
+      break;
+    case 'investigation_narration':
+      label = `#${cid} ✎ note`;
+      color = '#8a93a6';
+      kind = 'narration';
+      break;
+    default:
+      return null;
+  }
+  return {
+    data: { id: `n${cid}`, label, cid, kind, raw: entry },
+    style: {
+      'background-color': color,
+      'shape': kind === 'finding' ? 'round-rectangle'
+             : kind === 'reason_hypothesize' ? 'diamond'
+             : kind.startsWith('reason_') ? 'tag'
+             : kind === 'dair_call' ? 'hexagon'
+             : kind === 'self_correction' ? 'star'
+             : kind === 'narration' ? 'triangle'
+             : 'ellipse',
+    },
+  };
+}
+
+function edgesFor(entry, byCid, hypById) {
+  const cid = entry.call_id;
+  const edges = [];
+
+  if (entry.type === 'finding') {
+    const linked = entry.linked_call_id;
+    if (linked && byCid.has(linked)) {
+      edges.push({
+        data: { id: `esup${cid}_${linked}`, source: `n${cid}`, target: `n${linked}`, kind: 'supports' },
+        style: { 'line-color': '#ff6b6b', 'target-arrow-color': '#ff6b6b' },
+      });
+    }
+    const hid = entry.tested_hypothesis_id;
+    if (hid && hypById.has(hid)) {
+      const k = hypById.get(hid);
+      edges.push({
+        data: { id: `etest${cid}_${k}`, source: `n${cid}`, target: `n${k}`, kind: 'tests' },
+        style: { 'line-color': '#6ea8ff', 'target-arrow-color': '#6ea8ff', 'line-style': 'dashed' },
+      });
+    }
+  }
+
+  if (entry.type === 'tool_call' && Array.isArray(entry.input_call_ids)) {
+    for (const inp of entry.input_call_ids) {
+      if (byCid.has(inp)) {
+        edges.push({
+          data: { id: `ecns${cid}_${inp}`, source: `n${cid}`, target: `n${inp}`, kind: 'consumes' },
+          style: { 'line-color': '#8a93a6', 'target-arrow-color': '#8a93a6', 'opacity': 0.5 },
+        });
+      }
+    }
+  }
+
+  // Reason calls — link them to the entries they reviewed.
+  if (entry.type === 'reason_call') {
+    if (Array.isArray(entry.input_call_ids)) {
+      for (const inp of entry.input_call_ids) {
+        if (byCid.has(inp)) {
+          edges.push({
+            data: { id: `ercon${cid}_${inp}`, source: `n${cid}`, target: `n${inp}`, kind: 'reviews' },
+            style: { 'line-color': '#6ea8ff', 'target-arrow-color': '#6ea8ff', 'opacity': 0.5 },
+          });
+        }
+      }
+    }
+    // evaluate_finding / cite_check / confidence_score: try to point at the
+    // most recent finding with the same normalised description (heuristic —
+    // mirrors the gate logic in tools/_gates/confidence_and_citation.py).
+    const targetTools = new Set([
+      'reason_evaluate_finding', 'reason_cite_check', 'reason_confidence_score',
+    ]);
+    if (targetTools.has(entry.tool)) {
+      const user_msg = ((entry.inputs && entry.inputs.user_message) || '').toLowerCase();
+      if (user_msg) {
+        let best = null;
+        for (const [k, v] of byCid) {
+          if (v.type !== 'finding') continue;
+          if (v.call_id >= cid) continue;  // only look back
+          const desc = (v.description || '').toLowerCase();
+          // First 40 chars of description appearing in user_message = likely the target
+          if (desc && user_msg.includes(desc.slice(0, 40))) {
+            if (!best || v.call_id > best.call_id) best = v;
+          }
+        }
+        if (best) {
+          edges.push({
+            data: { id: `eevn${cid}_${best.call_id}`, source: `n${cid}`, target: `n${best.call_id}`,
+                    kind: 'evaluates' },
+            style: { 'line-color': '#ff6b6b', 'target-arrow-color': '#ff6b6b', 'line-style': 'dotted' },
+          });
+        }
+      }
+    }
+  }
+
+  return edges;
+}
+
+// Self-correction edges: when a self_correction entry exists with a
+// linked_call_id pointing to a prior finding, draw a dashed warning edge.
+function selfCorrectionEdges(entries, byCid) {
+  const edges = [];
+  for (const e of entries) {
+    if (e.type !== 'self_correction') continue;
+    const lc = e.linked_call_id;
+    if (lc && byCid.has(lc)) {
+      edges.push({
+        data: {
+          id: `esc${e.call_id}_${lc}`,
+          source: `n${e.call_id}`,
+          target: `n${lc}`,
+          kind: 'self-correction',
+        },
+        style: {
+          'line-color': '#ffcb6b',
+          'target-arrow-color': '#ffcb6b',
+          'line-style': 'dashed',
+          'width': 3,
+        },
+      });
+    }
+  }
+  return edges;
+}
+
+function buildElements(entries) {
+  const byCid = new Map(entries.map(e => [e.call_id, e]));
+  // hypothesis_id → call_id index, needed for the finding→hypothesis edge.
+  const hypById = new Map();
+  for (const e of entries) {
+    if (e.type === 'reason_call' && e.tool === 'reason_hypothesize' && e.hypothesis_id) {
+      hypById.set(e.hypothesis_id, e.call_id);
+    }
+  }
+
+  const nodes = [];
+  const edges = [];
+  for (const e of entries) {
+    // Map entry → filter key (matches the sidebar checkbox values).
+    let filterKey;
+    if (e.type === 'reason_call') {
+      filterKey = e.tool || 'reason_call';  // e.g. 'reason_plan', 'reason_evaluate_finding'
+    } else if (e.type === 'investigation_narration') {
+      filterKey = 'narration';
+    } else {
+      filterKey = e.type;
+    }
+    if (!State.filters.types.has(filterKey)) continue;
+    if (e.type === 'finding'
+        && !State.filters.tiers.has(String(e.confidence || '').toUpperCase())) continue;
+    const n = nodeFor(e);
+    if (n) nodes.push(n);
+  }
+  for (const e of entries) {
+    for (const ed of edgesFor(e, byCid, hypById)) edges.push(ed);
+  }
+  for (const ed of selfCorrectionEdges(entries, byCid)) edges.push(ed);
+  // Filter edges whose endpoints survived node filtering.
+  const nodeIds = new Set(nodes.map(n => n.data.id));
+  const finalEdges = edges.filter(e => nodeIds.has(e.data.source) && nodeIds.has(e.data.target));
+  return { nodes, edges: finalEdges };
+}
+
+// Layout: breadthfirst with findings as roots — supporting evidence (reason
+// calls, tool calls) fans out below each finding. Much more legible than
+// a generic force-directed hairball when the goal is "trace this claim
+// back to its evidence."
+function layoutOptions() {
+  return {
+    name: 'breadthfirst',
+    directed: true,
+    padding: 24,
+    spacingFactor: 1.4,
+    avoidOverlap: true,
+    animate: false,
+    roots: function (node) { return node.data('kind') === 'finding'; },
+  };
+}
+
+function initGraph(elements) {
+  if (State.cy) {
+    State.cy.destroy();
+  }
+  State.cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: [...elements.nodes, ...elements.edges],
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'label': 'data(label)',
+          'color': '#e6e9ef',
+          'font-size': '10px',
+          'text-valign': 'bottom',
+          'text-margin-y': 4,
+          'text-wrap': 'ellipsis',
+          'text-max-width': '180px',
+          'width': 16,
+          'height': 16,
+          'border-width': 1,
+          'border-color': '#28303f',
+        },
+      },
+      {
+        selector: 'node[kind="finding"]',
+        style: { 'width': 22, 'height': 16 },
+      },
+      {
+        selector: 'node[kind="dair_call"]',
+        style: { 'width': 22, 'height': 20 },
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 2.5,
+          'curve-style': 'bezier',
+          'target-arrow-shape': 'triangle',
+          'arrow-scale': 1.4,
+          'label': 'data(kind)',
+          'font-size': '9px',
+          'color': '#e6e9ef',
+          'text-background-color': '#0f1115',
+          'text-background-opacity': 0.85,
+          'text-background-padding': 2,
+          'text-rotation': 'autorotate',
+          'text-margin-y': -4,
+        },
+      },
+      {
+        selector: 'edge[kind="supports"]',
+        style: { 'width': 3, 'line-color': '#ff6b6b', 'target-arrow-color': '#ff6b6b' },
+      },
+      {
+        selector: 'edge[kind="tests"]',
+        style: { 'width': 2.5, 'line-style': 'dashed' },
+      },
+      {
+        selector: 'edge[kind="evaluates"]',
+        style: { 'width': 2.5, 'line-style': 'dotted' },
+      },
+      {
+        selector: ':selected',
+        style: { 'border-color': '#6ea8ff', 'border-width': 4 },
+      },
+      // Dimming used when the user clicks-to-isolate a node.
+      {
+        selector: '.dim',
+        style: { 'opacity': 0.12 },
+      },
+      {
+        selector: '.dim-edge',
+        style: { 'opacity': 0.08, 'text-opacity': 0 },
+      },
+      {
+        selector: '.highlight',
+        style: { 'border-color': '#6ea8ff', 'border-width': 3 },
+      },
+      {
+        selector: '.highlight-edge',
+        style: { 'width': 4, 'opacity': 1 },
+      },
+    ],
+    layout: layoutOptions(),
+    wheelSensitivity: 0.2,
+  });
+
+  State.cy.on('tap', 'node', (evt) => {
+    isolateNode(evt.target);
+    showDetail(evt.target.data().raw, evt.target);
+  });
+  State.cy.on('tap', (evt) => {
+    if (evt.target === State.cy) {
+      restoreView();
+      document.getElementById('detail').innerHTML =
+        '<div class="empty">Click a node to isolate its connections. Click background to restore.</div>';
+    }
+  });
+}
+
+// Click-to-isolate — hide everything not connected to the selected node
+// 1 hop in either direction. Click background to restore.
+function isolateNode(node) {
+  if (!State.cy) return;
+  const neighborhood = node.closedNeighborhood();
+  State.cy.elements().addClass('dim');
+  State.cy.edges().addClass('dim-edge');
+  neighborhood.removeClass('dim').removeClass('dim-edge').addClass('highlight');
+  neighborhood.edges().addClass('highlight-edge');
+}
+
+function restoreView() {
+  if (!State.cy) return;
+  State.cy.elements()
+    .removeClass('dim').removeClass('dim-edge')
+    .removeClass('highlight').removeClass('highlight-edge');
+}
+
+function showDetail(entry, node) {
+  const detail = document.getElementById('detail');
+  const cid = entry.call_id;
+  const lines = [];
+  lines.push(`<h3 style="margin:0 0 8px 0;font-family:inherit;color:var(--accent);">call_id #${cid}</h3>`);
+  lines.push(`<div style="margin-bottom:8px;color:var(--fg-dim);">${escapeHtml(entry.type || '')}${entry.tool ? ' · ' + escapeHtml(entry.tool) : ''}</div>`);
+
+  // Connections panel — explicit list of incoming + outgoing edges, each
+  // labeled with the relationship kind and clickable to focus the other end.
+  if (node) {
+    const outEdges = node.outgoers('edge');
+    const inEdges = node.incomers('edge');
+    if (outEdges.length || inEdges.length) {
+      lines.push('<div style="margin:8px 0 6px 0;font-weight:600;color:var(--accent);">Connections</div>');
+      lines.push('<ul style="list-style:none;padding:0;margin:0 0 12px 0;">');
+      outEdges.forEach(e => {
+        const other = e.target();
+        const oid = other.data('cid');
+        const okind = other.data('kind');
+        const ekind = e.data('kind');
+        lines.push(
+          `<li style="padding:2px 0;">→ <span style="color:var(--accent);">${escapeHtml(ekind)}</span> `
+          + `<a href="#" onclick="focusNode(${oid});return false;" style="color:var(--fg);">`
+          + `#${oid} ${escapeHtml(okind)}</a></li>`
+        );
+      });
+      inEdges.forEach(e => {
+        const other = e.source();
+        const oid = other.data('cid');
+        const okind = other.data('kind');
+        const ekind = e.data('kind');
+        lines.push(
+          `<li style="padding:2px 0;">← <span style="color:var(--accent);">${escapeHtml(ekind)}</span> from `
+          + `<a href="#" onclick="focusNode(${oid});return false;" style="color:var(--fg);">`
+          + `#${oid} ${escapeHtml(okind)}</a></li>`
+        );
+      });
+      lines.push('</ul>');
+    } else {
+      lines.push('<div style="margin:8px 0;color:var(--fg-dim);font-style:italic;">No connections from this node.</div>');
+    }
+  }
+
+  // Full entry JSON below.
+  lines.push('<div style="margin:8px 0 4px 0;font-weight:600;color:var(--fg-dim);">Raw entry</div>');
+  lines.push(`<pre>${escapeHtml(JSON.stringify(entry, null, 2))}</pre>`);
+  detail.innerHTML = lines.join('');
+}
+
+function focusNode(cid) {
+  const node = State.cy.getElementById(`n${cid}`);
+  if (!node || !node.length) return;
+  State.cy.animate({ center: { eles: node }, zoom: 1.3 }, { duration: 300 });
+  isolateNode(node);
+  node.select();
+  showDetail(node.data('raw'), node);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+function updateStats(nodeCount, edgeCount) {
+  document.getElementById('node-count').textContent = nodeCount;
+  document.getElementById('edge-count').textContent = edgeCount;
+  document.getElementById('stats-bar').textContent =
+    `${nodeCount} nodes · ${edgeCount} edges · click a node to isolate · click background to restore`;
+}
+
+function rebuildGraph() {
+  const elements = buildElements(State.entries);
+  initGraph(elements);
+  updateStats(elements.nodes.length, elements.edges.length);
+}
+
+async function load() {
+  if (!State.traceUrl) return;
+  try {
+    const resp = await fetch(State.traceUrl, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    State.caseId = data.case_id || '';
+    const newEntries = data.entries || [];
+    document.getElementById('case-id').textContent = State.caseId;
+    document.getElementById('last-fetch').textContent =
+      `fetched ${new Date().toLocaleTimeString()}`;
+    document.getElementById('live').classList.add('on');
+    document.getElementById('live-text').textContent = 'live';
+    if (newEntries.length !== State.prevEntryCount) {
+      State.entries = newEntries;
+      State.prevEntryCount = newEntries.length;
+      rebuildGraph();
+    }
+  } catch (err) {
+    document.getElementById('live').classList.remove('on');
+    document.getElementById('live-text').textContent = `error: ${err.message}`;
+  }
+}
+
+function setupFilters() {
+  document.querySelectorAll('.node-filter').forEach(el => {
+    el.addEventListener('change', () => {
+      State.filters.types = new Set(
+        Array.from(document.querySelectorAll('.node-filter:checked')).map(e => e.value)
+      );
+      rebuildGraph();
+    });
+  });
+  document.querySelectorAll('.tier-filter').forEach(el => {
+    el.addEventListener('change', () => {
+      State.filters.tiers = new Set(
+        Array.from(document.querySelectorAll('.tier-filter:checked')).map(e => e.value)
+      );
+      rebuildGraph();
+    });
+  });
+  document.getElementById('relayout-btn').addEventListener('click', () => {
+    if (State.cy) State.cy.layout({ ...layoutOptions(), animate: true }).run();
+  });
+}
+
+function init() {
+  const params = new URLSearchParams(window.location.search);
+  const trace = params.get('trace');
+  if (!trace) {
+    document.getElementById('cy').innerHTML =
+      '<div style="padding:32px;color:var(--fg-dim);">No <code>?trace=…</code> URL param. Open from trace_viewer.html.</div>';
+    return;
+  }
+  State.traceUrl = trace;
+  // Keep the "list view" link sharing the same trace
+  document.getElementById('back-link').href = `trace_viewer.html?trace=${encodeURIComponent(trace)}`;
+  setupFilters();
+  load();
+  setInterval(load, 2000);
+}
+
+window.addEventListener('DOMContentLoaded', init);
+</script>
+
+</body>
+</html>

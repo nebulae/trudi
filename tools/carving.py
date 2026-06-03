@@ -1,13 +1,14 @@
 """File carving tools — bulk_extractor, foremost, scalpel."""
 from typing import Optional
 from fastmcp import FastMCP
-from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
+from core import run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("carving")
 
 
 @mcp.tool()
+@output_safe
 def bulk_extractor_scan(
     image_path: str,
     output_dir: str,
@@ -23,7 +24,6 @@ def bulk_extractor_scan(
     scanners: comma-separated scanner names to limit scope
               e.g. 'email,url,domain,ip' — omit for all scanners.
     """
-    assert_output_safe(output_dir)
     cmd = ["bulk_extractor", "-j", str(threads), "-o", output_dir]
     if scanners:
         for s in scanners.split(","):
@@ -33,6 +33,7 @@ def bulk_extractor_scan(
 
 
 @mcp.tool()
+@output_safe
 def bulk_extractor_unallocated(
     unallocated_raw: str,
     output_dir: str,
@@ -42,12 +43,12 @@ def bulk_extractor_unallocated(
     Run bulk_extractor on a raw unallocated blocks file (from tsk_blkls).
     Faster than scanning a full image when you only care about deleted/unallocated data.
     """
-    assert_output_safe(output_dir)
     cmd = ["bulk_extractor", "-j", str(threads), "-o", output_dir, unallocated_raw]
     return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*6, output_dir=output_dir)
 
 
 @mcp.tool()
+@output_safe
 def foremost_carve(
     image_path: str,
     output_dir: str,
@@ -59,7 +60,6 @@ def foremost_carve(
     file_types: comma-separated types e.g. 'jpg,pdf,doc,zip,exe' — omit for all.
     output_file: uses foremost default config if not specified.
     """
-    assert_output_safe(output_dir)
     cmd = ["foremost", "-o", output_dir]
     if file_types:
         cmd += ["-t", file_types]
@@ -70,6 +70,7 @@ def foremost_carve(
 
 
 @mcp.tool()
+@output_safe
 def scalpel_carve(
     image_path: str,
     output_dir: str,
@@ -79,12 +80,12 @@ def scalpel_carve(
     Carve files by signature using scalpel (faster than foremost for large images).
     config_file: scalpel.conf with file type definitions (edit to enable desired types).
     """
-    assert_output_safe(output_dir)
     cmd = ["scalpel", "-c", config_file, "-o", output_dir, image_path]
     return run(cmd, needs_sudo=True, timeout=VOL_TIMEOUT*12, output_dir=output_dir)
 
 
 @mcp.tool()
+@output_safe
 def bulk_extractor_report(output_dir: str) -> dict:
     """
     Read and summarize bulk_extractor output feature files from a completed scan.
