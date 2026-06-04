@@ -247,6 +247,36 @@ def _build_known_host_set(case_context: str) -> set[str]:
     return known
 
 
+def _drain_queued_pivots(case_context: str) -> list[str]:
+    """Return the queued pivot hosts that have never been pivoted to.
+
+    A host enters the queue when a prior dair_call's auto-push captured it as
+    overflow (`pending_pivots`). It leaves implicitly the first time a Triage
+    `investigation_focus` mentions it (captured by _build_known_host_set).
+    """
+    queued: set[str] = set()
+    try:
+        from core.execution_log import log as _elog
+        for e in _elog._entries:
+            if e.get("type") != "dair_call":
+                continue
+            for h in e.get("pending_pivots") or []:
+                queued.add(str(h).upper())
+    except Exception as _read_err:
+        import sys as _sys
+        print(f"[TRUDI WARN] dair queue read failed: {_read_err!r}",
+              file=_sys.stderr)
+        return []
+    known = {h.upper() for h in _build_known_host_set(case_context)}
+    return sorted(queued - known)
+
+
+# Pivot-detection allow-list. Hosts surfaced from these phases are eligible
+# for auto-push or queueing; Triage is excluded because Triage is *about* the
+# host already under investigation.
+_PIVOT_ELIGIBLE_PHASES = frozenset({"Scan", "Analyze", "Collect"})
+
+
 def _strip_blocks(text: str) -> str:
     """Remove VERIFICATION_CHALLENGES and DAIR_ASSESSMENT blocks from text."""
     text = re.sub(
@@ -393,6 +423,7 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
             output_tokens=output_tokens,
             inputs=inputs,
             input_call_ids=input_call_ids,
+            pending_pivots=assessment.get("pending_pivots") or None,
         )
     except Exception as e:
         import sys
@@ -467,6 +498,13 @@ against any suspect list provided in case_context before advancing.
   Analyze  — reason about the collected artifacts: process trees, network \
 connections, persistence mechanisms, TTPs. Each suspicious artifact should be \
 examined. A genuinely ambiguous artifact may push back to Triage before proceeding. \
+LATERAL-MOVEMENT PIVOTING: if Analyze surfaces a reference to a host other than \
+the one under investigation — remote logon (4624 type 3/10), SMB session, \
+mapped drive, inbound RDP, \\\\HOST\\share path in a command line or registry \
+value, named pipe to a remote endpoint — that host is a pivot. Do not wait for \
+Scan; the server-enforced auto-push will fire on the new host token and push a \
+fresh Triage onto the stack. Continue the current Analyze work order in parallel \
+where possible; the pivot Triage will be drained from the persistent queue. \
 ALSO run anti-forensics detectors here when the relevant input artifacts exist: \
 af.af_timestomp_drift (after ez.mftecmd CSV), af.af_event_log_clear (after \
 ez.evtxecmd), af.af_sysmon_evasion (after ez.recmd_hive SYSTEM), af.af_usn_gaps \
@@ -503,16 +541,25 @@ live.live_read_file for small config artifacts (max 64KB cap)
   Scan     — live.live_yara_scan(rules_path, target_dir) for cross-host hunting
 The live.* tools route through SSH with fixed argv (no remote shell parsing); \
 findings can use their _trudi_call_id as linked_call_id like any other tool.
-  Scan     — sweep for lateral movement and pivot hosts: yara.scan_directory, \
-net.tcpdump_extract_dns, enrich.vt_lookup_hash, enrich.abuseipdb_check. \
-Each new pivot host discovered pushes a new Triage onto the stack (full cycle \
-for that host). Advance to Report when the sweep is exhausted.
+  Scan     — exhaustive cross-host IOC sweep and propagation check: \
+yara.scan_directory across all collected disk/memory, net.tcpdump_extract_dns \
+for exfil signatures, enrich.vt_lookup_hash and enrich.abuseipdb_check for \
+hashes/IPs the agent had no earlier reason to look up. This phase is the \
+safety net for IOCs the per-host Analyze passes did not surface — NOT the \
+gatekeeper of pivoting. Pivot hosts are now discovered in any phase that \
+surfaces a new host token (Collect, Analyze, Scan); the server-enforced \
+auto-push fires from each and persists overflow pivots to the pending_pivots \
+queue. Advance to Report when the cross-host sweep is exhausted and the \
+pivot queue has drained.
   Report   — terminal phase. BEFORE reason.synthesize, call BOTH \
 coverage.coverage_report (TTP coverage checklist) AND attribution.attribute_actors \
 (adversary attribution from observed T-IDs) so the final synthesis input has the \
-complete picture. Then synthesise findings into a timeline. Emit Improve & \
-Response recommendations for the IR team in recommended_actions. Never direct \
-containment or eradication tool calls.
+complete picture. When findings span multiple hosts, ALSO call \
+correlate.process_to_file and correlate.network_to_process (with no PID/IP/path \
+filter, to get the full cross-host join) so the synthesis input has real \
+cross-host joins rather than isolated per-host slices. Then synthesise findings \
+into a timeline. Emit Improve & Response recommendations for the IR team in \
+recommended_actions. Never direct containment or eradication tool calls.
 
 PHASE STACK:
 The phase_stack is the recursive history of the investigation. Newest entry is last. \
@@ -678,6 +725,53 @@ def dair_assess(
         "user_message": user,
     }
 
+    # Persistent pivot-queue drain. If a prior dair_call queued overflow
+    # pivots (via the auto-push below) and none of them have been pivoted to
+    # yet, synthesize a Triage push for the next queued host and skip the
+    # model call entirely. This guarantees deterministic drain across turns
+    # and saves a model round-trip per queued pivot. Triage entries do NOT
+    # drain — Triage is the host investigation itself, not a transit phase.
+    if current != "Triage":
+        queued = _drain_queued_pivots(context)
+        if queued:
+            first_pivot = queued[0]
+            remaining = queued[1:]
+            from tools.reasoning import _EMPTY_DIRECTIVES
+            drain_assessment = {
+                **_EMPTY_ASSESSMENT,
+                "current_phase": current,
+                "phase_rationale": (
+                    f"Pivot queue non-empty ({len(queued)} host(s) pending) — "
+                    f"draining {first_pivot} before continuing {current}."
+                ),
+                "transition_recommended": True,
+                "next_phase": "Triage",
+                "transition_rationale": (
+                    f"Auto-drain: queued pivot host {first_pivot} from "
+                    f"prior pending_pivots (server-enforced, no model call)."
+                ),
+                "stack_action": "push",
+                "investigation_focus": (
+                    f"Triage pivot host {first_pivot} (drained from queue)"
+                ),
+                "directives": {
+                    **_EMPTY_DIRECTIVES,
+                    "priority_tools": ["reason.hypothesize", "reason.plan"],
+                },
+            }
+            if remaining:
+                drain_assessment["pending_pivots"] = remaining
+            call_id = _log_dair(drain_assessment, 0, 0,
+                                inputs=call_inputs,
+                                input_call_ids=input_call_ids)
+            return {
+                **drain_assessment,
+                "success": True,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "_trudi_call_id": call_id,
+            }
+
     backend_result = _ask(_DAIR_SYS, user, max_tokens=MAX_TOKENS_DAIR)
 
     _empty_result = {
@@ -704,37 +798,66 @@ def dair_assess(
     if challenges:
         assessment["verification_challenges"] = challenges
 
-    # Scan → Triage auto-push: if the current top-of-stack phase is Scan and
-    # the model emitted stay, look for new-host references in the summary.
-    # Any host (IP or hostname pattern) not in case_context or any prior
-    # investigation_focus is treated as a new pivot. Force push to Triage.
-    # NEVER downgrades a model "push" — only escalates a model "stay".
-    if current == "Scan" and assessment.get("stack_action") == "stay":
+    # Cross-phase pivot auto-push. Any phase that surfaces a host token not
+    # in case_context or any prior investigation_focus treats that host as a
+    # new pivot. Two paths:
+    #   (a) model emitted "stay" — force a push to Triage for the first new
+    #       host; overflow goes into pending_pivots for the drain preamble
+    #       to process on subsequent calls.
+    #   (b) model emitted "push" to a non-Triage phase (advancing the
+    #       per-host pipeline, e.g. Analyze → Scan) — keep the model's push
+    #       intact (NEVER downgrade) but capture overflow new hosts into
+    #       pending_pivots so the queue still drains.
+    # Triage is excluded from both paths: Triage is *about* the host already
+    # under investigation, so its own focus shouldn't trigger a self-pivot.
+    if current in _PIVOT_ELIGIBLE_PHASES:
         summary_hosts = _extract_host_tokens(summary)
         known_hosts = _build_known_host_set(context)
         new_pivots = sorted(summary_hosts - known_hosts)
         if new_pivots:
-            first_pivot = new_pivots[0]
-            remaining = new_pivots[1:]
-            assessment["transition_recommended"] = True
-            assessment["next_phase"] = "Triage"
-            assessment["stack_action"] = "push"
-            note = (
-                f"Auto-pushed: Scan surfaced new host(s) {', '.join(new_pivots)} "
-                f"not in case_context or prior investigation_focus (server-enforced)."
-            )
-            prior_rationale = assessment.get("transition_rationale") or ""
-            assessment["transition_rationale"] = (
-                f"{prior_rationale} {note}".strip()
-                if prior_rationale else note
-            )
-            if remaining:
-                assessment["pending_pivots"] = remaining
-            # Surface the first pivot as the entry reason so the agent has
-            # an obvious anchor for the new Triage frame.
-            if not assessment.get("investigation_focus"):
-                assessment["investigation_focus"] = (
-                    f"Triage pivot host {first_pivot} surfaced during Scan"
+            action = assessment.get("stack_action")
+            next_phase = assessment.get("next_phase", "")
+            if action == "stay":
+                first_pivot = new_pivots[0]
+                remaining = new_pivots[1:]
+                assessment["transition_recommended"] = True
+                assessment["next_phase"] = "Triage"
+                assessment["stack_action"] = "push"
+                note = (
+                    f"Auto-pushed: {current} surfaced new host(s) "
+                    f"{', '.join(new_pivots)} not in case_context or prior "
+                    f"investigation_focus (server-enforced)."
+                )
+                prior_rationale = assessment.get("transition_rationale") or ""
+                assessment["transition_rationale"] = (
+                    f"{prior_rationale} {note}".strip()
+                    if prior_rationale else note
+                )
+                if remaining:
+                    assessment["pending_pivots"] = remaining
+                if not assessment.get("investigation_focus"):
+                    assessment["investigation_focus"] = (
+                        f"Triage pivot host {first_pivot} surfaced during {current}"
+                    )
+            elif action == "push" and next_phase != "Triage":
+                # Model is advancing the per-host pipeline (e.g. Collect →
+                # Analyze). Don't override — just enqueue the pivots so the
+                # drain preamble surfaces them after the model-directed push
+                # completes.
+                existing = list(assessment.get("pending_pivots") or [])
+                for h in new_pivots:
+                    if h not in existing:
+                        existing.append(h)
+                assessment["pending_pivots"] = existing
+                enq_note = (
+                    f"Enqueued pivot host(s) {', '.join(new_pivots)} surfaced "
+                    f"during {current}; will drain after current push completes "
+                    f"(server-enforced)."
+                )
+                prior_rationale = assessment.get("transition_rationale") or ""
+                assessment["transition_rationale"] = (
+                    f"{prior_rationale} {enq_note}".strip()
+                    if prior_rationale else enq_note
                 )
 
     # Guard: if all triage challenges resolved true but the assessment JSON failed

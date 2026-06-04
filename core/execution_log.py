@@ -1067,6 +1067,7 @@ class ExecutionLog:
         output_tokens: int = 0,
         inputs: dict | None = None,
         input_call_ids: list[int] | None = None,
+        pending_pivots: list[str] | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1104,6 +1105,8 @@ class ExecutionLog:
                 entry["inputs"] = inputs
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            if pending_pivots:
+                entry["pending_pivots"] = [str(h) for h in pending_pivots if h]
             self._append_entry(entry)
             self._last_dair_cid = cid
             return cid

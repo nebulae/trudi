@@ -740,6 +740,69 @@ class TestReasonPreReportCheck:
         assert len(pre) == 1
         assert "READY_TO_REPORT: false" in pre[0]["conclusion"]
 
+    def test_multi_host_findings_without_correlate_warns(self, configured_log):
+        # When findings span ≥2 hosts but no correlate.process_to_file /
+        # correlate.network_to_process call was logged, a warning fires
+        # (non-blocking).
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call(
+            "reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Beacon on 172.16.6.11 PID 4044 (T1055)",
+            "CONFIRMED", "vol.netscan")
+        configured_log.record_finding(
+            "Beacon on 172.16.4.7 PID 1820 (T1021)",
+            "CONFIRMED", "vol.netscan")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True  # warning-level
+        assert any("correlate" in w for w in r["warnings"])
+        assert any("cross-host" in w.lower() for w in r["warnings"])
+
+    def test_multi_host_with_correlate_no_warning(self, configured_log):
+        # Same multi-host setup, but a correlate.network_to_process tool_call
+        # is present → no cross-host correlation warning.
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_tool_call(
+            "<py>:correlate_network_to_process", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call(
+            "reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Beacon on 172.16.6.11 PID 4044 (T1055)",
+            "CONFIRMED", "vol.netscan")
+        configured_log.record_finding(
+            "Beacon on 172.16.4.7 PID 1820 (T1021)",
+            "CONFIRMED", "vol.netscan")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
+        assert not any("cross-host" in w.lower() for w in r["warnings"])
+
+    def test_single_host_does_not_trigger_correlation_warning(self, configured_log):
+        # Single-host case — no correlate.* needed; warning must not fire.
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call(
+            "reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Beacon on 172.16.6.11 PID 4044 (T1055)",
+            "CONFIRMED", "vol.netscan")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
+        assert not any("cross-host" in w.lower() for w in r["warnings"])
+
 
 class TestCallInitiatedLogging:
     """Tests for pre-flight call_initiated trace entries in reason.* tools."""

@@ -1222,6 +1222,45 @@ def reason_pre_report_check() -> dict:
             "orphaned process, or unexpected network connection"
         )
 
+    # Cross-host correlation gate (warning, not blocking). When findings span
+    # multiple hosts but no correlate.process_to_file / correlate.network_to_process
+    # call was made, per-host findings will land in synthesis as isolated slices
+    # rather than a coherent cross-host timeline. Warning-level keeps single-host
+    # cases unaffected and lets the agent recover by running the missing call.
+    try:
+        from tools.dair import _extract_host_tokens
+        finding_hosts: set[str] = set()
+        for e in entries:
+            if e.get("type") == "finding":
+                finding_hosts |= _extract_host_tokens(e.get("description") or "")
+            elif e.get("type") == "dair_call":
+                finding_hosts |= _extract_host_tokens(
+                    e.get("investigation_focus") or "")
+        if len(finding_hosts) >= 2:
+            has_correlate = any(
+                e.get("type") == "tool_call"
+                and isinstance(e.get("cmd"), str)
+                and (
+                    "correlate_process_to_file" in e["cmd"]
+                    or "correlate_network_to_process" in e["cmd"]
+                )
+                for e in entries
+            )
+            if not has_correlate:
+                hosts_str = ", ".join(sorted(finding_hosts)[:5])
+                warnings.append(
+                    f"Findings span {len(finding_hosts)} hosts ({hosts_str}"
+                    f"{'…' if len(finding_hosts) > 5 else ''}) but no "
+                    f"correlate.process_to_file or correlate.network_to_process "
+                    f"call was made. Call them (with no PID/IP/path filter) "
+                    f"before reason.synthesize so the timeline reflects "
+                    f"cross-host joins, not isolated per-host slices."
+                )
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] cross-host correlation check failed: {_e}",
+              file=_sys.stderr)
+
     # Unrecorded-findings audit: model-based scan of narrations vs. structured
     # finding entries. Surfaces facts the agent wrote in chat but never
     # promoted via misc.record_finding.

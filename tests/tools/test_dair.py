@@ -891,3 +891,264 @@ class TestDairScanAutoPush:
         # text because the model already pushed.
         assert r["stack_action"] == "push"
         assert "server-enforced" not in (r.get("transition_rationale") or "").lower()
+
+
+# ── Cross-phase pivot detection (Analyze / Collect / model-push enqueue) ─────
+
+_ANALYZE_STAY_NEW_HOST = (
+    'DAIR_ASSESSMENT:\n'
+    '{"current_phase": "Analyze", "phase_rationale": "Examining process tree",'
+    ' "transition_recommended": false, "next_phase": "",'
+    ' "transition_rationale": "",'
+    ' "stack_action": "stay",'
+    ' "investigation_focus": "Analyzing PsExec activity on rd-01",'
+    ' "verification_challenges": [], "recommended_actions": [],'
+    ' "directives": {"priority_tools": ["vol.cmdline"], "skip_tools": [],'
+    ' "focus_pids": [], "focus_paths": [], "max_depth": "",'
+    ' "next_hypothesis_triggers": []}}'
+)
+
+_COLLECT_STAY_NEW_HOST = (
+    'DAIR_ASSESSMENT:\n'
+    '{"current_phase": "Collect", "phase_rationale": "Continuing artifact pulls",'
+    ' "transition_recommended": false, "next_phase": "",'
+    ' "transition_rationale": "",'
+    ' "stack_action": "stay",'
+    ' "investigation_focus": "Pulling registry hives on rd-01",'
+    ' "verification_challenges": [], "recommended_actions": [],'
+    ' "directives": {"priority_tools": ["ez.recmd_hive"], "skip_tools": [],'
+    ' "focus_pids": [], "focus_paths": [], "max_depth": "",'
+    ' "next_hypothesis_triggers": []}}'
+)
+
+_ANALYZE_PUSH_TO_SCAN_NEW_HOST = (
+    'DAIR_ASSESSMENT:\n'
+    '{"current_phase": "Analyze", "phase_rationale": "Per-host analysis done",'
+    ' "transition_recommended": true, "next_phase": "Scan",'
+    ' "transition_rationale": "Advance to cross-host sweep",'
+    ' "stack_action": "push",'
+    ' "investigation_focus": "Cross-host IOC sweep",'
+    ' "verification_challenges": [], "recommended_actions": [],'
+    ' "directives": {"priority_tools": ["yara.scan_directory"], "skip_tools": [],'
+    ' "focus_pids": [], "focus_paths": [], "max_depth": "",'
+    ' "next_hypothesis_triggers": []}}'
+)
+
+
+class TestDairCrossPhasePivot:
+    """Pivot detection now fires from Scan, Analyze, AND Collect — any phase
+    that surfaces a host other than the one under investigation triggers a
+    push (or, on a model-emitted push to a non-Triage phase, an enqueue)."""
+
+    def test_analyze_surfaces_new_host_forces_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("XPHASE", str(tmp_path / "trace.json"))
+        stack = json.dumps([
+            {"phase": "Triage", "entry_reason": "open", "depth": 0},
+            {"phase": "Collect", "entry_reason": "verified", "depth": 1},
+            {"phase": "Analyze", "entry_reason": "collected", "depth": 2},
+        ])
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_ANALYZE_STAY_NEW_HOST):
+            r = dair_assess(
+                "vol.netscan shows established session to 172.16.4.7:445 from PID 4044",
+                phase_stack=stack,
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        assert r["stack_action"] == "push"
+        assert r["next_phase"] == "Triage"
+        assert "172.16.4.7" in r["transition_rationale"]
+        assert "Analyze" in r["transition_rationale"]
+
+    def test_collect_surfaces_new_host_forces_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("XPHASE", str(tmp_path / "trace.json"))
+        stack = json.dumps([
+            {"phase": "Triage", "entry_reason": "open", "depth": 0},
+            {"phase": "Collect", "entry_reason": "verified", "depth": 1},
+        ])
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_COLLECT_STAY_NEW_HOST):
+            r = dair_assess(
+                "Registry hive enumeration revealed \\\\BASE-RD-04\\C$ "
+                "mapped drive in HKCU\\Network",
+                phase_stack=stack,
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        assert r["stack_action"] == "push"
+        assert r["next_phase"] == "Triage"
+        assert "BASE-RD-04" in r["transition_rationale"].upper()
+        assert "Collect" in r["transition_rationale"]
+
+    def test_triage_does_not_pivot_on_own_focus(self, tmp_path):
+        # A Triage entry investigating rd-01 mentioning a NEW host (e.g.
+        # 172.16.4.9) would normally pivot — but Triage is excluded from
+        # the eligible-phase set. Stays "stay".
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("XPHASE", str(tmp_path / "trace.json"))
+        stack = json.dumps([
+            {"phase": "Triage", "entry_reason": "open", "depth": 0},
+        ])
+        # Use _ASSESSMENT_STAY which sets current_phase=Triage and stay.
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_ASSESSMENT_STAY):
+            r = dair_assess(
+                "Verifying STUN.exe; also saw 172.16.4.9 in passing",
+                phase_stack=stack,
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        # Triage stays; no pivot push on its own surface mentions.
+        assert r["stack_action"] == "stay"
+
+    def test_model_push_to_non_triage_enqueues_overflow(self, tmp_path):
+        # Model advances Analyze → Scan (per-host pipeline). Summary mentions
+        # a new pivot host. Server-enforced override does NOT downgrade the
+        # model push — it captures the pivot into pending_pivots for the
+        # drain preamble to handle next turn.
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("XPHASE", str(tmp_path / "trace.json"))
+        stack = json.dumps([
+            {"phase": "Triage", "entry_reason": "open", "depth": 0},
+            {"phase": "Collect", "entry_reason": "verified", "depth": 1},
+            {"phase": "Analyze", "entry_reason": "collected", "depth": 2},
+        ])
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_ANALYZE_PUSH_TO_SCAN_NEW_HOST):
+            r = dair_assess(
+                "PsExec evidence to 172.16.4.8 confirmed; advancing to cross-host sweep",
+                phase_stack=stack,
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        # Model push to Scan preserved.
+        assert r["stack_action"] == "push"
+        assert r["next_phase"] == "Scan"
+        # New pivot enqueued, not overridden.
+        assert "172.16.4.8" in (r.get("pending_pivots") or [])
+        assert "enqueued" in (r.get("transition_rationale") or "").lower()
+
+
+# ── Persistent pivot-queue drain ─────────────────────────────────────────────
+
+class TestDairPivotQueueDrain:
+    """Pending pivots persist across dair_assess calls and drain
+    deterministically without invoking the model."""
+
+    def test_drain_short_circuits_subsequent_call(self, tmp_path):
+        # First call: Scan surfaces three new hosts. First gets pushed,
+        # other two go into pending_pivots on the trace entry.
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("DRAIN", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_SCAN_STAY_NEW_HOST):
+            r1 = dair_assess(
+                "ShimCache hits on 172.16.4.5, 172.16.4.6, 172.16.4.7",
+                phase_stack=_scan_stack_json(),
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        assert r1["stack_action"] == "push"
+        assert len(r1.get("pending_pivots") or []) == 2
+
+        # Trace should record pending_pivots on the dair_call entry.
+        last_dair = [e for e in l._entries if e.get("type") == "dair_call"][-1]
+        assert last_dair.get("pending_pivots") == r1["pending_pivots"]
+
+        # Second call — agent has finished the first pivot's full cycle
+        # and popped back. Now on Scan (or any non-Triage phase). The
+        # drain preamble fires WITHOUT calling the model, popping the
+        # next queued host.
+        anthro = MagicMock()  # would fail the test if called
+        with patch("core.execution_log.log", l), \
+             patch("anthropic.Anthropic", anthro), \
+             patch("tools.dair.ANTHROPIC_API_KEY", "sk-test"), \
+             patch("tools.dair.DAIR_BACKEND", "claude"):
+            r2 = dair_assess(
+                "Continuing cross-host sweep",
+                phase_stack=_scan_stack_json(),
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        # Drain produces a push to Triage for the next queued host.
+        assert r2["stack_action"] == "push"
+        assert r2["next_phase"] == "Triage"
+        assert r2["input_tokens"] == 0, "model should not have been called"
+        assert r2["output_tokens"] == 0
+        # Either 172.16.4.6 or 172.16.4.7 (sorted order) is now the focus.
+        assert any(h in r2["investigation_focus"]
+                   for h in ("172.16.4.6", "172.16.4.7"))
+        # Queue shrunk by one.
+        assert len(r2.get("pending_pivots") or []) == 1
+        anthro.assert_not_called()
+
+    def test_drain_skipped_when_current_phase_is_triage(self, tmp_path):
+        # A Triage frame must run the model — drain doesn't fire mid-Triage.
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("DRAIN", str(tmp_path / "trace.json"))
+        # Seed a prior dair_call entry with pending_pivots.
+        l.record_dair_call(
+            current_phase="Scan", phase_rationale="prior",
+            transition_recommended=True, next_phase="Triage",
+            transition_rationale="prior push", stack_action="push",
+            investigation_focus="prior triage focus",
+            pending_pivots=["172.16.4.99"],
+        )
+        # Now call dair_assess on a Triage frame.
+        stack = json.dumps([
+            {"phase": "Triage", "entry_reason": "open", "depth": 0},
+        ])
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_ASSESSMENT_STAY) as client:
+            r = dair_assess(
+                "Verifying initial IOC",
+                phase_stack=stack,
+                case_context="Host rd-01",
+            )
+        # Model ran — Triage doesn't drain (model client invoked, no
+        # synthetic-drain investigation_focus, current_phase preserved).
+        client.messages.create.assert_called_once()
+        assert r["current_phase"] == "Triage"
+        assert r["stack_action"] == "stay"
+        assert "drained from queue" not in (r.get("investigation_focus") or "")
+
+    def test_drain_skipped_when_queued_host_already_investigated(self, tmp_path):
+        # Queued host appears in a later dair_call's investigation_focus →
+        # treated as known → drain returns empty → model is called.
+        from core.execution_log import ExecutionLog
+        from tools.dair import dair_assess
+        l = ExecutionLog()
+        l.configure("DRAIN", str(tmp_path / "trace.json"))
+        # Earlier entry queued 172.16.4.99…
+        l.record_dair_call(
+            current_phase="Scan", phase_rationale="prior",
+            transition_recommended=True, next_phase="Triage",
+            transition_rationale="prior push", stack_action="push",
+            investigation_focus="Triage 172.16.4.5",
+            pending_pivots=["172.16.4.99"],
+        )
+        # …and a subsequent Triage entry already touched it.
+        l.record_dair_call(
+            current_phase="Triage", phase_rationale="pivot triage",
+            transition_recommended=False, next_phase="",
+            transition_rationale="", stack_action="stay",
+            investigation_focus="Triage pivot host 172.16.4.99",
+        )
+        with patch("core.execution_log.log", l), \
+             _claude_ctx(_SCAN_STAY_NEW_HOST):
+            r = dair_assess(
+                "Continuing sweep — no new hosts",
+                phase_stack=_scan_stack_json(),
+                case_context="Host rd-01 (172.16.6.11)",
+            )
+        # Queue empty → model runs → no synthetic push.
+        # _SCAN_STAY_NEW_HOST has stack_action=stay, no new pivots in summary.
+        assert r["stack_action"] == "stay"
