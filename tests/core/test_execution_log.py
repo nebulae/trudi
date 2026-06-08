@@ -670,14 +670,27 @@ class TestProtocolViolationFlag:
         l.record_tool_call("vol.psscan", True, False, 0, 0)
         assert "protocol_violation" not in l._entries[0]
 
-    def test_tool_call_without_recent_dair_flagged(self, tmp_path):
+    def test_cold_start_tool_calls_not_flagged_before_any_dair(self, tmp_path):
+        # R3b cold-start grace: the mandated pre-plan recon batch (hash verify,
+        # image mount, hive reads) runs BEFORE the first dair_assess and must
+        # NOT be flagged — flagging it was a self-contradiction. A missing-DAIR
+        # violation only applies once DAIR has engaged at least once.
         l = ExecutionLog()
         l.configure("PV-002", str(tmp_path / "trace.json"))
-        # First tool_call seeds the log (no flag).
         l.record_tool_call("vol.psscan", True, False, 0, 0)
-        # Second tool_call has prior entries but no dair_call → must flag.
         l.record_tool_call("vol.netscan", True, False, 0, 0)
-        assert l._entries[1].get("protocol_violation") == "no_active_dair_batch"
+        assert "protocol_violation" not in l._entries[1]
+
+    def test_tool_call_without_recent_dair_flagged_after_dair_aged_out(self, tmp_path):
+        # Once DAIR has engaged, a later tool_call with no dair in the 20-entry
+        # window IS flagged (the genuine "agent dropped DAIR mid-investigation").
+        l = ExecutionLog()
+        l.configure("PV-002b", str(tmp_path / "trace.json"))
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        for _ in range(20):
+            l.record_reason_call("reason_hypothesize", True, "ok", {})
+        l.record_tool_call("vol.netscan", True, False, 0, 0)
+        assert l._entries[-1].get("protocol_violation") == "no_active_dair_batch"
 
     def test_tool_call_with_recent_dair_unflagged(self, tmp_path):
         l = ExecutionLog()
@@ -701,7 +714,12 @@ class TestProtocolViolationFlag:
     def test_markdown_renders_violation_marker(self, tmp_path):
         l = ExecutionLog()
         l.configure("PV-005", str(tmp_path / "trace.json"))
-        l.record_tool_call("vol.psscan", True, False, 0, 0)
+        # DAIR engaged once, then aged out of the 20-entry window → the next
+        # tool_call is a real violation that the markdown must render. (Under
+        # R3b a tool_call before any dair is cold-start grace, not a violation.)
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        for _ in range(20):
+            l.record_reason_call("reason_hypothesize", True, "ok", {})
         l.record_tool_call("vol.netscan", True, False, 0, 0)
         md = l.to_markdown()
         assert "PROTOCOL_VIOLATION" in md

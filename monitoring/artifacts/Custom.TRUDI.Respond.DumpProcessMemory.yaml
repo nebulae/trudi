@@ -1,0 +1,25 @@
+name: Custom.TRUDI.Respond.DumpProcessMemory
+description: |
+  TRUDI remediation: gcore the named PID, upload the core to the
+  Velociraptor server for forensic analysis. The process is left running
+  so a follow-on PausePid/KillPid is required for containment.
+
+type: CLIENT
+
+parameters:
+  - name: Pid
+    type: int
+
+sources:
+  - query: |
+      LET valid <= Pid > 1 AND Pid < 4194304
+      LET dump_path <= format(format="/tmp/trudi-core-%d-%d.core", args=[Pid, now()])
+      SELECT
+        Pid AS pid,
+        dump_path AS dump_path,
+        if(condition=valid,
+           then=execve(argv=["/usr/bin/gcore", "-o", dump_path, format(format="%d", args=[Pid])]),
+           else=dict(stdout="", stderr="invalid PID", return_code=2)
+        ) AS execution,
+        upload(file=dump_path) AS uploaded
+      FROM scope()

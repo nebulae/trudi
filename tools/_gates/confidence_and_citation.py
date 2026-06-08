@@ -31,6 +31,37 @@ def check(ctx) -> Optional[dict]:
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
 
+    # ── R1 fast path ──────────────────────────────────────────────────────
+    # If supporting_evidence was supplied inline, run a DETERMINISTIC citation
+    # check instead of requiring two 8B-model round-trips (confidence_score +
+    # cite_check). CONFIRMED's tier guard is confirmed_requires_supported_evaluate
+    # (runs just before this gate); LIKELY trusts the agent tier + citation
+    # check. This also sidesteps the description-substring matching of the
+    # legacy path, so re-wording a finding no longer invalidates a prior check.
+    if (ctx.supporting_evidence or "").strip():
+        from ._citation import deterministic_cite_check
+        cite = deterministic_cite_check(ctx.description, ctx.supporting_evidence)
+        if cite["verdict"] != "ALL_CITED":
+            return {
+                "success": False,
+                "error": (
+                    "Inline citation check failed: these concrete claims appear "
+                    "in the finding but not in supporting_evidence — "
+                    f"{cite['uncited_claims']}. Add each value (with its tool/field "
+                    "reference) to supporting_evidence, or remove the claim, then "
+                    "re-record."
+                    if cite["verdict"] == "UNCITED_CLAIMS_PRESENT"
+                    else "supporting_evidence is empty or contains no artifact data."
+                ),
+                "description": ctx.description,
+                "confidence": ctx.confidence,
+                "gate": "confidence_and_citation",
+                "uncited_claims": cite["uncited_claims"],
+            }
+        ctx.citation_mode = "deterministic"
+        return None
+    # ── legacy path (no inline supporting_evidence) ───────────────────────
+
     norm_desc = _normalize(ctx.description)
     # Anti-reuse: the matching reason_call must come AFTER any prior finding
     # with the same normalized description. Otherwise one confidence_score

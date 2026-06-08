@@ -63,6 +63,15 @@ class GateContext:
     gated_by_cite_check_call_id: int = 0
     gated_by_hypothesize_call_id: int = 0
 
+    # Inline supporting evidence. When non-empty, confidence_and_citation runs a
+    # DETERMINISTIC citation check on it (tools/_gates/_citation.py) instead of
+    # requiring separate reason.confidence_score + reason.cite_check model
+    # round-trips. Empty ⇒ legacy path. Set by record_finding.
+    supporting_evidence: str = ""
+    # Stamped "deterministic" by confidence_and_citation when the fast path is
+    # taken, so record_finding can mark the finding's citation provenance.
+    citation_mode: str = ""
+
     def __post_init__(self):
         if self.validated_techniques is None:
             self.validated_techniques = []

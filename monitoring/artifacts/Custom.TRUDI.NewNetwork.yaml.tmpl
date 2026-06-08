@@ -1,0 +1,35 @@
+name: Custom.TRUDI.NewNetwork
+description: |
+  TRUDI-managed: detect new outbound TCP connections to non-RFC1918
+  destinations whose (ip, port) pair is not in the baseline allowlist.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: BaselineEndpointPairs
+    description: JSON array of "ip:port" pairs considered known-good.
+    default: |
+      ${baseline_endpoints_dst_pairs}
+  - name: PollSeconds
+    description: How often to re-snapshot connections.
+    type: int
+    default: 10
+
+sources:
+  - query: |
+      LET baseline <= parse_json_array(data=BaselineEndpointPairs)
+      LET tick = SELECT * FROM clock(period=PollSeconds)
+      LET snapshot = SELECT
+        timestamp(epoch=now()) AS timestamp_utc,
+        Laddr AS local_ip,
+        Lport AS local_port,
+        Raddr AS remote_ip,
+        Rport AS remote_port,
+        Status AS state,
+        Pid
+      FROM Artifact.Linux.Network.NetstatEnriched()
+      WHERE NOT Raddr =~ "^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.|127\\.|0\\.|169\\.254\\.)"
+        AND Rport > 0
+        AND NOT (format(format="%s:%d", args=[Raddr, Rport])) IN baseline
+        AND Status = "ESTABLISHED"
+      SELECT * FROM foreach(row=tick, query=snapshot)

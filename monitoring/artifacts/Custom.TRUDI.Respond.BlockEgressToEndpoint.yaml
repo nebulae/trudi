@@ -1,0 +1,31 @@
+name: Custom.TRUDI.Respond.BlockEgressToEndpoint
+description: |
+  TRUDI remediation: iptables REJECT outbound TCP to (RemoteIp, RemotePort).
+  RemoteIp must be a valid dotted-quad and RemotePort 1..65535.
+
+type: CLIENT
+
+parameters:
+  - name: RemoteIp
+    type: string
+  - name: RemotePort
+    type: int
+
+sources:
+  - query: |
+      LET ip_valid <= RemoteIp =~ "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
+      LET port_valid <= RemotePort > 0 AND RemotePort < 65536
+      LET valid <= ip_valid AND port_valid
+      SELECT
+        RemoteIp AS remote_ip,
+        RemotePort AS remote_port,
+        if(condition=valid,
+           then=execve(argv=["/sbin/iptables", "-I", "OUTPUT",
+                             "-d", RemoteIp,
+                             "-p", "tcp",
+                             "--dport", format(format="%d", args=[RemotePort]),
+                             "-m", "comment", "--comment", "TRUDI_RESPOND",
+                             "-j", "REJECT"]),
+           else=dict(stdout="", stderr="invalid remote endpoint", return_code=2)
+        ) AS execution
+      FROM scope()

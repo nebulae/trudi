@@ -30,6 +30,9 @@ from tools.coverage import mcp as coverage_mcp
 from tools.antiforensics import mcp as antiforensics_mcp
 from tools.attribution import mcp as attribution_mcp
 from tools.live import mcp as live_mcp
+from tools.velo import mcp as velo_mcp
+from tools.monitor import mcp as monitor_mcp
+from tools.respond import mcp as respond_mcp
 
 mcp = FastMCP(
     "trudi-sift",
@@ -63,6 +66,9 @@ mcp.mount(coverage_mcp, namespace="coverage")
 mcp.mount(antiforensics_mcp, namespace="af")
 mcp.mount(attribution_mcp, namespace="attribution")
 mcp.mount(live_mcp, namespace="live")
+mcp.mount(velo_mcp, namespace="velo")
+mcp.mount(monitor_mcp, namespace="monitor")
+mcp.mount(respond_mcp, namespace="respond")
 
 
 if __name__ == "__main__":

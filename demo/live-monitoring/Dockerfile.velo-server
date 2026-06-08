@@ -1,0 +1,27 @@
+# Velociraptor server for the TRUDI live-monitoring demo.
+# On first boot, generates server + client + api configs into /config.
+# Subsequent boots reuse them — `docker compose down -v` wipes both volumes.
+
+FROM debian:stable-slim
+
+# Velociraptor's release tag and binary version differ — the tag is the
+# major.minor (e.g. v0.76), the binary embeds the full version (e.g. 0.76.1)
+# and ships with a `-musl` suffix for a fully-static build. Override the
+# whole URL in one shot to avoid future version-bump rework.
+ARG VELOCIRAPTOR_URL=https://github.com/Velocidex/velociraptor/releases/download/v0.76/velociraptor-v0.76.1-linux-amd64-musl
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl netcat-openbsd \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL -o /usr/local/bin/velociraptor "${VELOCIRAPTOR_URL}" \
+ && chmod +x /usr/local/bin/velociraptor \
+ && /usr/local/bin/velociraptor version | head -5
+
+COPY scripts/velo-server-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 8000 8001 8889
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

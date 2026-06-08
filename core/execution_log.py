@@ -683,8 +683,15 @@ class ExecutionLog:
             pass
         try:
             os.makedirs(os.path.dirname(_SESSION_FILE), exist_ok=True)
+            # Persist the ABSOLUTE path so the UserPromptSubmit /
+            # PostToolUse hooks can resolve it regardless of CWD. The
+            # hooks read this beacon and write to `path` directly —
+            # relative paths there silently no-op when the hook is
+            # launched from a different working directory than the
+            # one the MCP server happened to be in.
+            abs_path = os.path.abspath(self._path) if self._path else self._path
             with open(_SESSION_FILE, "w") as f:
-                json.dump({"case_id": self._case_id, "path": self._path}, f)
+                json.dump({"case_id": self._case_id, "path": abs_path}, f)
         except OSError as e:
             _warn(f"session save failed — auto-recovery on restart will not work: {e}")
 
@@ -930,7 +937,18 @@ class ExecutionLog:
                 window = self._entries[-20:]
                 has_recent_dair = any(e.get("type") == "dair_call" for e in window)
                 if not has_recent_dair:
-                    entry["protocol_violation"] = "no_active_dair_batch"
+                    # Cold-start grace: the mandated pre-plan recon batch (hash
+                    # verify, image mount, hive reads) legitimately runs before
+                    # the first dair_assess. Only flag a missing-DAIR violation
+                    # once the investigation has actually engaged DAIR at least
+                    # once — i.e. a dair_call exists earlier in the trace but has
+                    # aged out of the 20-entry window. Flagging pre-DAIR recon
+                    # was a self-contradiction: the workflow mandates those reads.
+                    ever_had_dair = any(
+                        e.get("type") == "dair_call" for e in self._entries
+                    )
+                    if ever_had_dair:
+                        entry["protocol_violation"] = "no_active_dair_batch"
             self._append_entry(entry)
             return entry["call_id"]
 
@@ -1067,6 +1085,7 @@ class ExecutionLog:
         output_tokens: int = 0,
         inputs: dict | None = None,
         input_call_ids: list[int] | None = None,
+        pending_pivots: list[str] | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1104,6 +1123,8 @@ class ExecutionLog:
                 entry["inputs"] = inputs
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            if pending_pivots:
+                entry["pending_pivots"] = [str(h) for h in pending_pivots if h]
             self._append_entry(entry)
             self._last_dair_cid = cid
             return cid

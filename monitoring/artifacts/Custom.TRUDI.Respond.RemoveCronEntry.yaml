@@ -1,0 +1,24 @@
+name: Custom.TRUDI.Respond.RemoveCronEntry
+description: |
+  TRUDI remediation: delete a cron entry. Restricted to /etc/cron* paths;
+  any other path refuses.
+
+type: CLIENT
+
+parameters:
+  - name: Path
+    description: Absolute path of the cron file to delete.
+    type: string
+
+sources:
+  - query: |
+      LET valid <= Path =~ "^/etc/cron(\\.|/)"
+      SELECT
+        Path AS path,
+        if(condition=valid,
+           then=execve(argv=["/bin/sh", "-c",
+             format(format="mkdir -p /var/quarantine && cp %s /var/quarantine/cron_backup_$(basename %s) && rm -f %s",
+                    args=[Path, Path, Path])]),
+           else=dict(stdout="", stderr="path is not under /etc/cron*", return_code=2)
+        ) AS execution
+      FROM scope()

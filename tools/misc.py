@@ -547,6 +547,18 @@ def _normalize_finding_text(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", (text or "").lower()).strip()[:60]
 
 
+def _infer_input_call_ids(window: list[dict], k: int = 5) -> list[int]:
+    """Fallback lineage: call_ids of the most recent tool/reason results (newest
+    last). Used when the agent omits input_call_ids so the causal DAG still gets
+    real foreign keys instead of an empty (or hand-mistyped) edge."""
+    cids = [
+        int(e["call_id"])
+        for e in window
+        if e.get("type") in ("tool_call", "reason_call") and e.get("call_id")
+    ]
+    return cids[-k:]
+
+
 @mcp.tool()
 @output_safe
 def record_finding(
@@ -556,6 +568,7 @@ def record_finding(
     linked_call_id: int = 0,
     tested_hypothesis_id: str = "",
     input_call_ids: list[int] | None = None,
+    supporting_evidence: str = "",
 ) -> dict:
     """
     Record a confirmed finding to the execution trace.
@@ -564,6 +577,18 @@ def record_finding(
     linked_call_id: the _trudi_call_id value from the tool result that produced this
                     finding — enables judges to trace any finding back to its source
                     tool execution in the audit log.
+    supporting_evidence: RECOMMENDED for CONFIRMED/LIKELY. When supplied, the
+                    confidence_and_citation gate runs a DETERMINISTIC citation
+                    check on it (every concrete artifact value in the description
+                    — IPs, hashes, paths, technique IDs — must appear here) INSTEAD
+                    of requiring separate reason.confidence_score + reason.cite_check
+                    model calls. This is the fast path: one call instead of three.
+                    Omit it only to use the legacy path (those two reason calls
+                    must precede the record). CONFIRMED still also needs a
+                    SUPPORTED reason.evaluate_finding either way.
+    input_call_ids: N:M upstream lineage. If omitted, it is auto-inferred from the
+                    recent tool/reason results (stamped lineage_inferred); pass it
+                    explicitly for precise provenance.
 
     Gates (any failure refuses the call; the response carries a
     `gate: "<snake_case_identifier>"` field the agent can switch on):
@@ -600,6 +625,18 @@ def record_finding(
     from core.execution_log import log
     from tools._gates import GateContext, run_gates
 
+    # R4: auto-infer lineage when the agent omits it. The trace already knows
+    # which recent tool/reason results preceded this finding — hand-typing the
+    # foreign keys is a footgun (out-of-order / fabricated cids were a recurring
+    # refusal). Inference is recorded as lineage_inferred so the audit shows the
+    # edge was derived, not declared. Explicit input_call_ids always win.
+    lineage_inferred = False
+    if not input_call_ids:
+        _auto = _infer_input_call_ids(log.last_n_window(30))
+        if _auto:
+            input_call_ids = _auto
+            lineage_inferred = True
+
     ctx = GateContext(
         description=description,
         confidence=confidence,
@@ -611,6 +648,7 @@ def record_finding(
         idx=log.index(),
         window=log.last_n_window(30),
         input_call_ids=list(input_call_ids) if input_call_ids else [],
+        supporting_evidence=supporting_evidence or "",
     )
 
     failure = run_gates(ctx)
@@ -632,6 +670,12 @@ def record_finding(
         gate_metadata["gated_by_hypothesize_call_id"] = ctx.gated_by_hypothesize_call_id
     if ctx.validated_techniques:
         gate_metadata["validated_techniques"] = ctx.validated_techniques
+    if ctx.citation_mode:
+        # "deterministic" ⇒ citation verified inline from supporting_evidence
+        # (no confidence_score/cite_check model round-trips were needed).
+        gate_metadata["citation_mode"] = ctx.citation_mode
+    if lineage_inferred:
+        gate_metadata["lineage_inferred"] = True
 
     log.record_finding(
         description, confidence, source, linked_call_id, tested_hypothesis_id,

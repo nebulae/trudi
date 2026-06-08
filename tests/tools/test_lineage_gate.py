@@ -43,18 +43,38 @@ def _seed_log_ready_for_confirmed(tmp_path, n_pad_entries=0):
 
 
 class TestLineageGate:
-    def test_refuses_empty_after_genesis(self, tmp_path):
-        """Once the trace has >= 5 entries, a record_finding call with no
-        input_call_ids gets refused with gate=lineage_required."""
+    def test_auto_infers_empty_after_genesis(self, tmp_path):
+        """R4: once past genesis, omitting input_call_ids no longer refuses — it
+        is inferred from the recent tool/reason results and stamped
+        lineage_inferred. record_finding fills it before the gate runs."""
         from tools.misc import record_finding
         # Helper adds 6 entries (dair + tool + 4 reasons) → past genesis grace
         l, tid = _seed_log_ready_for_confirmed(tmp_path)
         assert len(l._entries) >= 6  # past genesis grace
         with patch("core.execution_log.log", l):
             r = record_finding("a finding", "CONFIRMED", "vol.psscan",
-                               linked_call_id=tid)  # NO input_call_ids
-        assert r["success"] is False
-        assert r["gate"] == "lineage_required"
+                               linked_call_id=tid)  # NO input_call_ids → inferred
+        assert r["success"] is True
+        finding = [e for e in l._entries if e["type"] == "finding"][-1]
+        assert finding.get("lineage_inferred") is True
+        assert finding.get("input_call_ids")  # populated from recent results
+
+    def test_gate_still_refuses_empty_directly(self, tmp_path):
+        """The lineage_required gate in isolation still refuses an empty list —
+        R4's inference happens in record_finding *before* the gate, not by
+        loosening the gate itself."""
+        from tools._gates import lineage_required, GateContext
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("LIN", str(tmp_path / "trace.json"))
+        for _ in range(6):
+            l.record_tool_call("vol.x", True, False, 0, 0)
+        ctx = GateContext(
+            description="x", confidence="SUSPECTED", tier="SUSPECTED", source="vol",
+            linked_call_id=0, tested_hypothesis_id="", log=l, idx=l.index(),
+            window=l.last_n_window(30), input_call_ids=[],
+        )
+        assert lineage_required.check(ctx) is not None
 
     def test_allows_empty_in_genesis_window(self, tmp_path):
         """With < 5 entries, empty input_call_ids is OK (bootstrap grace)."""
