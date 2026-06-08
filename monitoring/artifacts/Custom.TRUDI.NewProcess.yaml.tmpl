@@ -1,0 +1,48 @@
+name: Custom.TRUDI.NewProcess
+description: |
+  TRUDI-managed: poll the process list and emit a row for any image path
+  not in the operator-provided baseline.
+
+  This artifact deliberately uses periodic pslist polling rather than
+  auditd-backed ProcessExecutions because the demo container can't
+  attach to the host audit netlink socket reliably (WSL2 kernels in
+  particular). The tradeoff is a poll-interval-wide blind spot for very
+  short-lived processes; for the demo this is fine — Atomic Red Team
+  tests leave their processes around long enough to be observed.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: BaselineImagePaths
+    description: JSON array of image paths considered known-good.
+    default: |
+      ${baseline_image_paths}
+  - name: BaselineProcessNames
+    description: JSON array of process basenames considered known-good.
+    default: |
+      ${baseline_proc_names}
+  - name: PollSeconds
+    description: How often to walk the process list.
+    type: int
+    default: 5
+
+sources:
+  - query: |
+      LET baseline_paths <= parse_json_array(data=BaselineImagePaths)
+      LET baseline_names <= parse_json_array(data=BaselineProcessNames)
+      LET tick = SELECT * FROM clock(period=PollSeconds)
+      SELECT * FROM foreach(row=tick, query={
+        SELECT
+          timestamp(epoch=now()) AS timestamp_utc,
+          Exe AS image_path,
+          Name AS process_name,
+          Pid AS pid,
+          Ppid AS ppid,
+          CommandLine AS commandline,
+          Username AS username,
+          CreatedTime AS started_utc
+        FROM Artifact.Linux.Sys.Pslist()
+        WHERE NOT Exe IN baseline_paths
+          AND NOT Name IN baseline_names
+          AND Exe != ""
+      })

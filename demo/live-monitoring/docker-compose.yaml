@@ -1,0 +1,113 @@
+name: trudi-live-monitoring
+
+# TRUDI live-monitoring demo environment.
+#
+#   velo-server  — Velociraptor server (frontend + GUI + API).
+#                  On first boot, generates server/client/api configs into the
+#                  shared `velo-config` volume. Subsequent boots reuse them.
+#   victim       — Ubuntu host running the Velociraptor client + auditd + sshd
+#                  + Atomic Red Team. Stages on-demand attacks via /attacks/run.
+#
+# Bring-up:
+#   docker compose up -d
+#   # First boot: ~30s for config gen + client enrollment.
+#   docker compose logs -f velo-server   # watch enrollment
+#
+# Talk to it from the SIFT host:
+#   docker compose cp velo-server:/config/api.config.yaml \
+#                     ~/.config/trudi/velociraptor/api.config.yaml
+#   velociraptor --api_config ~/.config/trudi/velociraptor/api.config.yaml \
+#                query "SELECT * FROM clients()"
+#
+# Tear down (and reset state):
+#   docker compose down -v
+
+services:
+  velo-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.velo-server
+    container_name: trudi-velo-server
+    hostname: velo-server
+    networks:
+      - velo-net
+    ports:
+      # 8000: client frontend (clients connect here)
+      # 8001: API (TRUDI talks here via velociraptor --api_config ... query)
+      # 8889: GUI (browse to https://localhost:8889/, ignore TLS warning)
+      - "8000:8000"
+      - "8001:8001"
+      - "8889:8889"
+    volumes:
+      - velo-config:/config
+      - velo-data:/data
+    healthcheck:
+      # Server is "up" once it's listening on the API port.
+      test: ["CMD-SHELL", "nc -z localhost 8001 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  victim:
+    build:
+      context: .
+      dockerfile: Dockerfile.victim
+    container_name: trudi-victim
+    hostname: victim
+    networks:
+      # velo-net: talks to the Velociraptor server.
+      # c2-net:   reaches the fake C2 sink at a non-RFC1918 address so the
+      #           Custom.TRUDI.NewNetwork detector (which excludes RFC1918) fires.
+      - velo-net
+      - c2-net
+    ports:
+      # SSH for live.* tooling. Use port 2222 on the host to avoid clashing
+      # with the SIFT box's own sshd. Register as host="trudi-victim" in
+      # ~/cases/.common/live_hosts.json (see README.md).
+      - "2222:22"
+    volumes:
+      - velo-config:/config:ro
+    depends_on:
+      velo-server:
+        condition: service_healthy
+    # Privileged is heavy but needed for auditd to attach to the audit netlink
+    # socket and for iptables (used by Custom.TRUDI.Respond.BlockEgressToEndpoint).
+    # Acceptable for a self-contained demo container; do not copy this pattern
+    # into production deployments.
+    privileged: true
+    restart: unless-stopped
+
+  c2-sink:
+    # Fake C2 listener. Pinned to a TEST-NET-3 address (RFC 5737 documentation
+    # range, 203.0.113.0/24) so it is unmistakably non-routable/fake AND passes
+    # the Custom.TRUDI.NewNetwork "non-RFC1918" filter. Holds the victim's beacon
+    # connection ESTABLISHED so the 10s NetstatEnriched poll reliably catches it.
+    # No internet egress required — everything stays inside c2-net.
+    image: alpine:3.20
+    container_name: trudi-c2-sink
+    hostname: c2-sink
+    # Persistent listener that HOLDS each accepted connection open: `-lk` keeps
+    # the server alive across connections, and `-e sleep 3600` hands each socket
+    # to a sleep that neither reads-to-EOF nor closes it. This keeps the victim's
+    # beacon ESTABLISHED (not CLOSE-WAIT/FIN-WAIT) across the NewNetwork 10s poll.
+    # (busybox `nc -l` as a passive sink half-closes a quiet socket; -e holds it.)
+    command: ["sh", "-c", "while true; do nc -lk -p 8080 -e sleep 3600; sleep 1; done"]
+    networks:
+      c2-net:
+        ipv4_address: 203.0.113.10
+    restart: unless-stopped
+
+networks:
+  velo-net:
+    driver: bridge
+  c2-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 203.0.113.0/24
+
+volumes:
+  velo-config:
+  velo-data:

@@ -1,0 +1,20 @@
+actions:
+  - action_template: block_egress_to_endpoint
+    artifact: Custom.TRUDI.Respond.BlockEgressToEndpoint
+    description: "iptables REJECT outbound to <remote_ip>:<remote_port>"
+    manual_command: "iptables -I OUTPUT -d <remote_ip> -p tcp --dport <remote_port> -m comment --comment TRUDI_RESPOND -j REJECT"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.UnblockEgress
+    parameters:
+      RemoteIp: evidence.remote_ip
+      RemotePort: evidence.remote_port
+
+  - action_template: kill_owning_pid
+    artifact: Custom.TRUDI.Respond.KillPid
+    description: "Terminate the process owning the new outbound connection"
+    manual_command: "kill -9 <pid>"
+    risk: medium
+    reversible: false
+    parameters:
+      Pid: evidence.pid

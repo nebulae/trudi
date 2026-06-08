@@ -1,0 +1,29 @@
+name: Custom.TRUDI.Respond.QuarantineImage
+description: |
+  TRUDI remediation: move the named executable to /var/quarantine/<sha256>
+  and revoke its execute bit. Records the original path so
+  RestoreFromQuarantine can put it back.
+
+type: CLIENT
+
+parameters:
+  - name: Path
+    description: Absolute path of the binary to quarantine.
+    type: string
+
+sources:
+  - query: |
+      LET h <= hash(path=Path).SHA256
+      LET safe <= Path =~ "^(/tmp/|/var/tmp/|/home/|/opt/|/srv/|/usr/local/)"
+      LET dest <= format(format="/var/quarantine/%s", args=[h])
+      SELECT
+        Path AS original_path,
+        h AS sha256,
+        dest AS quarantine_path,
+        if(condition=safe,
+           then=execve(argv=["/bin/sh", "-c",
+             format(format="mkdir -p /var/quarantine && chmod 000 %s && mv %s %s && echo %s > /var/quarantine/%s.origin",
+                    args=[Path, Path, dest, Path, h])]),
+           else=dict(stdout="", stderr="path outside quarantineable prefixes", return_code=2)
+        ) AS execution
+      FROM scope()

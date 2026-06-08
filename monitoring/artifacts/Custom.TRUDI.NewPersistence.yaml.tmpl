@@ -1,0 +1,43 @@
+name: Custom.TRUDI.NewPersistence
+description: |
+  TRUDI-managed: watch the cron and systemd persistence surface for new
+  files. Emits a row whenever a file appears in a watched dir that is
+  not in the baseline allowlist.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: BaselinePersistencePaths
+    description: JSON array of file paths considered known-good.
+    default: |
+      ${baseline_persistence_paths}
+  - name: WatchDirs
+    description: |
+      JSON array of glob patterns to walk every poll cycle. Each entry must
+      end in `/*` (or `/**` for recursion) to enumerate files inside the
+      directory — a bare `/etc/cron.d` would only match the dir itself.
+    default: |
+      ["/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*", "/etc/cron.weekly/*", "/etc/cron.monthly/*", "/etc/systemd/system/*", "/var/spool/cron/crontabs/*"]
+  - name: PollSeconds
+    description: How often to re-walk the watched dirs.
+    type: int
+    default: 15
+
+sources:
+  - query: |
+      LET baseline <= parse_json_array(data=BaselinePersistencePaths)
+      LET watch <= parse_json_array(data=WatchDirs)
+      LET tick = SELECT * FROM clock(period=PollSeconds)
+      SELECT
+        timestamp(epoch=now()) AS timestamp_utc,
+        FullPath AS path,
+        Size,
+        Mtime AS mtime_utc
+      FROM foreach(
+        row=tick,
+        query={
+          SELECT FullPath, Size, Mtime
+          FROM glob(globs=watch, accessor="auto")
+          WHERE Mode.IsDir = FALSE
+            AND NOT FullPath IN baseline
+        })

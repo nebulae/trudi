@@ -1,0 +1,21 @@
+name: Custom.TRUDI.Respond.DisableSystemdUnit
+description: |
+  TRUDI remediation: systemctl disable --now <unit>. Refuses unit names
+  that don't look like systemd units.
+
+type: CLIENT
+
+parameters:
+  - name: Unit
+    type: string
+
+sources:
+  - query: |
+      LET valid <= Unit =~ "^[A-Za-z0-9_@:.\\-]+\\.(service|timer|socket)$"
+      SELECT
+        Unit AS unit,
+        if(condition=valid,
+           then=execve(argv=["/bin/systemctl", "disable", "--now", Unit]),
+           else=dict(stdout="", stderr="invalid systemd unit name", return_code=2)
+        ) AS execution
+      FROM scope()

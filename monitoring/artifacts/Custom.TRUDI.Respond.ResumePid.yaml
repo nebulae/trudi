@@ -1,0 +1,20 @@
+name: Custom.TRUDI.Respond.ResumePid
+description: |
+  TRUDI remediation revert: send SIGCONT to undo a prior SIGSTOP.
+
+type: CLIENT
+
+parameters:
+  - name: Pid
+    type: int
+
+sources:
+  - query: |
+      LET valid <= Pid > 1 AND Pid < 4194304
+      SELECT
+        Pid AS pid,
+        if(condition=valid,
+           then=execve(argv=["/bin/kill", "-CONT", format(format="%d", args=[Pid])]),
+           else=dict(stdout="", stderr="invalid PID", return_code=2)
+        ) AS execution
+      FROM scope()

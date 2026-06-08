@@ -1,0 +1,137 @@
+#!/bin/bash
+# /attacks/run — TRUDI demo attack dispatcher.
+#
+# Wraps the Atomic Red Team YAML catalog under /opt/atomic-red-team/atomics/.
+# Usage:
+#   /attacks/run <T-number-or-alias> [--cleanup]
+#   /attacks/run --list
+#
+# Examples:
+#   /attacks/run T1059.004         # bash one-liner from /tmp/ → NewProcess
+#   /attacks/run persistence       # alias for T1053.003 (cron) → NewPersistence
+#   /attacks/run T1071.001 --cleanup
+#   /attacks/run all               # fire each detector with 5s spacing
+#
+# The dispatcher reads the atomic's YAML, picks the requested test number
+# (default 1), substitutes input_arguments with their defaults, and exec's
+# the test's bash/sh command block. --cleanup runs the cleanup_command.
+#
+# We intentionally do NOT use Invoke-AtomicTest (PowerShell) — keeping the
+# victim image lean and the dispatch logic transparent.
+
+set -euo pipefail
+
+ATOMICS_ROOT="${ATOMICS_ROOT:-/opt/atomic-red-team/atomics}"
+ALIASES="$(dirname "$0")/aliases.sh"
+
+# shellcheck source=victim/attacks/aliases.sh
+[[ -f "${ALIASES}" ]] && source "${ALIASES}"
+
+usage() {
+    cat <<EOF
+usage: $0 <technique-id-or-alias> [--cleanup]
+       $0 --list
+
+aliases:
+EOF
+    if declare -f list_aliases >/dev/null 2>&1; then
+        list_aliases
+    fi
+}
+
+resolve_alias() {
+    local input="$1"
+    local mapped
+    # alias_map is associative; sourced from aliases.sh.
+    if declare -p alias_map >/dev/null 2>&1; then
+        mapped="${alias_map[$input]:-}"
+        if [[ -n "${mapped}" ]]; then
+            echo "${mapped}"
+            return
+        fi
+    fi
+    # Already a T-number (T1234 or T1234.005), optionally with #N suffix.
+    if [[ "${input}" =~ ^T[0-9]{4}(\.[0-9]{3})?(#[0-9]+)?$ ]]; then
+        echo "${input}"
+        return
+    fi
+    echo "" # unresolved
+}
+
+run_one() {
+    local raw="$1"
+    local cleanup="$2"
+    local resolved tnum testno yaml
+
+    # `network`/`beacon` are served by a bespoke long-lived beacon, not an
+    # Atomic test: the shipped T1071.001#3 curl is too short-lived to be caught
+    # in ESTABLISHED state by the Custom.TRUDI.NewNetwork 10s poll. See beacon.sh.
+    if [[ "${raw}" == "network" || "${raw}" == "beacon" ]]; then
+        if [[ "${cleanup}" == "1" ]]; then
+            bash "$(dirname "$0")/beacon.sh" --cleanup
+        else
+            bash "$(dirname "$0")/beacon.sh"
+        fi
+        return $?
+    fi
+
+    resolved="$(resolve_alias "${raw}")"
+    if [[ -z "${resolved}" ]]; then
+        echo "[run] '${raw}' is not a known alias or T-number" >&2
+        return 2
+    fi
+
+    tnum="${resolved%%#*}"
+    if [[ "${resolved}" == *#* ]]; then
+        testno="${resolved##*#}"
+    else
+        testno="1"
+    fi
+    yaml="${ATOMICS_ROOT}/${tnum}/${tnum}.yaml"
+
+    if [[ ! -f "${yaml}" ]]; then
+        echo "[run] Atomic YAML not found: ${yaml}" >&2
+        echo "[run] (Is /opt/atomic-red-team mounted and populated?)" >&2
+        return 3
+    fi
+
+    if [[ "${cleanup}" == "1" ]]; then
+        echo "[run] ${tnum} test #${testno} — cleanup"
+    else
+        echo "[run] ${tnum} test #${testno} — execute"
+    fi
+
+    # Delegate the YAML walk to Python — bash + grep is too brittle for
+    # multi-line input_arguments + executor blocks.
+    ATOMIC_TEST_YAML="${yaml}" \
+    ATOMIC_TEST_NUMBER="${testno}" \
+    ATOMIC_CLEANUP="${cleanup}" \
+        python3 "$(dirname "$0")/_runner.py"
+}
+
+case "${1:-}" in
+    ""|-h|--help)
+        usage
+        exit 0
+        ;;
+    --list)
+        usage
+        exit 0
+        ;;
+    all)
+        shift
+        cleanup_flag=0
+        [[ "${1:-}" == "--cleanup" ]] && cleanup_flag=1
+        for a in new-process persistence network yara; do
+            run_one "${a}" "${cleanup_flag}" || echo "[run] ${a} returned non-zero (continuing)"
+            sleep 5
+        done
+        exit 0
+        ;;
+    *)
+        target="$1"; shift
+        cleanup_flag=0
+        [[ "${1:-}" == "--cleanup" ]] && cleanup_flag=1
+        run_one "${target}" "${cleanup_flag}"
+        ;;
+esac

@@ -1,0 +1,44 @@
+# Recipe: containment actions for Custom.TRUDI.NewProcess alerts.
+#
+# Each action describes what `respond.suggest_containment` should offer
+# the operator when this detector fires. Fields:
+#
+#   action_template      stable identifier used in the rendered action's name
+#   artifact             Velociraptor remediation artifact to invoke
+#   description          one-line summary the operator sees
+#   risk                 low / medium / high
+#   reversible           whether revert_action can undo it
+#   revert_artifact      (if reversible) the artifact for revert_action
+#   parameters           map of remediation-artifact params → finding-evidence
+#                        field paths. The respond tool will substitute these
+#                        from the alert/finding evidence at suggestion time.
+
+actions:
+  - action_template: pause_pid
+    artifact: Custom.TRUDI.Respond.PausePid
+    description: "Send SIGSTOP to the new process (forensic capture before kill)"
+    manual_command: "kill -STOP <pid>"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.ResumePid
+    parameters:
+      Pid: evidence.pid
+
+  - action_template: kill_pid
+    artifact: Custom.TRUDI.Respond.KillPid
+    description: "Terminate the new process (SIGKILL)"
+    manual_command: "kill -9 <pid>"
+    risk: medium
+    reversible: false
+    parameters:
+      Pid: evidence.pid
+
+  - action_template: quarantine_image
+    artifact: Custom.TRUDI.Respond.QuarantineImage
+    description: "Move the new process's image to /var/quarantine/<sha256>"
+    manual_command: "mkdir -p /var/quarantine && chmod 000 <image_path> && mv <image_path> /var/quarantine/"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.RestoreFromQuarantine
+    parameters:
+      Path: evidence.image_path

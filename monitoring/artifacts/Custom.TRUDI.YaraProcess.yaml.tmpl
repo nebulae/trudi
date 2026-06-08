@@ -1,0 +1,33 @@
+name: Custom.TRUDI.YaraProcess
+description: |
+  TRUDI-managed: periodic YARA scan over running process memory. Any hit
+  produces an alert — no baseline allowlist (false positives are tuned
+  in the rules file, not the artifact).
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: YaraRulesPath
+    description: Path on the client to a YARA ruleset (single file or compiled).
+    default: ${yara_rules_path}
+  - name: PollSeconds
+    description: How often to re-scan running processes.
+    type: int
+    default: 60
+
+sources:
+  - query: |
+      LET tick = SELECT * FROM clock(period=PollSeconds)
+      SELECT
+        timestamp(epoch=now()) AS timestamp_utc,
+        Pid AS pid,
+        Name AS process_name,
+        Exe AS image_path,
+        Rule AS rule,
+        Tags AS tags,
+        String.Name AS string_name,
+        String.Offset AS string_offset
+      FROM foreach(row=tick, query={
+        SELECT * FROM Artifact.Linux.Detection.Yara.Process(
+          YaraRule=read_file(filename=YaraRulesPath))
+      })

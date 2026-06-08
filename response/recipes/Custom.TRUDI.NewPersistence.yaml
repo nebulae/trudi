@@ -1,0 +1,20 @@
+actions:
+  - action_template: remove_cron_entry
+    artifact: Custom.TRUDI.Respond.RemoveCronEntry
+    description: "Delete the new cron entry"
+    manual_command: "mkdir -p /var/quarantine && cp <path> /var/quarantine/cron_backup_$(basename <path>) && rm -f <path>"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.RestoreFromQuarantine
+    parameters:
+      Path: evidence.path
+
+  - action_template: disable_systemd_unit
+    artifact: Custom.TRUDI.Respond.DisableSystemdUnit
+    description: "Disable + stop the new systemd unit"
+    manual_command: "systemctl disable --now <path>"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.EnableSystemdUnit
+    parameters:
+      Unit: evidence.path

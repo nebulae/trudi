@@ -271,6 +271,30 @@ PYEOF
 
 ok "Claude Code hooks configured"
 
+# ── 6b. Claude Code slash commands ────────────────────────────────────────────
+
+step "Installing Claude Code slash commands"
+
+COMMANDS_SRC="$TRUDI_DIR/claude/commands"
+COMMANDS_DEST="$CLAUDE_DIR/commands"
+
+if [ -d "$COMMANDS_SRC" ] && compgen -G "$COMMANDS_SRC/*.md" > /dev/null; then
+    mkdir -p "$COMMANDS_DEST"
+    for cmd in "$COMMANDS_SRC"/*.md; do
+        name="$(basename "$cmd")"
+        dest="$COMMANDS_DEST/$name"
+        # Back up a pre-existing command of the same name before overwriting,
+        # so a user's own customisations aren't silently clobbered.
+        if [ -f "$dest" ] && ! cmp -s "$cmd" "$dest"; then
+            cp "$dest" "$dest.$(date -u +%Y%m%dT%H%M%S).bak"
+        fi
+        cp "$cmd" "$dest"
+    done
+    ok "Installed $(ls "$COMMANDS_SRC"/*.md | wc -l) slash commands to $COMMANDS_DEST/ (/trudi-*)"
+else
+    warn "No commands at $COMMANDS_SRC — skipping slash command install"
+fi
+
 # ── 7. MCP server registration ────────────────────────────────────────────────
 
 step "Registering TRUDI MCP server"

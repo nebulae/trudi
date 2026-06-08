@@ -1,0 +1,23 @@
+name: Custom.TRUDI.Respond.RestoreFromQuarantine
+description: |
+  TRUDI remediation revert: read /var/quarantine/<sha256>.origin to
+  recover the original path and move the file back.
+
+type: CLIENT
+
+parameters:
+  - name: Sha256
+    type: string
+
+sources:
+  - query: |
+      LET dest <= format(format="/var/quarantine/%s", args=[Sha256])
+      LET origin_file <= format(format="/var/quarantine/%s.origin", args=[Sha256])
+      LET origin <= read_file(filename=origin_file)
+      SELECT
+        Sha256 AS sha256,
+        origin AS restored_to,
+        execve(argv=["/bin/sh", "-c",
+          format(format="mv %s %s && chmod 755 %s && rm -f %s",
+                 args=[dest, origin, origin, origin_file])]) AS execution
+      FROM scope()

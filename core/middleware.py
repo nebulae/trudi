@@ -23,8 +23,26 @@ DAIR_GATE_ALLOWLIST = frozenset({
     # Phase director itself
     "dair_assess",
     "dair_dair_assess",
+    # Adversarial-review + scoring tools. These are META operations (they
+    # reason ABOUT findings, they don't execute forensics on evidence), so
+    # they must not independently require a fresh dair_assess in the window.
+    # record_finding still carries the dair_required gate, so the investigation
+    # as a whole stays DAIR-directed — but the per-finding review chain
+    # (evaluate -> confidence -> cite) no longer ages the dair_call out of the
+    # 20-entry window and forces a no-op re-engagement. Both the bare and
+    # namespace-doubled registration forms are listed (cf. dair_assess above).
+    "reason_plan", "reason_reason_plan",
+    "reason_hypothesize", "reason_reason_hypothesize",
+    "reason_evaluate_finding", "reason_reason_evaluate_finding",
+    "reason_confidence_score", "reason_reason_confidence_score",
+    "reason_cite_check", "reason_reason_cite_check",
+    "reason_audit_findings", "reason_reason_audit_findings",
+    "reason_synthesize", "reason_reason_synthesize",
+    "reason_pre_report_check", "reason_reason_pre_report_check",
+    "accuracy_compare", "accuracy_accuracy_compare",
+    "accuracy_export_report", "accuracy_accuracy_export_report",
+    "correlate_mitre_validate", "correlate_correlate_mitre_validate",
     # Pre-flight reads that run before the first dair_assess
-    "reason_plan",
     "hash_verify_evidence_hash",
     "vol_symbol_check",
     "vol_vol_symbol_check",

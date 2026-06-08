@@ -279,7 +279,16 @@ def main() -> None:
     except (OSError, json.JSONDecodeError):
         return
     trace_path = session.get("path")
-    if not trace_path or not Path(trace_path).exists():
+    if not trace_path:
+        return
+    # Older session beacons stored a relative path; resolve against the
+    # case dir so the hook works regardless of harness CWD.
+    if not Path(trace_path).is_absolute():
+        case_id = session.get("case_id") or ""
+        candidate = Path.home() / "cases" / case_id / trace_path.lstrip("./")
+        if candidate.exists():
+            trace_path = str(candidate.resolve())
+    if not Path(trace_path).exists():
         return
 
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)

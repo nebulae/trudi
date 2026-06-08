@@ -1,0 +1,70 @@
+# Ubuntu victim host for the TRUDI live-monitoring demo.
+# Runs the Velociraptor client, auditd (for ProcessExecutions events),
+# OpenSSH (for live.* SSH-based investigation), and the Atomic Red Team
+# library for staged attacks.
+
+FROM ubuntu:22.04
+
+ARG VELOCIRAPTOR_URL=https://github.com/Velocidex/velociraptor/releases/download/v0.76/velociraptor-v0.76.1-linux-amd64-musl
+# Pin Atomic Red Team to a known-good commit. Update by hand when you want
+# to refresh the atomic library; the README records the current pin.
+ARG ATOMIC_RED_TEAM_REF=master
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        auditd audispd-plugins \
+        openssh-server \
+        iptables iproute2 net-tools procps \
+        cron \
+        python3 python3-yaml \
+        yara \
+        gdb \
+        jq \
+ && rm -rf /var/lib/apt/lists/*
+
+# Velociraptor client (same binary as the server — -musl static build).
+RUN curl -fsSL -o /usr/local/bin/velociraptor "${VELOCIRAPTOR_URL}" \
+ && chmod +x /usr/local/bin/velociraptor
+
+# Atomic Red Team — shallow clone, no .git, into /opt.
+RUN git clone --depth=1 --branch "${ATOMIC_RED_TEAM_REF}" \
+        https://github.com/redcanaryco/atomic-red-team /opt/atomic-red-team \
+ && rm -rf /opt/atomic-red-team/.git \
+ && echo "ART pinned to ${ATOMIC_RED_TEAM_REF} on $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > /opt/atomic-red-team/PINNED.txt
+
+# Attack dispatcher + alias map. Mounted at /attacks for the operator.
+COPY victim/attacks /attacks
+RUN chmod +x /attacks/run /attacks/beacon.sh
+
+# Demo user the attacks run as. UID 1000 = baseline-friendly.
+RUN useradd -m -u 1000 -s /bin/bash victim \
+ && echo "victim:victim" | chpasswd \
+ && mkdir -p /home/victim/.ssh \
+ && chown -R victim:victim /home/victim
+
+# SSH host keys + a key pair that TRUDI's live.* will use.
+# The private key lands under /shared and the SIFT host mounts a copy into
+# ~/.ssh/. (We could ship the keypair pre-generated but generating on first
+# boot avoids "everyone uses the same key" — even for a demo).
+RUN ssh-keygen -A \
+ && mkdir -p /run/sshd /shared \
+ && echo "PermitRootLogin no" >> /etc/ssh/sshd_config \
+ && echo "PasswordAuthentication no" >> /etc/ssh/sshd_config \
+ && echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
+
+# Default YARA rules for Custom.TRUDI.YaraProcess. Real rules can be added
+# by mounting over /rules/. Demo rule fires on a known token used in the
+# T1055.001 atomic.
+RUN mkdir -p /rules
+COPY victim/rules /rules
+
+COPY scripts/victim-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -420,6 +420,36 @@ class TestRecordFindingEvaluateVerdictGate:
         sc = [e for e in l._entries if e["type"] == "self_correction"]
         assert sc
 
+    def test_evaluate_matched_by_description_not_cross_contaminated(self, tmp_path):
+        # Bug A regression: with two findings reviewed in one batch, a DIFFERENT
+        # finding's CHALLENGED verdict (more recent) must NOT block this finding
+        # whose own evaluate_finding was SUPPORTED. The gate matches the
+        # evaluate by description, not by 'most recent'.
+        from tools.misc import record_finding
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST", str(tmp_path / "trace.json"))
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        tid = l.record_tool_call("vol.psscan", True, False, 0, 0)
+        a_ins = {"user_message": "cron persistence root crontab evil.sh"}
+        l.record_reason_call("reason_confidence_score", True,
+                             'CONFIDENCE_SCORE:\n{"tier": "CONFIRMED"}', {}, inputs=a_ins)
+        l.record_reason_call("reason_cite_check", True,
+                             'CITE_CHECK:\n{"verdict": "ALL_CITED"}', {}, inputs=a_ins)
+        # A's evaluate (SUPPORTED, echoes A's description)
+        l.record_reason_call("reason_evaluate_finding", True,
+                             "FINDING: cron persistence root crontab evil.sh\nVERDICT: SUPPORTED",
+                             {}, inputs=a_ins)
+        # B's evaluate (CHALLENGED, more recent, a DIFFERENT finding)
+        l.record_reason_call("reason_evaluate_finding", True,
+                             "FINDING: injection marker pid 488\nVERDICT: CHALLENGED",
+                             {}, inputs={"user_message": "injection marker pid 488"})
+        with patch("core.execution_log.log", l):
+            r = record_finding("Cron persistence root crontab evil.sh", "CONFIRMED",
+                               "ez.mftecmd", linked_call_id=tid,
+                               tested_hypothesis_id="H0001", input_call_ids=[tid])
+        assert r["success"] is True
+
     def test_challenged_refusal_auto_emits_self_correction(self, tmp_path):
         # Self-correction auto-emit: when CONFIRMED is refused due to CHALLENGED verdict,
         # a self_correction entry should be appended automatically.
@@ -1039,6 +1069,70 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
         assert r1["success"] is True
         assert r2["success"] is False
         assert r2.get("gate") == "confidence_and_citation"
+
+
+class TestRecordFindingInlineSupportingEvidence:
+    """R1 fast path: passing supporting_evidence inline runs a DETERMINISTIC
+    citation check and skips the reason.confidence_score + reason.cite_check
+    model round-trips entirely."""
+
+    def _base(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("INLINE", str(tmp_path / "trace.json"))
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        tid = l.record_tool_call("vol.netscan", True, False, 0, 0)
+        l.record_reason_call("reason_hypothesize", True, "OK", {})
+        l.record_reason_call("reason_evaluate_finding", True, "VERDICT: SUPPORTED", {})
+        return l, tid
+
+    def test_inline_evidence_satisfies_gate_without_reason_calls(self, tmp_path):
+        from tools.misc import record_finding
+        l, tid = self._base(tmp_path)
+        # NO confidence_score / cite_check seeded — the inline path replaces them.
+        with patch("core.execution_log.log", l):
+            r = record_finding(
+                "C2 beacon to 203.0.113.10:8080 (T1071.001)", "CONFIRMED",
+                "velo.netstat", linked_call_id=tid, tested_hypothesis_id="H1",
+                input_call_ids=[tid],
+                supporting_evidence="NetstatEnriched: 203.0.113.10:8080 ESTABLISHED. "
+                                    "Technique T1071.001 web protocols.")
+        assert r["success"] is True
+        # provenance recorded
+        finding = [e for e in l._entries if e["type"] == "finding"][-1]
+        assert finding.get("citation_mode") == "deterministic"
+
+    def test_inline_uncited_claim_refused(self, tmp_path):
+        from tools.misc import record_finding
+        l, tid = self._base(tmp_path)
+        with patch("core.execution_log.log", l):
+            r = record_finding(
+                "Beacon to 8.8.8.8 with hash deadbeefdeadbeefdeadbeefdeadbeef",
+                "CONFIRMED", "velo.netstat", linked_call_id=tid,
+                tested_hypothesis_id="H1", input_call_ids=[tid],
+                supporting_evidence="NetstatEnriched: 203.0.113.10:8080 ESTABLISHED.")
+        assert r["success"] is False
+        assert r.get("gate") == "confidence_and_citation"
+        # both the uncited IP and hash are surfaced
+        uncited = " ".join(r.get("uncited_claims", []))
+        assert "8.8.8.8" in uncited
+        assert "deadbeef" in uncited.lower()
+
+    def test_likely_inline_evidence_no_eval_or_reason_calls(self, tmp_path):
+        # LIKELY needs neither evaluate nor confidence/cite when evidence is inline.
+        from tools.misc import record_finding
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("INLINE", str(tmp_path / "trace.json"))
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        tid = l.record_tool_call("vol.netscan", True, False, 0, 0)
+        with patch("core.execution_log.log", l):
+            r = record_finding(
+                "Masquerade /tmp/.kworkerd is a copy of /bin/sleep", "LIKELY",
+                "sha256sum", linked_call_id=tid, tested_hypothesis_id="H1",
+                input_call_ids=[tid],
+                supporting_evidence="paths /tmp/.kworkerd and /bin/sleep hash-match.")
+        assert r["success"] is True
 
 
 # ── hypothesize trigger ──────────────────────────────────────────────────────

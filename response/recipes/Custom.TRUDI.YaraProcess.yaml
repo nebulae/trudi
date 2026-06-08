@@ -1,0 +1,29 @@
+actions:
+  - action_template: dump_process_memory
+    artifact: Custom.TRUDI.Respond.DumpProcessMemory
+    description: "gcore the process and upload to Velociraptor (forensic capture)"
+    manual_command: "gcore -o /var/quarantine/trudi-dump-<pid> <pid>"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.UnblockEgress  # no-op; reversible=true semantics
+    parameters:
+      Pid: evidence.pid
+
+  - action_template: pause_pid
+    artifact: Custom.TRUDI.Respond.PausePid
+    description: "Send SIGSTOP to the flagged process"
+    manual_command: "kill -STOP <pid>"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.ResumePid
+    parameters:
+      Pid: evidence.pid
+
+  - action_template: kill_pid
+    artifact: Custom.TRUDI.Respond.KillPid
+    description: "Terminate the flagged process (SIGKILL)"
+    manual_command: "kill -9 <pid>"
+    risk: medium
+    reversible: false
+    parameters:
+      Pid: evidence.pid

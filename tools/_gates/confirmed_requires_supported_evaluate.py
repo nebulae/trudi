@@ -1,24 +1,30 @@
-"""Gate: CONFIRMED tier requires a recent reason.evaluate_finding with SUPPORTED verdict.
+"""Gate: CONFIRMED tier requires a reason.evaluate_finding with SUPPORTED verdict
+for THIS finding.
 
-If the most recent evaluate_finding within the look-back window returned
-CHALLENGED, refuse and emit a self_correction trace entry — this surfaces
-the adversarial-review moment in the dashboard.
+Matches the evaluate_finding whose user_message echoes this finding's
+description (so a *different* finding's CHALLENGED verdict reviewed in the same
+batch cannot block this one — the cross-contamination bug). Only when no
+description-matched evaluate exists does it fall back to the most-recent
+evaluate_finding (legacy behaviour, and what older traces that did not echo the
+description rely on). A CHALLENGED/UNCERTAIN verdict refuses and emits a
+self_correction trace entry so the adversarial-review moment is auditable.
 """
 import re
 from typing import Optional
+
+from ._match import normalize_desc, find_reason_call, most_recent_reason_call
 
 
 def check(ctx) -> Optional[dict]:
     if ctx.tier != "CONFIRMED":
         return None
 
-    most_recent_eval = None
-    for e in reversed(ctx.window):
-        if e.get("type") == "reason_call" and e.get("tool") == "reason_evaluate_finding":
-            most_recent_eval = e
-            break
+    norm = normalize_desc(ctx.description)
+    # Prefer the evaluate_finding that actually reviewed THIS finding.
+    matched = find_reason_call(ctx.window, "reason_evaluate_finding", norm)
+    eval_entry = matched or most_recent_reason_call(ctx.window, "reason_evaluate_finding")
 
-    if most_recent_eval is None:
+    if eval_entry is None:
         return {
             "success": False,
             "error": (
@@ -32,7 +38,7 @@ def check(ctx) -> Optional[dict]:
             "gate": "confirmed_requires_supported_evaluate",
         }
 
-    conclusion = most_recent_eval.get("conclusion", "") or ""
+    conclusion = eval_entry.get("conclusion", "") or ""
     verdict_match = re.search(
         r"VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)",
         conclusion,
@@ -43,14 +49,13 @@ def check(ctx) -> Optional[dict]:
     if verdict == "SUPPORTED":
         # Explicit SUPPORTED verdict — gate passes. Stamp the matched eval
         # call_id so record_finding carries it as an explicit foreign key.
-        ctx.gated_by_evaluate_call_id = int(most_recent_eval.get("call_id") or 0)
+        ctx.gated_by_evaluate_call_id = int(eval_entry.get("call_id") or 0)
         return None
 
     # CHALLENGED or UNCERTAIN both block CONFIRMED. CLAUDE.md requires
     # an explicit SUPPORTED verdict; UNCERTAIN is insufficient — it means
     # the reviewer could not confirm the claim, which is not the same as
-    # supporting it. Previously the gate only blocked CHALLENGED, allowing
-    # UNCERTAIN through.
+    # supporting it.
     trigger = "evaluate_challenged_gate_refused"
     if verdict == "UNCERTAIN":
         trigger = "evaluate_uncertain_gate_refused"
@@ -62,14 +67,14 @@ def check(ctx) -> Optional[dict]:
             f"Refused — evaluate_finding returned VERDICT: {verdict or 'unparseable'}. "
             f"Awaiting re-evaluation with stronger evidence or tier downgrade."
         ),
-        evidence=(most_recent_eval.get("conclusion", "") or "")[:300],
-        linked_call_id=most_recent_eval.get("call_id", 0),
+        evidence=(eval_entry.get("conclusion", "") or "")[:300],
+        linked_call_id=eval_entry.get("call_id", 0),
     )
     return {
         "success": False,
         "error": (
-            f"CONFIRMED tier refused: most recent reason.evaluate_finding "
-            f"returned VERDICT: {verdict or 'UNPARSEABLE'} — an explicit "
+            f"CONFIRMED tier refused: the reason.evaluate_finding for this "
+            f"finding returned VERDICT: {verdict or 'UNPARSEABLE'} — an explicit "
             f"SUPPORTED verdict is required. Re-evaluate with stronger "
             f"evidence or downgrade this finding to SUSPECTED/LIKELY."
         ),
