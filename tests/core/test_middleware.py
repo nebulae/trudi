@@ -182,7 +182,7 @@ class TestForensicBinaryPatterns:
 
     def test_identify_forensic_binary_returns_none_for_safe_cmd(self):
         from core.middleware import _identify_forensic_binary
-        assert _identify_forensic_binary("ls /cases/srl-2018-demo/analysis") is None
+        assert _identify_forensic_binary("ls /cases/example-case/analysis") is None
         assert _identify_forensic_binary("jq '.entries[0]' trace.json") is None
 
     def test_identify_forensic_binary_word_boundary(self):

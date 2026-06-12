@@ -17,6 +17,7 @@ DAIR_GATE_ALLOWLIST = frozenset({
     # Trace lifecycle
     "misc_start_execution_log",
     "misc_export_execution_log",
+    "misc_write_final_report",
     "misc_record_agent_message",
     "misc_record_self_correction",
     "misc_serve_dashboard",

@@ -41,3 +41,9 @@
 ## Scope
 
 <Describe what you're trying to determine — compromise, timeline, attacker activity, etc.>
+
+---
+
+## Investigation discipline (inherited)
+
+The global contract in `~/.claude/CLAUDE.md` governs every case. In particular, observe the **Distinct-Principal & Competing-Hypothesis Discipline**, **Authentication-Session Inventory before attribution**, **Per-Principal / Recipient-Correspondent Exhaustion**, and **Exfil-Channel Enumeration & Ranking** rules — a new account/identity is a separate principal whose controller must be established before its actions are attributed, and an exfil channel claim needs a transfer artifact, not tool/folder presence. These are backed by the broad `attribution` and `transfer` record_finding gates; DAIR may surface host/account leads as `candidate_pivots`, but those candidates are advisory and do not automatically change phases.

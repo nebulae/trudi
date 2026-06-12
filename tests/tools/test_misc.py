@@ -414,7 +414,8 @@ class TestRecordFindingEvaluateVerdictGate:
             r = record_finding("attacker tool", "CONFIRMED", "ez.mftecmd",
                                linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r["gate"] == "confirmed_requires_supported_evaluate"
+        assert r["gate"] == "evidence_strength"
+        assert r["detail_gate"] == "confirmed_requires_supported_evaluate"
         assert "UNCERTAIN" in r["evaluate_verdict"]
         # Auto-emits self_correction just like CHALLENGED
         sc = [e for e in l._entries if e["type"] == "self_correction"]
@@ -706,7 +707,7 @@ class TestRecordAgentMessageWithFindings:
         l.configure("RAM-001", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
         tid = l.record_tool_call("vol.netscan", True, False, 0, 0,
-                                  stdout_excerpt="PID 7092 -> 172.16.4.10:8080")
+                                  stdout_excerpt="PID 7092 -> 192.0.2.10:8080")
         l.record_reason_call("reason_hypothesize", True, "hypothesis OK", {})
         # Pack every description into the user_message so a single seeded call
         # satisfies every distinct finding's substring match.
@@ -893,7 +894,7 @@ class TestRecordFindingMcpRoutingGate:
         l.configure("MCP-ROUTE", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
         # Bash command that doesn't run a forensic binary — should not trip mcp_routing.
-        cid = self._append_bash_tool_call(l, "ls /cases/srl-2018-demo/analysis")
+        cid = self._append_bash_tool_call(l, "ls /cases/example-case/analysis")
         l.record_reason_call("reason_hypothesize", True, "OK", {})
         _ins = {"user_message": "harmless ls"}
         l.record_reason_call("reason_confidence_score", True,
@@ -930,7 +931,8 @@ class TestRecordFindingMitreValidateGate:
             r = record_finding("Process beacon T9999.999", "CONFIRMED",
                                "vol.netscan", linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "mitre_technique_validation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "mitre_technique_validation"
         assert "T9999.999" in r.get("unknown_technique_ids", [])
 
     def test_known_tid_passes_and_records_validation(self, tmp_path):
@@ -993,7 +995,8 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
             r = record_finding("My finding text", "CONFIRMED", "vol.psscan",
                                linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "confidence_and_citation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "confidence_and_citation"
         assert r.get("missing_check") == "reason_confidence_score"
 
     def test_confirmed_without_cite_check_refused(self, tmp_path):
@@ -1006,7 +1009,8 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
             r = record_finding("My finding text", "CONFIRMED", "vol.psscan",
                                linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "confidence_and_citation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "confidence_and_citation"
         assert r.get("missing_check") == "reason_cite_check"
 
     def test_cite_check_with_uncited_claims_refused(self, tmp_path):
@@ -1022,7 +1026,8 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
             r = record_finding("My finding text", "CONFIRMED", "vol.psscan",
                                linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "confidence_and_citation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "confidence_and_citation"
         assert "UNCITED_CLAIMS_PRESENT" in r["error"]
 
     def test_confidence_score_lower_tier_refused(self, tmp_path):
@@ -1038,7 +1043,8 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
             r = record_finding("My finding text", "CONFIRMED", "vol.psscan",
                                linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "confidence_and_citation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "confidence_and_citation"
         assert r.get("confidence_score_tier") == "SUSPECTED"
 
     def test_likely_tier_also_requires_g16(self, tmp_path):
@@ -1049,7 +1055,8 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
             r = record_finding("My finding text", "LIKELY", "vol.psscan",
                                linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "confidence_and_citation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "confidence_and_citation"
 
     def test_g16_anti_reuse_blocks_second_finding_with_same_description(self, tmp_path):
         # A single confidence_score+cite_check pair can satisfy ONE finding.
@@ -1068,7 +1075,8 @@ class TestRecordFindingConfidenceScoreCiteCheckGate:
                                 linked_call_id=tid, input_call_ids=[tid])
         assert r1["success"] is True
         assert r2["success"] is False
-        assert r2.get("gate") == "confidence_and_citation"
+        assert r2.get("gate") == "evidence_strength"
+        assert r2.get("detail_gate") == "confidence_and_citation"
 
 
 class TestRecordFindingInlineSupportingEvidence:
@@ -1112,7 +1120,8 @@ class TestRecordFindingInlineSupportingEvidence:
                 tested_hypothesis_id="H1", input_call_ids=[tid],
                 supporting_evidence="NetstatEnriched: 203.0.113.10:8080 ESTABLISHED.")
         assert r["success"] is False
-        assert r.get("gate") == "confidence_and_citation"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "confidence_and_citation"
         # both the uncited IP and hash are surfaced
         uncited = " ".join(r.get("uncited_claims", []))
         assert "8.8.8.8" in uncited
@@ -1163,7 +1172,8 @@ class TestRecordFindingHypothesizeGate:
         with patch("core.execution_log.log", l):
             r = record_finding(desc, "CONFIRMED", "vol.psscan", linked_call_id=tid, input_call_ids=[tid])
         assert r["success"] is False
-        assert r.get("gate") == "hypothesize_required"
+        assert r.get("gate") == "evidence_strength"
+        assert r.get("detail_gate") == "hypothesize_required"
 
     def test_tested_hypothesis_id_carve_out(self, tmp_path):
         # Passing tested_hypothesis_id satisfies hypothesize_required without
@@ -1233,3 +1243,59 @@ class TestExportRequiresPreReportCheck:
              patch("tools.misc.assert_output_safe", lambda *a, **kw: None):
             r = export_execution_log(str(tmp_path / "out"))
         assert r["success"] is True
+
+
+class TestWriteFinalReportRequiresPreReportCheck:
+    """Final report writes use the same pre-report gate as trace export."""
+
+    def test_missing_pre_report_check_refused(self, tmp_path):
+        from tools.misc import write_final_report
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("REPORT", str(tmp_path / "trace.json"))
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        out = tmp_path / "reports" / "report.md"
+        with patch("core.execution_log.log", l):
+            r = write_final_report(str(out), "# Report\n")
+        assert r["success"] is False
+        assert r.get("gate") == "pre_report_check_required"
+        assert not out.exists()
+
+    def test_pre_report_check_not_ready_refused(self, tmp_path):
+        from tools.misc import write_final_report
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("REPORT", str(tmp_path / "trace.json"))
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        l.record_reason_call("reason_pre_report_check", True,
+                             "READY_TO_REPORT: false\nBLOCKING_ISSUES (1): ...", {})
+        out = tmp_path / "reports" / "report.md"
+        with patch("core.execution_log.log", l):
+            r = write_final_report(str(out), "# Report\n")
+        assert r["success"] is False
+        assert r.get("gate") == "pre_report_check_required"
+        assert not out.exists()
+
+    def test_pre_report_check_ready_writes(self, tmp_path):
+        from tools.misc import write_final_report
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("REPORT", str(tmp_path / "trace.json"))
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        l.record_reason_call("reason_pre_report_check", True,
+                             "READY_TO_REPORT: true\nBLOCKING_ISSUES (0): none", {})
+        out = tmp_path / "reports" / "report.md"
+        with patch("core.execution_log.log", l):
+            r = write_final_report(str(out), "# Report\n")
+        assert r["success"] is True
+        assert out.read_text() == "# Report\n"
+        assert r.get("_trudi_call_id")
+
+
+def test_person_username_variants_include_initial_last_initial():
+    from tools.misc import knowns_pattern_generate
+
+    r = knowns_pattern_generate(["Johnny Coach"], "person_username")
+
+    assert r["success"] is True
+    assert "jcoachj" in r["all_terms"]

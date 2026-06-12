@@ -313,6 +313,101 @@ def usbdeviceforensics(registry_path: str, output_path: Optional[str] = None) ->
     return run(cmd, timeout=60)
 
 
+@mcp.tool()
+@output_safe
+def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] = None) -> dict:
+    """COMPLETE structured inventory of every device from the Windows device-install
+    log (setupapi.dev.log) — the BadUSB / removable-media ingress lens.
+
+    ENUMERATE, DON'T SEARCH. This parses the WHOLE log into one de-duplicated row
+    per physical device (class, vendor, product, VID:PID, interfaces, first/last
+    seen), so a keystroke injector cannot be missed by grepping the wrong string,
+    head-capping the dump, or windowing the wrong section. It flags the structural
+    keystroke-injector profile — a device exposing both HID/keyboard and mass-storage
+    interfaces — as a HINT on top of the full inventory; even an unflagged device is
+    present as a visible row for you to judge. This is the artifact a 'no BadUSB'
+    negative or an 'interactive human authorship' finding must be grounded on
+    (enforced by the broad attribution / completeness gates).
+
+    setupapi_log_path: path to setupapi.dev.log on the mounted image / triage set.
+    output_path: optional CSV of the FULL inventory (must be under analysis/ etc.).
+    """
+    from core.executor import _log_tool
+    from core.device_inventory import parse_device_install_log
+
+    if output_path:
+        assert_output_safe(output_path)
+
+    inv = parse_device_install_log(setupapi_log_path)
+    cov = inv.get("coverage_window")
+    flagged = inv.get("flagged", [])
+
+    # Summary — flagged devices FIRST so they're unmissable even if the client
+    # truncates the result display.
+    lines = []
+    if flagged:
+        lines.append(f"⚠ {len(flagged)} FLAGGED device(s):")
+        for d in flagged:
+            lines.append(f"  [{d.get('first_seen')}] {d.get('device_class')} "
+                         f"vid={d.get('vid')} ven={d.get('vendor')!r} "
+                         f"prod={d.get('product')!r} :: {'; '.join(d.get('flag_reasons', []))}")
+    lines.append(f"{inv.get('device_count', 0)} unique devices, "
+                 f"{inv.get('event_count', 0)} events, coverage "
+                 f"{(cov or {}).get('start', '?')} -> {(cov or {}).get('end', '?')}")
+    summary = "\n".join(lines)
+
+    if output_path and inv.get("success"):
+        try:
+            import csv
+            flag_ids = {d["identity"] for d in flagged}
+            with open(output_path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                w.writerow(["first_seen", "last_seen", "device_class", "vendor",
+                            "product", "vid", "pid", "interfaces", "actions", "flagged"])
+                for d in inv.get("devices", []):
+                    w.writerow([d.get("first_seen"), d.get("last_seen"), d.get("device_class"),
+                                d.get("vendor"), d.get("product"), d.get("vid"), d.get("pid"),
+                                "|".join(d.get("interfaces", [])), "|".join(d.get("actions", [])),
+                                "YES" if d.get("identity") in flag_ids else ""])
+        except OSError:
+            pass
+
+    # Self-log the tool_call and stamp the structured markers the gates read. The
+    # agent cannot fabricate these in a finding's prose.
+    result = {"success": inv.get("success", False), "stdout": summary,
+              "stderr": inv.get("error", "") if not inv.get("success") else "",
+              "exit_code": 0 if inv.get("success") else 1, "truncated": False,
+              "retries": 0, "elapsed_seconds": 0.0,
+              "cmd": f"misc.device_install_inventory {setupapi_log_path}"}
+    _log_tool(result)
+    cid = result.get("_trudi_call_id")
+    if cid and inv.get("success"):
+        try:
+            from core.execution_log import log
+            log.annotate_tool_call(
+                cid,
+                device_install_inventory=True,
+                coverage_window=cov,
+                device_count=inv.get("device_count"),
+                flagged_count=len(flagged),
+            )
+        except Exception:
+            pass
+
+    return {
+        "success": inv.get("success", False),
+        "error": inv.get("error"),
+        "_trudi_call_id": cid,
+        "device_count": inv.get("device_count", 0),
+        "event_count": inv.get("event_count", 0),
+        "coverage_window": cov,
+        "flagged": flagged,
+        "devices": inv.get("devices", []),
+        "summary": summary,
+        "output_path": output_path,
+    }
+
+
 # ── Scheduled tasks (disk) ────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -390,6 +485,49 @@ def packerid(file_path: str) -> dict:
 
 
 # ── Execution trace log ───────────────────────────────────────────────────────
+
+def _pre_report_ready_gate() -> dict | None:
+    """Return a refusal dict unless the latest pre-report check is ready.
+
+    Shared by export_execution_log and write_final_report so the final
+    deliverable and the trace export cannot diverge.
+    """
+    from core.execution_log import log
+
+    pre_report_entry = None
+    pre_report_window = log._entries[-50:] if len(log._entries) > 50 else log._entries
+    for e in reversed(pre_report_window):
+        if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
+            pre_report_entry = e
+            break
+    if pre_report_entry is None:
+        return {
+            "success": False,
+            "error": (
+                "refused: no reason.pre_report_check call found in the last "
+                "50 trace entries. Call reason.pre_report_check() after "
+                "reason.synthesize and resolve any blocking_issues before "
+                "exporting the trace or writing the final report."
+            ),
+            "gate": "pre_report_check_required",
+            "missing_check": "reason_pre_report_check",
+        }
+    conclusion = (pre_report_entry.get("conclusion") or "")
+    ready_match = re.search(r"READY_TO_REPORT:\s*(true|false)", conclusion, re.IGNORECASE)
+    is_ready = bool(ready_match and ready_match.group(1).lower() == "true")
+    if not is_ready:
+        return {
+            "success": False,
+            "error": (
+                "refused: most recent reason.pre_report_check returned "
+                "READY_TO_REPORT: false. Resolve the blocking_issues and "
+                "re-run pre_report_check before exporting the trace or "
+                "writing the final report."
+            ),
+            "gate": "pre_report_check_required",
+            "pre_report_conclusion": conclusion[:500],
+        }
+    return None
 
 @mcp.tool()
 @output_safe
@@ -561,6 +699,46 @@ def _infer_input_call_ids(window: list[dict], k: int = 5) -> list[int]:
 
 @mcp.tool()
 @output_safe
+def record_curiosity_probe(
+    rationale: str,
+    seeded_by: str = "",
+    input_call_ids: list[int] | None = None,
+) -> dict:
+    """
+    Log an exploratory probe — a read-only artifact you chose to look at on a
+    HUNCH, outside the current dair_assess directives.priority_tools.
+
+    Use this when an artifact or absence makes you want to check something the
+    work order didn't name (a second SID's Recycle.Bin, an untouched comms
+    store, the device-install log, a less-obvious exfil channel). Run the
+    read-only forensic tool as normal, then call this to record that you spent
+    one unit of the batch's exploratory budget and WHY.
+
+    Budget is granted by dair_assess (directives.curiosity_budget) and refreshed
+    each call. The probe is refused if the budget is exhausted or no rationale is
+    given (gate: curiosity_budget).
+
+    A probe is NOT a finding and carries no weight on its own. To turn a probe
+    that paid off into evidence, feed its returned call_id into
+    reason.hypothesize / record_finding via input_call_ids — the normal finding
+    gates then apply. So probing widens coverage without ever loosening a gate.
+
+    rationale:  the hunch + what result would confirm or kill it (required).
+    seeded_by:  hypothesis_id of a reason.hypothesize(mode="absence") that
+                pointed here, if any — builds the absence→probe→finding chain.
+    input_call_ids: _trudi_call_id values of the artifacts that prompted the hunch.
+    """
+    from core.execution_log import log
+    from tools._gates import curiosity_budget
+    failure = curiosity_budget.check(log.last_n_window(30), rationale)
+    if failure is not None:
+        return failure
+    cid = log.record_curiosity_probe(rationale, seeded_by, input_call_ids)
+    return {"success": True, "call_id": cid}
+
+
+@mcp.tool()
+@output_safe
 def record_finding(
     description: str,
     confidence: str,
@@ -590,37 +768,29 @@ def record_finding(
                     recent tool/reason results (stamped lineage_inferred); pass it
                     explicitly for precise provenance.
 
-    Gates (any failure refuses the call; the response carries a
-    `gate: "<snake_case_identifier>"` field the agent can switch on):
+    Gates (any failure refuses the call; the response carries a broad
+    `gate: "<snake_case_identifier>"` field the agent can switch on. Some
+    broad gates also include `detail_gate` naming the focused checker that
+    refused the finding):
 
       - `mcp_routing`: linked_call_id (if non-zero) must NOT point to a raw-bash
         tool_call executing a forensic binary — forensic execution must flow
         through the typed MCP wrapper. Error names the wrapper to switch to.
       - `dair_required`: Recent dair_assess required (any tier). Findings only
         exist inside an active DAIR-directed investigation.
-      - `confirmed_requires_linked_call_id`: CONFIRMED requires linked_call_id != 0.
-      - `linked_call_id_must_exist`: linked_call_id (if non-zero) must refer to
-        a known entry in the trace.
-      - `negative_from_truncated`: UNCONFIRMED ("absent / no match") findings
-        whose linked_call_id points at a tool_call with truncated: true are
-        refused — per CLAUDE.md truncated-output rule, re-run narrower (or
-        use a parallel channel like grep -a) and link to a non-truncated
-        call before recording the negative.
-      - `mitre_technique_validation`: T-IDs in the description are auto-
-        validated via correlate.mitre_validate. Any unknown T-ID refuses
-        the finding.
-      - `confirmed_requires_supported_evaluate`: CONFIRMED requires a recent
-        reason.evaluate_finding whose verdict is SUPPORTED (not CHALLENGED)
-        within the last 30 entries.
-      - `confidence_and_citation`: CONFIRMED/LIKELY require a recent
-        reason.confidence_score AND reason.cite_check whose inputs reference
-        this finding's description. confidence_score's parsed tier must not
-        be lower than the requested tier; cite_check's verdict must not be
-        UNCITED_CLAIMS_PRESENT.
-      - `hypothesize_required`: CONFIRMED/LIKELY findings that mention
-        process / service / persistence / C2 / lateral-movement keywords
-        require a recent reason.hypothesize call (or non-empty
-        tested_hypothesis_id) within the last 30 entries.
+      - `lineage_required`: findings must cite upstream trace call IDs, either
+        explicitly or via the auto-inferred recent-input path.
+      - `evidence_strength`: confidence tier, linked evidence, ATT&CK IDs,
+        SUPPORTED evaluation for CONFIRMED findings, citation support for
+        CONFIRMED/LIKELY findings, and required hypothesis review.
+      - `completeness`: absence/unknown claims must not rely on truncated output,
+        and case-inverting absence claims require a complete source manifest plus
+        coverage over the claimed time window.
+      - `attribution`: account/person/device/threat-actor attribution requires
+        auth, session, or control evidence; interactive authorship must address
+        automation/device alternatives when removable media is in evidence.
+      - `transfer`: named exfiltration channels require a transfer artifact, not
+        mere file presence, sync-folder presence, ADS, or tool execution.
     """
     from core.execution_log import log
     from tools._gates import GateContext, run_gates
@@ -739,44 +909,16 @@ def export_execution_log(output_path: str) -> dict:
     """
     from core.execution_log import log
 
-    # Pre-report check required: scan the last 50 entries for the most recent
-    # reason_pre_report_check trace entry; parse READY_TO_REPORT from its
-    # conclusion. Lookback 50 > the per-finding gates' 30 because pre-report
-    # verification often precedes a long synthesize/correction block before
-    # export.
-    pre_report_entry = None
-    pre_report_window = log._entries[-50:] if len(log._entries) > 50 else log._entries
-    for e in reversed(pre_report_window):
-        if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
-            pre_report_entry = e
-            break
-    if pre_report_entry is None:
-        return {
-            "success": False,
-            "error": (
-                "export_execution_log refused: no reason.pre_report_check call "
-                "found in the last 50 trace entries. Call reason.pre_report_check() "
-                "after reason.synthesize and resolve any blocking_issues before "
-                "exporting the trace and writing the final report."
-            ),
-            "gate": "pre_report_check_required",
-            "missing_check": "reason_pre_report_check",
-        }
-    conclusion = (pre_report_entry.get("conclusion") or "")
-    ready_match = re.search(r"READY_TO_REPORT:\s*(true|false)", conclusion, re.IGNORECASE)
-    is_ready = bool(ready_match and ready_match.group(1).lower() == "true")
-    if not is_ready:
-        return {
-            "success": False,
-            "error": (
-                "export_execution_log refused: most recent reason.pre_report_check "
-                "returned READY_TO_REPORT: false. Resolve the blocking_issues "
-                "(re-run reason.plan/synthesize as needed, address missing "
-                "evaluate_finding calls, etc.) and re-run pre_report_check."
-            ),
-            "gate": "pre_report_check_required",
-            "pre_report_conclusion": conclusion[:500],
-        }
+    refusal = _pre_report_ready_gate()
+    if refusal is not None:
+        if "error" in refusal:
+            refusal = {
+                **refusal,
+                "error": refusal["error"].replace(
+                    "refused:", "export_execution_log refused:", 1
+                ),
+            }
+        return refusal
 
     result = log.export(output_path)
     return {
@@ -784,6 +926,45 @@ def export_execution_log(output_path: str) -> dict:
         "entry_count": result.get("entry_count", 0),
         "json_path": output_path + ".json",
         "md_path": output_path + ".md",
+    }
+
+
+@mcp.tool()
+@output_safe
+def write_final_report(output_path: str, content: str) -> dict:
+    """
+    Write the final Markdown report only after reason.pre_report_check returned
+    READY_TO_REPORT: true. This is the report-side counterpart to
+    export_execution_log; use it instead of raw file writes for final reports.
+    """
+    refusal = _pre_report_ready_gate()
+    if refusal is not None:
+        if "error" in refusal:
+            refusal = {
+                **refusal,
+                "error": refusal["error"].replace(
+                    "refused:", "write_final_report refused:", 1
+                ),
+            }
+        return refusal
+
+    assert_output_safe(output_path)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    from core.execution_log import log
+    cid = log.record_tool_call(
+        cmd=f"<py>:misc_write_final_report {output_path}",
+        success=True,
+        truncated=False,
+        retries=0,
+        exit_code=0,
+    )
+    return {
+        "success": True,
+        "output_path": output_path,
+        "bytes_written": len(content.encode("utf-8")),
+        "_trudi_call_id": cid,
     }
 
 
@@ -857,7 +1038,7 @@ def clear_case_run(case_dir: str) -> dict:
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
-    case_dir: absolute path to the case directory e.g. /home/trin/cases/srl-2018-demo
+    case_dir: absolute path to the case directory e.g. /home/trin/cases/example-case
     """
     import shutil
     import glob
@@ -1237,7 +1418,7 @@ def serve_dashboard(case_dir: str, port: int = 8765) -> dict:
     one via ~/.cache/trudi/dashboard.url and returns a URL with the case's
     trace pre-selected in the dropdown.
 
-    case_dir: absolute path of the case (e.g. /home/trin/cases/srl-2018-demo).
+    case_dir: absolute path of the case (e.g. /home/trin/cases/example-case).
               Must live under the dashboard's --cases-root.
     port: accepted for back-compat; the standalone owns its own port.
     """
@@ -1249,7 +1430,7 @@ def serve_dashboard(case_dir: str, port: int = 8765) -> dict:
 def _derive_person_variants(full_name: str) -> list[str]:
     """Generate common username/email-prefix variants from 'Firstname Lastname'.
     Includes initial+last, first.last, first_last, last+initial, first+last,
-    plus the raw first and last names. Lowercased."""
+    initial+last+initial, plus the raw first and last names. Lowercased."""
     parts = [p for p in full_name.strip().lower().split() if p]
     if not parts:
         return []
@@ -1257,14 +1438,15 @@ def _derive_person_variants(full_name: str) -> list[str]:
         return [parts[0]]
     first, *_, last = parts
     return [
-        first + last,           # johnnycoach
-        first + "." + last,     # johnny.coach
-        first + "_" + last,     # johnny_coach
-        first[0] + last,        # jcoach
-        first[0] + "." + last,  # j.coach
-        last + first[0],        # coachj
-        first,                  # johnny
-        last,                   # coach
+        first + last,           # e.g. janedoe
+        first + "." + last,     # e.g. jane.doe
+        first + "_" + last,     # e.g. jane_doe
+        first[0] + last,        # e.g. jdoe
+        first[0] + last + first[0],  # e.g. jdoej
+        first[0] + "." + last,  # e.g. j.doe
+        last + first[0],        # e.g. doej
+        first,                  # e.g. jane
+        last,                   # e.g. doe
     ]
 
 
@@ -1298,7 +1480,7 @@ def knowns_pattern_generate(
     reference_set: list of strings — names, hostnames, hashes, domains, etc.
     derivation_type: one of:
         - "person_username" — for 'Firstname Lastname' rosters; emits
-          jcoach / johnny.coach / johnnycoach / etc.
+          jdoe / jane.doe / janedoe / etc.
         - "hostname" — short and FQDN forms of each host
         - "hash" — passes through unchanged (use the raw hash as the IOC)
         - "domain" — apex match (each domain plus '.<tld>' marker)

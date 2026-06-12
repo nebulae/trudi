@@ -58,7 +58,6 @@
     font-size: 11px; color: var(--fg); white-space: nowrap;
   }
   header .metric.fired { background: rgba(74, 210, 149, 0.18); border-color: var(--ok); color: var(--ok); }
-  header .metric-bench { color: var(--fg-dim); font-style: italic; }
   header .graph-btn {
     display: inline-flex; align-items: center;
     padding: 3px 10px; border-radius: 6px;
@@ -240,11 +239,7 @@
   </select>
   <span class="case-id" id="case-id"></span>
   <span class="stat"><span id="entry-count">0</span> entries</span>
-  <span class="metric" id="metric-ttf" title="Time to first CONFIRMED finding">TTF: —</span>
-  <span class="metric" id="metric-tta" title="Time to attribution (first HIGH-confidence attribute_actors)">TT-A: —</span>
-  <span class="metric" id="metric-tts" title="Time to enter Analyze phase">TT-S: —</span>
   <span class="metric" id="metric-wall" title="Wall-clock time since first entry">Total: —</span>
-  <span class="metric metric-bench" title="Industry breakout benchmarks (machine-speed adversary frame)">vs CrowdStrike 7m / Horizon3 60s</span>
   <span class="stat" style="margin-left:auto" id="clock-local" title="local time"></span>
   <span class="stat" id="clock-utc" title="UTC (trace timestamps use UTC)"></span>
   <span class="stat" id="last-fetch" title="last successful trace fetch"></span>
@@ -888,10 +883,8 @@ function pulseLinked(e) {
   }
 }
 
-// ── IR velocity metrics ──────────────────────────────────────────────────────
-// Frames TRUDI's autonomous-IR velocity against industry breakout benchmarks:
-// CrowdStrike fastest breakout 7m, Horizon3 autonomous priv-esc 60s, MIT 2024
-// AI attacks 47× human pace. Computed client-side from trace entries.
+// ── Wall-clock metric ────────────────────────────────────────────────────────
+// Total elapsed time since the first trace entry. Computed client-side.
 function _parseTs(ts) {
   if (!ts) return null;
   // ISO 8601 with timezone; trace stamps are always UTC.
@@ -913,43 +906,16 @@ function updateIrVelocityMetrics(entries) {
   if (!entries || entries.length === 0) return;
   const firstTs = _parseTs(entries[0].ts);
   if (firstTs === null) return;
-  let ttfMs = null, ttaMs = null, ttsMs = null, wallMs = null;
   let lastTs = firstTs;
   for (const e of entries) {
     const t = _parseTs(e.ts);
-    if (t === null) continue;
-    lastTs = Math.max(lastTs, t);
-    if (ttfMs === null && e.type === 'finding' &&
-        (e.confidence || '').toUpperCase() === 'CONFIRMED') {
-      ttfMs = t - firstTs;
-    }
-    if (ttaMs === null && e.type === 'reason_call' && e.tool === 'attribute_actors') {
-      const conc = (e.conclusion || '').toUpperCase();
-      if (conc.includes('CONFIDENCE_BAND') && conc.includes('HIGH')) {
-        ttaMs = t - firstTs;
-      }
-    }
-    if (ttsMs === null && e.type === 'dair_call' &&
-        (e.current_phase === 'Analyze' || e.next_phase === 'Analyze')) {
-      ttsMs = t - firstTs;
-    }
+    if (t !== null) lastTs = Math.max(lastTs, t);
   }
-  wallMs = lastTs - firstTs;
-  const setMetric = (id, label, ms) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    if (ms === null) {
-      el.textContent = `${label}: —`;
-      el.classList.remove('fired');
-    } else {
-      el.textContent = `${label}: ${_fmtDuration(ms)}`;
-      el.classList.add('fired');
-    }
-  };
-  setMetric('metric-ttf', 'TTF', ttfMs);
-  setMetric('metric-tta', 'TT-A', ttaMs);
-  setMetric('metric-tts', 'TT-S', ttsMs);
-  setMetric('metric-wall', 'Total', wallMs);
+  const el = document.getElementById('metric-wall');
+  if (el) {
+    el.textContent = `Total: ${_fmtDuration(lastTs - firstTs)}`;
+    el.classList.add('fired');
+  }
 }
 function updateGraphLink() {
   const link = document.getElementById('graph-link');

@@ -14,13 +14,13 @@ from core.paths import (
 
 class TestIsEvidencePath:
     @pytest.mark.parametrize("path,expected", [
-        ("/cases/srl/image.E01", True),
+        ("/cases/example/image.E01", True),
         ("/mnt/ewf_wkstn01/ewf1", True),
         ("/media/usb/image.dd", True),
-        ("/home/trin/cases/srl/evidence/image.E01", True),
-        ("/home/trin/cases/srl/exports/result.csv", False),
-        ("/home/trin/cases/srl/analysis/data.json", False),
-        ("/home/trin/cases/srl/reports/report.md", False),
+        ("/home/trin/cases/example/evidence/image.E01", True),
+        ("/home/trin/cases/example/exports/result.csv", False),
+        ("/home/trin/cases/example/analysis/data.json", False),
+        ("/home/trin/cases/example/reports/report.md", False),
         ("/tmp/scratch.bin", False),
     ])
     def test_paths(self, path, expected):
@@ -30,7 +30,7 @@ class TestIsEvidencePath:
 class TestAssertOutputSafe:
     def test_blocks_cases_prefix(self):
         with pytest.raises(ValueError, match="protected evidence"):
-            assert_output_safe("/cases/srl/output.csv")
+            assert_output_safe("/cases/example/output.csv")
 
     def test_blocks_mnt_prefix(self):
         with pytest.raises(ValueError, match="protected evidence"):
@@ -38,7 +38,7 @@ class TestAssertOutputSafe:
 
     def test_blocks_evidence_segment(self):
         with pytest.raises(ValueError, match="protected evidence"):
-            assert_output_safe("/home/trin/cases/srl/evidence/out.csv")
+            assert_output_safe("/home/trin/cases/example/evidence/out.csv")
 
     def test_allows_analysis(self, tmp_path):
         safe = str(tmp_path / "analysis" / "out.csv")

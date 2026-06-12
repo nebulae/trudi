@@ -164,9 +164,9 @@ class TestReasonHypothesize:
         with patch("httpx.post", return_value=_http_resp("ok")) as m, \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
-            reason_hypothesize("observation", context="Windows 10, CRIMSON OSPREY")
+            reason_hypothesize("observation", context="Windows 10, REDFOX")
         user_msg = m.call_args[1]["json"]["messages"][1]["content"]
-        assert "CRIMSON OSPREY" in user_msg
+        assert "REDFOX" in user_msg
 
     def test_server_unreachable_returns_error(self):
         from tools.reasoning import reason_hypothesize
@@ -558,7 +558,7 @@ class TestReasonHypothesizeEvidence:
         with patch("httpx.post", return_value=_http_resp("ok")) as m, \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
-            reason_hypothesize("orphaned PPID", evidence="psscan output", context="CRIMSON OSPREY")
+            reason_hypothesize("orphaned PPID", evidence="psscan output", context="REDFOX")
         user_msg = m.call_args[1]["json"]["messages"][1]["content"]
         obs_pos = user_msg.index("OBSERVATION")
         ev_pos = user_msg.index("SUPPORTING EVIDENCE")
@@ -752,10 +752,10 @@ class TestReasonPreReportCheck:
             "reason_evaluate_finding", True, "SUPPORTED", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Beacon on 172.16.6.11 PID 4044 (T1055)",
+            "Beacon on 10.0.6.11 PID 4044 (T1055)",
             "CONFIRMED", "vol.netscan")
         configured_log.record_finding(
-            "Beacon on 172.16.4.7 PID 1820 (T1021)",
+            "Beacon on 10.0.4.7 PID 1820 (T1021)",
             "CONFIRMED", "vol.netscan")
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
@@ -776,10 +776,10 @@ class TestReasonPreReportCheck:
             "reason_evaluate_finding", True, "SUPPORTED", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Beacon on 172.16.6.11 PID 4044 (T1055)",
+            "Beacon on 10.0.6.11 PID 4044 (T1055)",
             "CONFIRMED", "vol.netscan")
         configured_log.record_finding(
-            "Beacon on 172.16.4.7 PID 1820 (T1021)",
+            "Beacon on 10.0.4.7 PID 1820 (T1021)",
             "CONFIRMED", "vol.netscan")
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
@@ -796,12 +796,137 @@ class TestReasonPreReportCheck:
             "reason_evaluate_finding", True, "SUPPORTED", {})
         configured_log.record_reason_call("reason_synthesize", True, "ok", {})
         configured_log.record_finding(
-            "Beacon on 172.16.6.11 PID 4044 (T1055)",
+            "Beacon on 10.0.6.11 PID 4044 (T1055)",
             "CONFIRMED", "vol.netscan")
         with patch("core.execution_log.log", configured_log):
             r = reason_pre_report_check()
         assert r["ready_to_report"] is True
         assert not any("cross-host" in w.lower() for w in r["warnings"])
+
+    def test_synthesize_blockers_are_blocking(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call(
+            "reason_synthesize", True,
+            "SUMMARY: draft\nBLOCKERS: run roster sweep before attribution\nWARNINGS: none",
+            {},
+        )
+        with patch("core.execution_log.log", configured_log), \
+             patch("tools.reasoning.reason_audit_findings",
+                   return_value={"summary": {"candidate_count": 0}, "candidates": []}):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("reason.synthesize" in issue for issue in r["blocking_issues"])
+
+    def test_synthesize_inline_blocker_labels_are_blocking(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call(
+            "reason_synthesize", True,
+            "LOGICAL GAPS:\n1. TEMP.ZIP CONTENT GAP (BLOCKER): temp.zip contents were not characterized.\n",
+            {},
+        )
+        with patch("core.execution_log.log", configured_log), \
+             patch("tools.reasoning.reason_audit_findings",
+                   return_value={"summary": {"candidate_count": 0}, "candidates": []}):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("rewording findings" in issue for issue in r["blocking_issues"])
+
+    def test_case_question_ignores_background_after_evidence_marker(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_agent_message(
+            "CASE_QUESTION: Did Anthony Vanko copy classified StarkResearch data and what was done with it? "
+            "Evidence: 21-segment E01, Kylie Normandy, doctoral student, email Skype WhatsApp."
+        )
+        configured_log.record_tool_call("ez.evtxecmd 4624", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Anthony Vanko copied classified StarkResearch data and archived it for exfiltration.",
+            "LIKELY",
+            "ez.mftecmd",
+        )
+        with patch("core.execution_log.log", configured_log), \
+             patch("tools.reasoning.reason_audit_findings",
+                   return_value={"summary": {"candidate_count": 0}, "candidates": []}):
+            r = reason_pre_report_check()
+        assert not any("Case question" in issue for issue in r["blocking_issues"])
+
+    def test_pcap_human_attribution_requires_identity_closure(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call(
+            "tcpdump -r /cases/nitroba/evidence/nitroba.pcap -A",
+            True, False, 0, 0,
+        )
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Johnny Coach was responsible for the anonymous email from 192.168.15.4",
+            "CONFIRMED",
+            "net.ngrep_search",
+        )
+        with patch("core.execution_log.log", configured_log), \
+             patch("tools.reasoning.reason_audit_findings",
+                   return_value={"summary": {"candidate_count": 0}, "candidates": []}):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("structured PCAP identity inventory" in issue for issue in r["blocking_issues"])
+        assert any("roster/knowns sweep" in issue for issue in r["blocking_issues"])
+
+    def test_pcap_human_attribution_with_identity_closure_passes(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call(
+            "<py>:pcap_identity_timeline roster=CHEM109", True, False, 0, 0
+        )
+        configured_log.record_tool_call(
+            "<py>:knowns_pattern_generate person_username CHEM109", True, False, 0, 0
+        )
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Johnny Coach was responsible for the anonymous email from 192.168.15.4",
+            "CONFIRMED",
+            "net.pcap_identity_timeline",
+        )
+        with patch("core.execution_log.log", configured_log), \
+             patch("tools.reasoning.reason_audit_findings",
+                   return_value={"summary": {"candidate_count": 0}, "candidates": []}):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
+
+    def test_pcap_identity_finding_source_counts_as_closure(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call(
+            "sudo tcpdump -r /cases/nitroba/evidence/nitroba.pcap -nn -A tcp port 80",
+            True, False, 0, 0,
+        )
+        configured_log.record_tool_call(
+            "<py>:knowns_pattern_generate person_username CHEM109", True, False, 0, 0
+        )
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_reason_call("reason_synthesize", True, "ok", {})
+        configured_log.record_finding(
+            "Structured PCAP identity inventory dispositions every account and the sender is LIKELY Johnny Coach.",
+            "LIKELY",
+            "net.http_session_inventory",
+        )
+        with patch("core.execution_log.log", configured_log), \
+             patch("tools.reasoning.reason_audit_findings",
+                   return_value={"summary": {"candidate_count": 0}, "candidates": []}):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
 
 
 class TestCallInitiatedLogging:
@@ -1094,11 +1219,11 @@ class TestReasonInputsCaptured:
         inst = ExecutionLog()
         inst.configure("IN-003", str(tmp_path / "trace.json"))
         with patch("core.execution_log.log", inst), _compat_ctx("Eval.\n" + _DIRECTIVES_JSON):
-            reason_evaluate_finding("malicious .exe", "stat output", case_context="CRIMSON OSPREY")
+            reason_evaluate_finding("malicious .exe", "stat output", case_context="REDFOX")
         entry = [e for e in inst._entries if e.get("tool") == "reason_evaluate_finding"][-1]
         assert "inputs" in entry
         assert "malicious .exe" in entry["inputs"]["user_message"]
-        assert "CRIMSON OSPREY" in entry["inputs"]["user_message"]
+        assert "REDFOX" in entry["inputs"]["user_message"]
 
     def test_error_path_still_records_inputs(self, tmp_path):
         # When the reasoning backend is misconfigured, the resulting failed
@@ -1231,3 +1356,440 @@ class TestPreReportCheckSurfacesAuditWarnings:
         # Audit count surfaces in warnings; we don't care about other warnings
         assert any("aren't recorded as structured" in w for w in r["warnings"])
         assert r["audit_summary"]["candidate_count"] == 2
+
+
+class TestPreReportStructuralIntegrity:
+    """Structural-integrity checks: covert-account controller (blocking),
+    multi-channel exfil (warning), and named-recipient roster x-ref (warning)."""
+
+    @pytest.fixture
+    def base_log(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-STRUCT", str(tmp_path / "trace.json"))
+        # Satisfy the non-structural blockers up front.
+        l.record_reason_call("reason_plan", True, "plan", {})
+        l.record_reason_call("reason_synthesize", True, "ok", {})
+        l.record_reason_call("reason_hypothesize", True, "hyp", {})
+        return l
+
+    def test_covert_account_without_controller_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "Covert local admin account 'svc_x' was created (RID 1500)",
+            "CONFIRMED", "ez.recmd")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("svc_x" in i.lower() and "controls it" in i.lower()
+                   for i in r["blocking_issues"])
+
+    def test_controller_established_by_session_clears_block(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "Covert local admin account 'svc_x' was created (RID 1500)",
+            "CONFIRMED", "ez.recmd")
+        base_log.record_finding(
+            "Account svc_x logged in via RDP logon type 10 from 10.0.0.5",
+            "CONFIRMED", "ez.evtxecmd")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("svc_x" in i.lower() for i in r["blocking_issues"])
+
+    def test_controller_parked_unknown_clears_block(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "New user account 'svc_x' was created on the host",
+            "LIKELY", "ez.recmd")
+        base_log.record_finding(
+            "Controller of account svc_x is unknown — requires authentication logs",
+            "UNCONFIRMED", "analysis")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("svc_x" in i.lower() for i in r["blocking_issues"])
+
+    def test_multiple_exfil_channels_warns(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "Classified data exfiltrated to cloud via Dropbox", "CONFIRMED", "mft")
+        base_log.record_finding(
+            "Classified data exfiltrated over FTP to the staging host", "CONFIRMED", "ftp")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert any("channel" in w.lower() for w in r["warnings"])
+
+    def test_named_recipient_without_xref_warns(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "Stolen research was exfiltrated via email to buyer@evil.example",
+            "CONFIRMED", "ost")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert any("roster" in w.lower() for w in r["warnings"])
+
+    def test_recipient_with_roster_xref_no_warn(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "Stolen research was exfiltrated via email to buyer@evil.example",
+            "CONFIRMED", "ost")
+        base_log.record_reason_call(
+            "reason_evaluate_finding", True,
+            "buyer@evil.example cross-referenced against the suspect roster — match", {})
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("roster" in w.lower() for w in r["warnings"])
+
+
+class TestPreReportHypothesisLedger:
+    """FIX 2 — every raised hypothesis must be resolved (cited by a finding's
+    tested_hypothesis_id) or parked before Report. A distinct/second-principal
+    hypothesis left open BLOCKS ('suspected a second actor then dropped it');
+    generic unresolved hypotheses WARN."""
+
+    @pytest.fixture
+    def base_log(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-HYP", str(tmp_path / "trace.json"))
+        l.record_reason_call("reason_plan", True, "plan", {})
+        l.record_reason_call("reason_synthesize", True, "ok", {})
+        return l
+
+    def test_open_generic_hypothesis_warns_not_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_reason_call(
+            "reason_hypothesize", True, "orphaned cmd.exe under session 0", {},
+            hypothesis_id="H0001",
+            inputs={"user_message": "OBSERVATION: orphaned cmd.exe under session 0"})
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert any("H0001" in w and "never resolved" in w.lower()
+                   for w in r["warnings"])
+        assert not any("H0001" in i for i in r["blocking_issues"])
+
+    def test_resolved_generic_hypothesis_no_warn(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_reason_call(
+            "reason_hypothesize", True, "orphaned cmd.exe", {},
+            hypothesis_id="H0001",
+            inputs={"user_message": "OBSERVATION: orphaned cmd.exe under session 0"})
+        base_log.record_finding(
+            "Orphaned cmd.exe (PID 4012) is a benign scheduler artifact",
+            "LIKELY", "vol", tested_hypothesis_id="H0001")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("H0001" in w for w in r["warnings"])
+        assert not any("H0001" in i for i in r["blocking_issues"])
+
+    def test_distinct_principal_hypothesis_open_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_reason_call(
+            "reason_hypothesize", True, "second operator?", {},
+            hypothesis_id="H0002",
+            inputs={"user_message":
+                    "OBSERVATION: who controls account svc_rdp and how did "
+                    "they authenticate?"})
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("H0002" in i and "distinct/second principal" in i.lower()
+                   for i in r["blocking_issues"])
+
+    def test_distinct_principal_resolved_by_finding_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_reason_call(
+            "reason_hypothesize", True, "second operator?", {},
+            hypothesis_id="H0002",
+            inputs={"user_message": "OBSERVATION: who controls account svc_rdp?"})
+        base_log.record_finding(
+            "Account svc_rdp is controlled by an external actor — Security 4624 "
+            "logon type 10 from 10.0.0.5", "CONFIRMED", "ez.evtxecmd",
+            tested_hypothesis_id="H0002")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("H0002" in i for i in r["blocking_issues"])
+
+    def test_distinct_principal_detected_via_rdp_in_observation(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_reason_call(
+            "reason_hypothesize", True, "rdp inbound", {},
+            hypothesis_id="H0003",
+            inputs={"user_message":
+                    "OBSERVATION: an inbound RDP session (logon type 10) "
+                    "preceded the data copy"})
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("H0003" in i for i in r["blocking_issues"])
+
+
+class TestPreReportAttributionClosure:
+    """FIX 3b — a human/account verdict needs a logon/RDP inventory somewhere in
+    the trace, and every surfaced controller-question principal must be
+    dispositioned, before Report."""
+
+    @pytest.fixture
+    def base_log(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-CLOSURE", str(tmp_path / "trace.json"))
+        l.record_reason_call("reason_plan", True, "plan", {})
+        l.record_reason_call("reason_synthesize", True, "ok", {})
+        l.record_reason_call("reason_hypothesize", True, "hyp", {})
+        return l
+
+    def test_verdict_without_logon_enum_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding("Dana exfiltrated the classified data", "CONFIRMED", "mft")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("session-enumeration" in i.lower() for i in r["blocking_issues"])
+
+    def test_verdict_with_evtxecmd_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding("Dana exfiltrated the classified data", "CONFIRMED", "mft")
+        base_log.record_tool_call(
+            "dotnet /opt/EZ/EvtxECmd/EvtxECmd.dll -f Security.evtx --inc 4624,4625",
+            True, False, 0, 0)
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("session-enumeration" in i.lower() for i in r["blocking_issues"])
+
+    def test_verdict_with_pyform_evtx_filter_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding("Mallory copied the classified research", "CONFIRMED", "mft")
+        base_log.record_tool_call("<py>:misc_evtx_filter", True, False, 0, 0)
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("session-enumeration" in i.lower() for i in r["blocking_issues"])
+
+    def test_verdict_with_linux_last_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding("Dana exfiltrated the classified data", "CONFIRMED", "mft")
+        base_log.record_tool_call("last -f /var/log/wtmp", True, False, 0, 0)
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("session-enumeration" in i.lower() for i in r["blocking_issues"])
+
+    def test_process_attribution_verdict_not_blocked(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "ngentask.exe exfiltrated data to C2 192.0.2.10", "CONFIRMED", "vol")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        # Process/malware attribution (no human/account) → not gated on logon enum.
+        assert not any("session-enumeration" in i.lower() for i in r["blocking_issues"])
+
+    def test_surfaced_principal_undispositioned_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_dair_call(
+            current_phase="Triage", phase_rationale="pivot",
+            transition_recommended=False, next_phase="",
+            transition_rationale="", stack_action="stay",
+            investigation_focus=("Establish who controls principal SVC_RDP — "
+                                 "authentication/source unestablished"))
+        base_log.record_finding("Dana exfiltrated data", "CONFIRMED", "mft")
+        base_log.record_tool_call("<py>:misc_evtx_filter", True, False, 0, 0)
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("SVC_RDP" in i and "disposition" in i.lower()
+                   for i in r["blocking_issues"])
+
+    def test_surfaced_principal_attributed_with_session_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_dair_call(
+            current_phase="Triage", phase_rationale="pivot",
+            transition_recommended=False, next_phase="",
+            transition_rationale="", stack_action="stay",
+            investigation_focus="Establish who controls principal SVC_RDP")
+        base_log.record_tool_call("<py>:misc_evtx_filter", True, False, 0, 0)
+        base_log.record_finding(
+            "Account svc_rdp logged in via RDP type 10 from 10.0.0.5 — operated "
+            "by an external actor", "CONFIRMED", "ez.evtxecmd")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("SVC_RDP" in i and "disposition" in i.lower()
+                       for i in r["blocking_issues"])
+
+    def test_surfaced_principal_parked_unknown_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_dair_call(
+            current_phase="Triage", phase_rationale="pivot",
+            transition_recommended=False, next_phase="",
+            transition_rationale="", stack_action="stay",
+            investigation_focus="who controls principal SVC_RDP")
+        base_log.record_finding(
+            "Controller of account svc_rdp is unknown — requires authentication logs",
+            "UNCONFIRMED", "analysis")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("SVC_RDP" in i and "disposition" in i.lower()
+                       for i in r["blocking_issues"])
+
+    def test_forced_candidate_pivot_principal_undispositioned_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_dair_call(
+            current_phase="Analyze", phase_rationale="assess auth artifacts",
+            transition_recommended=False, next_phase="",
+            transition_rationale="", stack_action="stay",
+            investigation_focus="Review authentication anomalies",
+            candidate_pivots=[{
+                "kind": "principal",
+                "value": "SVC_RDP",
+                "phase": "Triage",
+                "cue": "forced",
+            }])
+        base_log.record_finding("Dana exfiltrated data", "CONFIRMED", "mft")
+        base_log.record_tool_call("<py>:misc_evtx_filter", True, False, 0, 0)
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("SVC_RDP" in i and "forced principal candidate" in i
+                   for i in r["blocking_issues"])
+
+    def test_no_verdict_no_block(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        base_log.record_finding(
+            "A suspicious archive was observed in the staging folder", "SUSPECTED", "mft")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("session-enumeration" in i.lower() for i in r["blocking_issues"])
+
+
+class TestHypothesizeSplit:
+    """Part 1 — reason_hypothesize splits ranked H1…Hn into per-hypothesis records."""
+
+    def test_five_hypotheses_parsed(self):
+        from tools.reasoning import _parse_sub_hypotheses
+        concl = (
+            "ANALYSIS\n\n"
+            "H1 — Second principal staged exfil tooling (Likelihood: MEDIUM-HIGH)\n"
+            "Rationale: account name 'helpsvc' mimics a system artifact.\n\n"
+            "H2 — Mallory created helpsvc as a deniable persona (Likelihood: HIGH)\n"
+            "Rationale: PC User is already admin.\n\n"
+            "H3 — Guest account is the actual vector (Likelihood: LOW-MEDIUM)\n"
+            "Rationale: Guest is NOT disabled.\n\n"
+            "H4 — benign printer service account (Likelihood: LOW)\n\n"
+            "H5 — malware-created account (Likelihood: LOW)\n"
+        )
+        subs = _parse_sub_hypotheses(concl, "H0001")
+        assert [s["sub_id"] for s in subs] == [f"H0001.{i}" for i in range(1, 6)]
+        by = {s["label"]: s for s in subs}
+        assert by["H1"]["likelihood_tier"] == "HIGH"    # MEDIUM-HIGH → HIGH
+        assert by["H2"]["likelihood_tier"] == "HIGH"
+        assert by["H3"]["likelihood_tier"] == "MEDIUM"   # LOW-MEDIUM → MEDIUM
+        assert by["H4"]["likelihood_tier"] == "LOW"
+        assert "HELPSVC" in by["H1"]["entities"]
+        assert "GUEST" in by["H3"]["entities"]
+
+    def test_unstructured_conclusion_returns_empty(self):
+        from tools.reasoning import _parse_sub_hypotheses
+        assert _parse_sub_hypotheses("A single prose hypothesis, no headers.", "H0002") == []
+        assert _parse_sub_hypotheses("", "H0003") == []
+
+
+class TestPreReportHypothesisExhaustion:
+    """Part 3 — every MEDIUM+ contested principal must reach a verdict (controller
+    established with a session/identity binding, or refuted). Parking ≠ terminal."""
+
+    @pytest.fixture
+    def base_log(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("TEST-EXHAUST", str(tmp_path / "trace.json"))
+        l.record_reason_call("reason_plan", True, "plan", {})
+        l.record_reason_call("reason_synthesize", True, "ok", {})
+        return l
+
+    def _seed_hyp(self, log, subs):
+        cid = log.record_reason_call("reason_hypothesize", True, "ranked", {},
+                                     hypothesis_id="H0001")
+        log.update_reason_call(cid, sub_hypotheses=subs)
+
+    def test_unresolved_contested_principal_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        self._seed_hyp(base_log, [
+            {"sub_id": "H0001.1", "label": "H1", "title": "second principal",
+             "likelihood_tier": "HIGH", "entities": ["HELPSVC"]},
+        ])
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("HELPSVC" in i and "never driven to a verdict" in i
+                   for i in r["blocking_issues"])
+
+    def test_parked_only_still_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        self._seed_hyp(base_log, [
+            {"sub_id": "H0001.1", "label": "H1", "title": "second principal",
+             "likelihood_tier": "HIGH", "entities": ["HELPSVC"]},
+        ])
+        base_log.record_finding(
+            "Controller of helpsvc is PARKED AS UNKNOWN — no session artifact",
+            "UNCONFIRMED", "analysis")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert any("HELPSVC" in i for i in r["blocking_issues"])
+
+    def test_controller_established_with_session_clears_pair(self, base_log):
+        # H1 and H2 share entity helpsvc — a session binding resolves both.
+        from tools.reasoning import reason_pre_report_check
+        self._seed_hyp(base_log, [
+            {"sub_id": "H0001.1", "label": "H1", "title": "second principal",
+             "likelihood_tier": "HIGH", "entities": ["HELPSVC"]},
+            {"sub_id": "H0001.2", "label": "H2", "title": "Mallory persona",
+             "likelihood_tier": "HIGH", "entities": ["HELPSVC"]},
+        ])
+        base_log.record_finding(
+            "Account helpsvc is operated by an external actor — Security 4624 "
+            "logon type 10 from 10.0.0.5", "CONFIRMED", "ez.evtxecmd")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("HELPSVC" in i for i in r["blocking_issues"])
+
+    def test_refutation_clears(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        self._seed_hyp(base_log, [
+            {"sub_id": "H0001.3", "label": "H3", "title": "Guest vector",
+             "likelihood_tier": "MEDIUM", "entities": ["GUEST"]},
+        ])
+        base_log.record_finding(
+            "Guest-vector hypothesis REFUTED — Guest profile empty beyond the logon",
+            "UNCONFIRMED", "analysis")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("GUEST" in i for i in r["blocking_issues"])
+
+    def test_low_only_entity_warns_not_blocks(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        self._seed_hyp(base_log, [
+            {"sub_id": "H0001.5", "label": "H5", "title": "malware account",
+             "likelihood_tier": "LOW", "entities": ["SVCBOT"]},
+        ])
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert not any("SVCBOT" in i for i in r["blocking_issues"])
+        assert any("SVCBOT" in w for w in r["warnings"])
+
+    def test_unresolved_principal_regression(self, base_log):
+        from tools.reasoning import reason_pre_report_check
+        self._seed_hyp(base_log, [
+            {"sub_id": "H0001.1", "label": "H1", "title": "second principal",
+             "likelihood_tier": "HIGH", "entities": ["HELPSVC"]},
+            {"sub_id": "H0001.2", "label": "H2", "title": "Mallory persona",
+             "likelihood_tier": "HIGH", "entities": ["HELPSVC"]},
+            {"sub_id": "H0001.3", "label": "H3", "title": "Guest vector",
+             "likelihood_tier": "MEDIUM", "entities": ["GUEST"]},
+        ])
+        base_log.record_finding(
+            "Covert account helpsvc was used to run smallftpd", "LIKELY", "ez.recmd")
+        base_log.record_finding(
+            "Controller of helpsvc PARKED AS UNKNOWN — no session artifact",
+            "UNCONFIRMED", "analysis")
+        with patch("core.execution_log.log", base_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        blk = " ".join(r["blocking_issues"])
+        assert "HELPSVC" in blk and "GUEST" in blk

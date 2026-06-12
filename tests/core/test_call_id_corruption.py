@@ -7,7 +7,7 @@ with existing entries. F1 added validation against trace_max + in_memory_seq
 so duplicates are impossible by construction.
 
 These three tests would have caught the production corruption observed in
-~/cases/srl-2018-demo/.trace-backups/20260523T202446Z/SRL-2018-DEMO_trace.json
+~/cases/example-case/.trace-backups/20260523T202446Z/EXAMPLE-CASE_trace.json
 (10 duplicate call_ids, 261→4 inflection point).
 """
 import json

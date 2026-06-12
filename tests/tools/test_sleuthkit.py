@@ -90,7 +90,7 @@ class TestIcatOutputSafety:
     def test_icat_blocked_on_evidence_path(self):
         from tools.sleuthkit import tsk_icat
         with pytest.raises(ValueError, match="protected evidence"):
-            tsk_icat(IMG, "42", "/cases/srl/evidence/out.bin")
+            tsk_icat(IMG, "42", "/cases/example/evidence/out.bin")
 
     def test_icat_allowed_on_safe_path(self, tmp_path):
         from tools.sleuthkit import tsk_icat
@@ -124,7 +124,7 @@ class TestBlockTools:
     def test_tsk_blkls_output_safe(self, mock_run):
         from tools.sleuthkit import tsk_blkls
         with pytest.raises(ValueError, match="protected evidence"):
-            tsk_blkls(IMG, "/cases/srl/evidence/blocks.raw")
+            tsk_blkls(IMG, "/cases/example/evidence/blocks.raw")
 
     def test_tsk_blkls_allowed(self, tmp_path, mock_run):
         from tools.sleuthkit import tsk_blkls

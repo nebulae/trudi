@@ -33,7 +33,7 @@ case opened
     ├─ [parallel] registry triage       ← ez.recmd_hive ×3 + strings.stat_file
     │
     ├─ reason.plan                      ← Foundation-Sec sets investigation priority
-    │       └─ directives.priority_tools → bound tool sequence
+    │       └─ directives.priority_tools → manifest-backed bound tool sequence
     │
     ├─ [tool runs — disk, memory, artifacts, network, enrichment]
     │       └─ reason.hypothesize       ← called for each ambiguous finding
@@ -43,7 +43,7 @@ case opened
     │
     ├─ misc.export_execution_log        ← trace written to reports/
     │
-    └─ investigation report written
+    └─ misc.write_final_report          ← gated final report write
 ```
 
 Every tool call, reason call, and confirmed finding is written to a live JSON trace log throughout the investigation. The markdown export is human-readable.
@@ -180,6 +180,13 @@ TRUDI will run autonomously from there. It will not ask for confirmation between
 | `analysis/<CASE_ID>_trace.json` | Live trace (written incrementally during the investigation) |
 | `exports/` | Raw tool output — MFT CSV, EVTX exports, prefetch, registry, amcache, shimcache, USN journal, netscan, etc. |
 
+## Submission artifacts
+
+| File | Contents |
+|------|----------|
+| `docs/architecture.md` | Find Evil! architecture diagram covering MCP components, architectural guardrails, evidence boundaries, live monitoring, and traceability |
+| `docs/architecture.mmd` | Raw Mermaid source for exporting the architecture diagram to SVG/PNG |
+
 ---
 
 ## Tool namespaces
@@ -259,3 +266,9 @@ trudi/
 ├── rules/                 ← bundled YARA rulesets (5 categories)
 └── tests/                 ← full test suite (403 tests, mocked)
 ```
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE). © 2026 Trinity Harrison.

@@ -2,8 +2,8 @@
 
 Runs as a parallel track alongside reason.*. Called after every tool batch to
 assess which DAIR phase the investigation is in, whether to transition, and what
-to focus on next. Maintains a recursive phase stack — any phase can transition
-to any other when evidence demands it.
+to focus on next. DAIR may surface candidate pivots, but candidate discovery is
+advisory metadata and never mutates phase control flow by itself.
 
 Active phases for TRUDI (read-only forensic tool):
   Triage        — confirm initial IOCs, challenge for hallucinations, produce plan
@@ -14,7 +14,6 @@ Active phases for TRUDI (read-only forensic tool):
 
 Detection is the assumed trigger (investigation already started). Improve &
 Response actions are report recommendations only — never directed tool calls.
-The cycle loops: Scan finding a new pivot pushes a new Triage onto the stack.
 """
 import os
 import re
@@ -22,6 +21,11 @@ import json
 from fastmcp import FastMCP
 from core.paths import DAIR_TIMEOUT
 from tools.reasoning import _parse_directives, _cap_lines
+from tools.tool_capabilities import (
+    MANIFEST_VERSION,
+    annotate_directives_with_manifest,
+    format_tool_manifest_for_prompt,
+)
 
 mcp = FastMCP("dair")
 
@@ -53,13 +57,13 @@ def _active_backend() -> str:
     return "claude"
 
 
-# ── Auto-push: Scan → Triage pivot detection ─────────────────────────────────
-# When a Scan-phase tool_results_summary names a host (IP or hostname) that
-# isn't already in case_context or any prior investigation_focus, force a
-# stack_action="push" with next_phase="Triage". Engages the recursive
-# investigation pattern automatically rather than relying on the model to
-# decide. Override only fires when the model emitted stack_action="stay" — a
-# model "push" is never downgraded.
+# ── Candidate pivot detection ────────────────────────────────────────────────
+# DAIR records hosts/principals worth a follow-up look, but it does not mutate
+# phase transitions. Earlier versions force-pushed and drained pivot queues from
+# heuristic text extraction; the VANKO trace showed that a generic token
+# ("FINDINGS") could become a synthetic Triage target. Candidate pivots are
+# therefore audit metadata only. The model/agent may choose to investigate them,
+# but code never rewrites stack_action/next_phase from these regexes.
 #
 # Two detection paths run by default and are case-agnostic:
 #   1. IPv4 — every host has one; the regex is rock-solid.
@@ -177,7 +181,7 @@ def _parse_dair_assessment(raw: str) -> dict:
 
 
 def _extract_host_tokens(text: str) -> set[str]:
-    """Return the set of host references (IPs + hostnames) appearing in `text`.
+    r"""Return the set of host references (IPs + hostnames) appearing in `text`.
 
     Detection sources:
       1. IPv4 addresses — always.
@@ -225,8 +229,7 @@ def _build_known_host_set(case_context: str) -> set[str]:
     """Union of all hosts referenced in case_context plus every
     investigation_focus from prior dair_call entries in the trace.
 
-    The "known" set represents hosts the investigation has already touched —
-    new pivots are anything mentioned in tool_results_summary that isn't here.
+    The "known" set represents hosts the investigation has already touched.
     """
     known: set[str] = set()
     known |= _extract_host_tokens(case_context or "")
@@ -247,33 +250,161 @@ def _build_known_host_set(case_context: str) -> set[str]:
     return known
 
 
-def _drain_queued_pivots(case_context: str) -> list[str]:
-    """Return the queued pivot hosts that have never been pivoted to.
+# ── Principal (account / identity) candidate detection ───────────────────────
+# A new *host* is not the only thing worth surfacing for follow-up. A newly
+# surfaced *principal* — an account or identity whose controller has never been
+# established — is a candidate pivot too. These cues are recorded as
+# candidate_pivots; they never force a focused sub-Triage by themselves.
 
-    A host enters the queue when a prior dair_call's auto-push captured it as
-    overflow (`pending_pivots`). It leaves implicitly the first time a Triage
-    `investigation_focus` mentions it (captured by _build_known_host_set).
+# Built-in / generic tokens that are never a genuine new principal.
+_PRINCIPAL_STOP_WORDS = frozenset({
+    "administrator", "administrators", "admin", "admins", "guest",
+    "defaultaccount", "system", "localsystem", "networkservice", "localservice",
+    "homegroupuser", "homegroupuser$", "wdagutilityaccount", "trustedinstaller",
+    "account", "accounts", "user", "users", "username", "principal",
+    "creation", "created", "creates", "create", "new", "local", "named",
+    "called", "the", "this", "that", "was", "were", "is", "are", "an", "a",
+    "credential", "credentials", "name", "identity", "logon", "login",
+    # Pronouns / fillers that can sit immediately before an auth verb
+    # ("who logged in", "successfully authenticated") — never a principal name.
+    "who", "they", "he", "she", "someone", "and", "then", "also", "has",
+    "have", "had", "successfully", "remotely", "interactively", "session",
+    # Verbs / connectives that can follow a cue word once the auth-cue path
+    # reaches name extraction ("user logged in" must not yield 'logged').
+    "logged", "logging", "authenticated", "signed", "accessed", "connected",
+    "ran", "opened", "performed", "enabled", "disabled", "established",
+    "via", "from", "with", "network", "remote", "interactive",
+    "in", "on", "to", "at", "by", "of", "as", "out", "up",
+})
+
+# Does the text describe an account being *created* (vs merely mentioned)?
+_ACCOUNT_CREATION_CUE_RE = re.compile(
+    r"(?:\baccount\s+creat\w*|\bcreat\w+\b.{0,30}?\baccount\b"
+    r"|\bnew\s+(?:local\s+)?(?:admin\w*|user)\s+account\b"
+    r"|\bcovert\s+(?:local\s+)?(?:admin\w*|account)\b"
+    r"|\bbackdoor\s+account\b|\brogue\s+account\b"
+    r"|\bplanted\b.{0,20}?\baccount\b|\b4720\b)",
+    re.IGNORECASE,
+)
+
+# Tier A (forced push): a previously-unseen identity that AUTHENTICATES
+# INTERACTIVELY or over RDP — the highest-signal "second operator" cue. An
+# unknown identity doing an interactive / RemoteInteractive logon is almost
+# always a distinct human principal, so it earns the same forced Triage push
+# as a freshly-created account. (Creation-only detection missed exactly this:
+# a second principal who arrives by RDP rather than by creating an account.)
+_PRINCIPAL_INTERACTIVE_AUTH_CUE_RE = re.compile(
+    r"(?:\b4778\b|\b4779\b"
+    r"|\brdp\b|\bremote desktop\b|\bterminal services\b"
+    r"|\blogon type\s*(?:2|10)\b|\btype\s*(?:2|10)\b"
+    r"|\binteractive logon\b|\brdp session from\b"
+    r"|\blogged ?in\b|\bauthenticated\b|\bsigned ?in\b)",
+    re.IGNORECASE,
+)
+
+# Tier B: noisier first-appearances — network/service logon, a first-seen
+# correspondent. Recorded with cue="appearance" for audit/debugging.
+_PRINCIPAL_APPEARANCE_CUE_RE = re.compile(
+    r"(?:\b4624\b|\b4625\b"
+    r"|\blogon type\s*3\b|\btype\s*3\b"
+    r"|\bnew (?:correspondent|sender|recipient|account name)\b"
+    r"|\bfirst (?:appears|seen|observed)\b"
+    r"|\bpreviously[- ]unseen\b|\bunfamiliar (?:account|user|identity)\b)",
+    re.IGNORECASE,
+)
+
+# Capture a principal's *name* from creation/identity/authentication context.
+# Group 1 = name after a cue word (account/user/principal/named/called);
+# group 2 = a quoted/backticked name immediately preceding "account"/"admin";
+# group 3 = a name immediately preceding an auth verb ("svc_x logged in",
+# "maint_op authenticated") — needed because an interactive-logon summary often
+# leads with the name and has no adjacent cue word.
+_ACCOUNT_NAME_RE = re.compile(
+    r"(?:\b(?:account|user|username|principal|named|called|subject|suspect)\s*:?\s+[\"'`]?"
+    r"([A-Za-z][\w.$-]{1,40})[\"'`]?)"
+    r"|(?:[\"'`]([A-Za-z][\w.$-]{1,40})[\"'`]\s+(?:account|admin))"
+    r"|(?:\b([A-Za-z][\w.$-]{1,40})\s+(?:logged ?in|authenticated|signed ?in))",
+    re.IGNORECASE,
+)
+
+
+def _extract_principal_tokens(text: str, require_cue: bool = True,
+                              cue: str = "creation") -> set[str]:
+    """Return new-principal tokens (uppercased account names, ``RID<n>``,
+    SIDs) appearing in ``text``.
+
+    ``require_cue=True`` (summary side): only emit tokens when the text also
+    carries a *cue* that this is a genuine new principal, not an ordinary
+    mention. ``cue`` selects which cue families gate (precision ↓ as breadth ↑):
+
+      - ``"creation"`` (default, back-compat): account-*creation* only
+        (4720 / "account created" / "new admin account" / covert/backdoor).
+      - ``"forced"``: creation OR interactive/RDP authentication (logon type
+        2/10, 4778/4779, "logged in") — the Tier-A "second operator" cues that
+        warrant a forced Triage push.
+      - ``"appearance"``: Tier-B first-appearance only (network logon type 3,
+        generic 4624/4625, first-seen correspondent).
+      - ``"any"``: union of all three.
+
+    The default stays ``"creation"`` so the conservative behaviour is unchanged
+    for every existing caller; candidate collection opts into ``"forced"`` /
+    ``"appearance"`` explicitly. ``require_cue=False`` (known side): extract any
+    named principal from case_context / prior investigation_focus / pivot focus
+    lines so it is excluded from the new set (and so report-time harvesting can
+    read surfaced principals back).
     """
-    queued: set[str] = set()
+    if not text:
+        return set()
+    if require_cue:
+        creation = _ACCOUNT_CREATION_CUE_RE.search(text)
+        interactive = _PRINCIPAL_INTERACTIVE_AUTH_CUE_RE.search(text)
+        appearance = _PRINCIPAL_APPEARANCE_CUE_RE.search(text)
+        if cue == "creation":
+            hit = creation
+        elif cue == "forced":
+            hit = creation or interactive
+        elif cue == "appearance":
+            hit = appearance
+        else:  # "any"
+            hit = creation or interactive or appearance
+        if not hit:
+            return set()
+    out: set[str] = set()
+    for m in _ACCOUNT_NAME_RE.finditer(text):
+        name = m.group(1) or m.group(2) or m.group(3)
+        if name and name.lower() not in _PRINCIPAL_STOP_WORDS:
+            out.add(name.upper())
+    for rid in re.findall(r"\bRID\s*(\d{3,})\b", text, re.IGNORECASE):
+        out.add(f"RID{rid}")
+    for sid in re.findall(r"\bS-1-5-[\d-]+\b", text):
+        out.add(sid.upper())
+    return out
+
+
+def _build_known_principal_set(case_context: str) -> set[str]:
+    """Principals already named in case_context or any prior dair_call
+    investigation_focus — the set a new principal is measured against. Uses
+    cue-free extraction so a principal already under investigation (its
+    controller question recorded in a focus line) counts as known."""
+    known: set[str] = set()
+    known |= _extract_principal_tokens(case_context or "", require_cue=False)
     try:
         from core.execution_log import log as _elog
         for e in _elog._entries:
             if e.get("type") != "dair_call":
                 continue
-            for h in e.get("pending_pivots") or []:
-                queued.add(str(h).upper())
+            focus = e.get("investigation_focus") or ""
+            known |= _extract_principal_tokens(focus, require_cue=False)
     except Exception as _read_err:
         import sys as _sys
-        print(f"[TRUDI WARN] dair queue read failed: {_read_err!r}",
+        print(f"[TRUDI WARN] dair principal-context read failed: {_read_err!r}",
               file=_sys.stderr)
-        return []
-    known = {h.upper() for h in _build_known_host_set(case_context)}
-    return sorted(queued - known)
+    return known
 
 
-# Pivot-detection allow-list. Hosts surfaced from these phases are eligible
-# for auto-push or queueing; Triage is excluded because Triage is *about* the
-# host already under investigation.
+# Candidate-detection allow-list. Hosts/principals surfaced from these phases
+# are eligible for candidate_pivots; Triage is excluded because Triage is
+# *about* the host/principal already under investigation.
 _PIVOT_ELIGIBLE_PHASES = frozenset({"Scan", "Analyze", "Collect"})
 
 
@@ -404,7 +535,8 @@ def _ask(system: str, user: str, max_tokens: int = 2048) -> dict:
 
 def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
               inputs: dict | None = None,
-              input_call_ids: list[int] | None = None) -> int:
+              input_call_ids: list[int] | None = None,
+              candidate_pivots: list[dict] | None = None) -> int:
     try:
         from core.execution_log import log
         return log.record_dair_call(
@@ -424,6 +556,7 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
             inputs=inputs,
             input_call_ids=input_call_ids,
             pending_pivots=assessment.get("pending_pivots") or None,
+            candidate_pivots=candidate_pivots,
         )
     except Exception as e:
         import sys
@@ -449,6 +582,28 @@ Nothing outside that list will be run.
 - Report phase only: priority_tools is empty; populate recommended_actions instead.
 - priority_tools is the complete work order — not a priority ranking. List every \
   tool needed to answer investigation_focus. The investigator runs them all.
+
+CURIOSITY BUDGET (directives.curiosity_budget):
+priority_tools is a convergent work order; on its own it drives single-actor \
+lock-in and shallow coverage. The curiosity_budget is its counterweight — the \
+number of read-only probes the investigator may run of their OWN choosing this \
+batch, on top of priority_tools, to chase a hunch about a LESS-OBVIOUS artifact. \
+Set it per batch:
+  - Triage / Analyze: 2-3 (these phases surface the leads worth chasing).
+  - Collect / Scan: 1-2.
+  - Report: 0 (the investigation is converging; no new exploration).
+Raise it (to 3) when the batch surfaced a NEW principal/identity, a coverage gap, \
+or an artifact that contradicts the working hypothesis — those are exactly the \
+moments to widen the look. A probe is read-only and cannot itself record a \
+finding, so granting budget never risks evidence integrity.
+ABSENCE-HYPOTHESIZE BEFORE TRANSITION: before you set transition_recommended=true \
+to leave a non-Report phase, OR when the Triage max-pass cap is about to force a \
+transition, FIRST put reason.hypothesize (mode="absence") at the front of \
+priority_tools — observation = the still-unresolved part of the case question, \
+evidence = the artifact categories already examined. It returns the untouched \
+high-value categories (second-principal logon source, a different SID's profile, \
+an alternate exfil channel, setupapi.dev.log) as probe candidates. This forces \
+one divergent look before the funnel closes. Skip it only in Report.
 
 IMPORTANT CONSTRAINTS:
 - TRUDI is a read-only forensic tool. Improve & Response actions are NEVER \
@@ -497,14 +652,15 @@ Cross-reference every found identity (email, username, screen name, cookie value
 against any suspect list provided in case_context before advancing.
   Analyze  — reason about the collected artifacts: process trees, network \
 connections, persistence mechanisms, TTPs. Each suspicious artifact should be \
-examined. A genuinely ambiguous artifact may push back to Triage before proceeding. \
-LATERAL-MOVEMENT PIVOTING: if Analyze surfaces a reference to a host other than \
-the one under investigation — remote logon (4624 type 3/10), SMB session, \
+examined. A genuinely ambiguous artifact may require more collection before \
+proceeding. \
+PIVOT CANDIDATES: if Analyze surfaces a reference to a host or principal other \
+than the one under investigation — remote logon (4624 type 3/10), SMB session, \
 mapped drive, inbound RDP, \\\\HOST\\share path in a command line or registry \
-value, named pipe to a remote endpoint — that host is a pivot. Do not wait for \
-Scan; the server-enforced auto-push will fire on the new host token and push a \
-fresh Triage onto the stack. Continue the current Analyze work order in parallel \
-where possible; the pivot Triage will be drained from the persistent queue. \
+value, named pipe to a remote endpoint, newly-created account, or first-seen \
+identity — treat it as a candidate pivot in your analysis. Do not assume that \
+the phase stack must change automatically; prescribe explicit evidence-gathering \
+tools only when the candidate matters to the case question. \
 ALSO run anti-forensics detectors here when the relevant input artifacts exist: \
 af.af_timestomp_drift (after ez.mftecmd CSV), af.af_event_log_clear (after \
 ez.evtxecmd), af.af_sysmon_evasion (after ez.recmd_hive SYSTEM), af.af_usn_gaps \
@@ -545,13 +701,19 @@ findings can use their _trudi_call_id as linked_call_id like any other tool.
 yara.scan_directory across all collected disk/memory, net.tcpdump_extract_dns \
 for exfil signatures, enrich.vt_lookup_hash and enrich.abuseipdb_check for \
 hashes/IPs the agent had no earlier reason to look up. This phase is the \
-safety net for IOCs the per-host Analyze passes did not surface — NOT the \
-gatekeeper of pivoting. Pivot hosts are now discovered in any phase that \
-surfaces a new host token (Collect, Analyze, Scan); the server-enforced \
-auto-push fires from each and persists overflow pivots to the pending_pivots \
-queue. Advance to Report when the cross-host sweep is exhausted and the \
-pivot queue has drained.
-  Report   — terminal phase. BEFORE reason.synthesize, call BOTH \
+safety net for IOCs the per-host Analyze passes did not surface. Candidate \
+pivots discovered during Scan are advisory metadata; they do not create a \
+server-enforced queue. Advance to Report when the cross-host sweep is exhausted \
+and all case-relevant candidates have either been investigated or explicitly \
+parked as out of scope / evidence unavailable.
+  Report   — terminal phase unless report review exposes unresolved evidence. \
+If reason.synthesize or reason.pre_report_check returns any BLOCKER / \
+ready_to_report=false issue that asks for missing evidence, do NOT try to satisfy \
+it by rephrasing findings. Set stack_action to "push" with next_phase="Collect" \
+or next_phase="Analyze" (whichever is the smallest phase that can gather or \
+reason over the missing artifact), and put the concrete missing tools in \
+directives.priority_tools. Only stay in Report for wording/citation cleanup when \
+no missing-evidence blocker remains. BEFORE reason.synthesize, call BOTH \
 coverage.coverage_report (TTP coverage checklist) AND attribution.attribute_actors \
 (adversary attribution from observed T-IDs) so the final synthesis input has the \
 complete picture. When findings span multiple hosts, ALSO call \
@@ -562,9 +724,9 @@ into a timeline. Emit Improve & Response recommendations for the IR team in \
 recommended_actions. Never direct containment or eradication tool calls.
 
 PHASE STACK:
-The phase_stack is the recursive history of the investigation. Newest entry is last. \
-Use it to understand depth and context. A stack ending in Triage inside a Scan means \
-a new pivot host was found and a full investigation cycle is running for that host.
+The phase_stack is the investigation phase history. Newest entry is last. \
+Use it to understand depth and context. Candidate pivots are separate metadata; \
+they do not automatically add Triage frames.
   stack_action "push"  → transition to next_phase; new entry added to stack
   stack_action "pop"   → current sub-phase resolved; resume the phase beneath
   stack_action "stay"  → continue in current_phase (e.g. challenges still pending)
@@ -636,20 +798,21 @@ DAIR_ASSESSMENT:
     "focus_pids": [],
     "focus_paths": [],
     "max_depth": "",
-    "next_hypothesis_triggers": []
+    "next_hypothesis_triggers": [],
+    "curiosity_budget": 0
   }
 }
 
 verification_challenges in DAIR_ASSESSMENT must mirror VERIFICATION_CHALLENGES block \
 exactly when in Triage phase. recommended_actions is populated ONLY when \
 transitioning to Report — list specific Improve & Response actions for the IR team. \
-Tool names in directives must use TRUDI MCP format: namespace.tool \
-(e.g. strings.stat_file, tsk.fls, vol.pslist, vol.netscan, ez.recmd_hive, \
-ez.mftecmd, ez.evtxecmd, yara.scan_directory, net.tcpdump_extract_dns, \
-enrich.vt_lookup_hash, enrich.vt_lookup_ip). \
+Tool names in directives must use TRUDI MCP format: namespace.tool and must \
+come from the Tool Capability Manifest below. \
 Remember: priority_tools is the investigator's complete work order for this batch. \
 Make it specific and executable — every entry will be run before you see results.\
 """
+
+_DAIR_SYS = _DAIR_SYS + "\n\n" + format_tool_manifest_for_prompt()
 
 
 # ── MCP tool ──────────────────────────────────────────────────────────────────
@@ -683,9 +846,9 @@ def dair_assess(
     stack_action "pop"   → remove top entry; resume parent phase
     stack_action "stay"  → no change to stack
 
-    Cycle: Triage → Collect → Analyze → Scan → (loop or Report)
-    Loop: when stack_action is "push" and next_phase is "Triage", a new pivot host
-    was discovered during Scan. Call reason.plan for the new host before proceeding.
+    Cycle: Triage → Collect → Analyze → Scan → Report. Candidate hosts or
+    principals may be returned in candidate_pivots, but they are advisory
+    observations and do not alter stack_action or next_phase.
 
     When stack_action is "push" and next_phase is "Triage": check
     verification_challenges for entries with verified=null and run the specified
@@ -722,55 +885,9 @@ def dair_assess(
         "phase_stack": stack,
         "case_context": context,
         "current_phase": current,
+        "tool_manifest_version": MANIFEST_VERSION,
         "user_message": user,
     }
-
-    # Persistent pivot-queue drain. If a prior dair_call queued overflow
-    # pivots (via the auto-push below) and none of them have been pivoted to
-    # yet, synthesize a Triage push for the next queued host and skip the
-    # model call entirely. This guarantees deterministic drain across turns
-    # and saves a model round-trip per queued pivot. Triage entries do NOT
-    # drain — Triage is the host investigation itself, not a transit phase.
-    if current != "Triage":
-        queued = _drain_queued_pivots(context)
-        if queued:
-            first_pivot = queued[0]
-            remaining = queued[1:]
-            from tools.reasoning import _EMPTY_DIRECTIVES
-            drain_assessment = {
-                **_EMPTY_ASSESSMENT,
-                "current_phase": current,
-                "phase_rationale": (
-                    f"Pivot queue non-empty ({len(queued)} host(s) pending) — "
-                    f"draining {first_pivot} before continuing {current}."
-                ),
-                "transition_recommended": True,
-                "next_phase": "Triage",
-                "transition_rationale": (
-                    f"Auto-drain: queued pivot host {first_pivot} from "
-                    f"prior pending_pivots (server-enforced, no model call)."
-                ),
-                "stack_action": "push",
-                "investigation_focus": (
-                    f"Triage pivot host {first_pivot} (drained from queue)"
-                ),
-                "directives": {
-                    **_EMPTY_DIRECTIVES,
-                    "priority_tools": ["reason.hypothesize", "reason.plan"],
-                },
-            }
-            if remaining:
-                drain_assessment["pending_pivots"] = remaining
-            call_id = _log_dair(drain_assessment, 0, 0,
-                                inputs=call_inputs,
-                                input_call_ids=input_call_ids)
-            return {
-                **drain_assessment,
-                "success": True,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "_trudi_call_id": call_id,
-            }
 
     backend_result = _ask(_DAIR_SYS, user, max_tokens=MAX_TOKENS_DAIR)
 
@@ -798,67 +915,49 @@ def dair_assess(
     if challenges:
         assessment["verification_challenges"] = challenges
 
-    # Cross-phase pivot auto-push. Any phase that surfaces a host token not
-    # in case_context or any prior investigation_focus treats that host as a
-    # new pivot. Two paths:
-    #   (a) model emitted "stay" — force a push to Triage for the first new
-    #       host; overflow goes into pending_pivots for the drain preamble
-    #       to process on subsequent calls.
-    #   (b) model emitted "push" to a non-Triage phase (advancing the
-    #       per-host pipeline, e.g. Analyze → Scan) — keep the model's push
-    #       intact (NEVER downgrade) but capture overflow new hosts into
-    #       pending_pivots so the queue still drains.
-    # Triage is excluded from both paths: Triage is *about* the host already
-    # under investigation, so its own focus shouldn't trigger a self-pivot.
+    candidate_pivots: list[dict] = []
+
+    # Cross-phase pivot observation. Any non-Triage phase may surface a host or
+    # principal worth follow-up, but this metadata must not rewrite the DAIR
+    # transition. The caller can inspect candidate_pivots and decide whether to
+    # investigate; the state machine remains model/agent-directed.
     if current in _PIVOT_ELIGIBLE_PHASES:
         summary_hosts = _extract_host_tokens(summary)
         known_hosts = _build_known_host_set(context)
-        new_pivots = sorted(summary_hosts - known_hosts)
-        if new_pivots:
-            action = assessment.get("stack_action")
-            next_phase = assessment.get("next_phase", "")
-            if action == "stay":
-                first_pivot = new_pivots[0]
-                remaining = new_pivots[1:]
-                assessment["transition_recommended"] = True
-                assessment["next_phase"] = "Triage"
-                assessment["stack_action"] = "push"
-                note = (
-                    f"Auto-pushed: {current} surfaced new host(s) "
-                    f"{', '.join(new_pivots)} not in case_context or prior "
-                    f"investigation_focus (server-enforced)."
-                )
-                prior_rationale = assessment.get("transition_rationale") or ""
-                assessment["transition_rationale"] = (
-                    f"{prior_rationale} {note}".strip()
-                    if prior_rationale else note
-                )
-                if remaining:
-                    assessment["pending_pivots"] = remaining
-                if not assessment.get("investigation_focus"):
-                    assessment["investigation_focus"] = (
-                        f"Triage pivot host {first_pivot} surfaced during {current}"
-                    )
-            elif action == "push" and next_phase != "Triage":
-                # Model is advancing the per-host pipeline (e.g. Collect →
-                # Analyze). Don't override — just enqueue the pivots so the
-                # drain preamble surfaces them after the model-directed push
-                # completes.
-                existing = list(assessment.get("pending_pivots") or [])
-                for h in new_pivots:
-                    if h not in existing:
-                        existing.append(h)
-                assessment["pending_pivots"] = existing
-                enq_note = (
-                    f"Enqueued pivot host(s) {', '.join(new_pivots)} surfaced "
-                    f"during {current}; will drain after current push completes "
-                    f"(server-enforced)."
-                )
-                prior_rationale = assessment.get("transition_rationale") or ""
-                assessment["transition_rationale"] = (
-                    f"{prior_rationale} {enq_note}".strip()
-                    if prior_rationale else enq_note
-                )
+        for h in sorted(summary_hosts - known_hosts):
+            candidate_pivots.append({
+                "kind": "host",
+                "value": h,
+                "source": "tool_results_summary",
+                "phase": current,
+            })
+
+        # A previously-unseen *principal* is also a follow-up candidate. The
+        # cue tier is preserved for audit/debugging, not control flow.
+        known_principals = _build_known_principal_set(context)
+        forced_principals = sorted(
+            _extract_principal_tokens(summary, cue="forced") - known_principals
+        )
+        appearance_principals = sorted(
+            _extract_principal_tokens(summary, cue="appearance")
+            - known_principals - set(forced_principals)
+        )
+        for p in forced_principals:
+            candidate_pivots.append({
+                "kind": "principal",
+                "value": p,
+                "source": "tool_results_summary",
+                "phase": current,
+                "cue": "forced",
+            })
+        for p in appearance_principals:
+            candidate_pivots.append({
+                "kind": "principal",
+                "value": p,
+                "source": "tool_results_summary",
+                "phase": current,
+                "cue": "appearance",
+            })
 
     # Guard: if all triage challenges resolved true but the assessment JSON failed
     # to parse (phase_rationale empty = _EMPTY_ASSESSMENT fallback), auto-satisfy.
@@ -884,19 +983,27 @@ def dair_assess(
     embedded = assessment.get("directives")
     if isinstance(embedded, dict) and embedded:
         from tools.reasoning import _EMPTY_DIRECTIVES
-        assessment["directives"] = {**_EMPTY_DIRECTIVES, **embedded}
+        assessment["directives"] = annotate_directives_with_manifest(
+            {**_EMPTY_DIRECTIVES, **embedded}
+        )
     else:
-        assessment["directives"] = _parse_directives(raw)
+        assessment["directives"] = annotate_directives_with_manifest(
+            _parse_directives(raw)
+        )
 
     tok_in  = backend_result.get("input_tokens", 0)
     tok_out = backend_result.get("output_tokens", 0)
     call_id = _log_dair(assessment, tok_in, tok_out, inputs=call_inputs,
-                        input_call_ids=input_call_ids)
+                        input_call_ids=input_call_ids,
+                        candidate_pivots=candidate_pivots)
 
-    return {
+    result = {
         **assessment,
         "success": True,
         "input_tokens": tok_in,
         "output_tokens": tok_out,
         "_trudi_call_id": call_id,
     }
+    if candidate_pivots:
+        result["candidate_pivots"] = candidate_pivots
+    return result

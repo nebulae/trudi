@@ -42,3 +42,24 @@ def most_recent_reason_call(window, tool_name: str) -> Optional[dict]:
         if entry.get("type") == "reason_call" and entry.get("tool") == tool_name:
             return entry
     return None
+
+
+def lineage_evidence_text(ctx) -> str:
+    """Concatenated evidence text a grounding gate may inspect for a required
+    marker: the agent-supplied ``supporting_evidence`` plus the ``cmd`` and
+    ``stdout_excerpt`` of every entry referenced by ``linked_call_id`` and
+    ``input_call_ids``. Used by grounding gates (principal_attribution_grounding,
+    exfil_channel_grounding) that demand the *evidence* — not merely the
+    description prose — carry a specific artifact marker."""
+    parts: list[str] = [ctx.supporting_evidence or ""]
+    cids = list(ctx.input_call_ids or [])
+    if ctx.linked_call_id:
+        cids.append(ctx.linked_call_id)
+    by_id = getattr(ctx.idx, "by_call_id", {}) or {}
+    for cid in cids:
+        entry = by_id.get(cid)
+        if not entry:
+            continue
+        parts.append(entry.get("cmd") or "")
+        parts.append(entry.get("stdout_excerpt") or "")
+    return " \n ".join(p for p in parts if p)

@@ -65,7 +65,7 @@ class TestPhotorec:
     def test_photorec_output_safe(self):
         from tools.imaging import photorec_carve
         with pytest.raises(Exception):
-            photorec_carve("/evidence/image.E01", "/cases/srl/evidence/carved")
+            photorec_carve("/evidence/image.E01", "/cases/example/evidence/carved")
 
     def test_photorec_allowed(self, mock_run, tmp_path):
         from tools.imaging import photorec_carve
