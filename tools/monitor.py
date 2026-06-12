@@ -36,11 +36,16 @@ CASES_ROOT = Path(os.environ.get("TRUDI_CASES_ROOT") or os.path.expanduser("~/ca
 
 # Snapshot artifacts collected during baseline_capture. Each one's rows feed
 # a slice of the baseline allowlist.
+# Persistence is NOT captured from Linux.Sys.Crontab — that parses cron
+# *schedules* (empty on a stock box) and never matches the file-glob the
+# NewPersistence detector watches, which made the allowlist empty and every
+# stock cron/systemd file a false positive. Instead baseline_capture collects
+# Custom.TRUDI.PersistenceSnapshot, which globs the identical surface.
 BASELINE_ARTIFACTS = [
     "Linux.Sys.Pslist",
-    "Linux.Sys.Crontab",
     "Linux.Network.Netstat",
 ]
+PERSISTENCE_SNAPSHOT_ARTIFACT = "Custom.TRUDI.PersistenceSnapshot"
 
 
 # ── Filesystem helpers ──────────────────────────────────────────────────────
@@ -313,7 +318,9 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
     if not client_id.startswith("C."):
         return {"success": False, "error": f"client_id must look like 'C.xxx', got {client_id!r}"}
 
-    from tools.velo import collect_artifact, wait_for_flow, get_collection_results
+    from tools.velo import (collect_artifact, wait_for_flow, get_collection_results,
+                            upload_artifact_yaml)
+    from monitoring import render
 
     _ensure_layout(case_id)
 
@@ -340,6 +347,44 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
         results = get_collection_results(client_id, fid, artifact)
         flow_results[artifact] = results.get("rows") or []
 
+    # Persistence allowlist: collect the PersistenceSnapshot helper, which globs
+    # the SAME surface the NewPersistence detector watches (so the allowlist
+    # matches exactly). Upload it first (idempotent), then collect with the
+    # canonical WatchDirs.
+    snap_yaml = (render.ARTIFACTS_DIR / f"{PERSISTENCE_SNAPSHOT_ARTIFACT}.yaml").read_text()
+    snap_upload = upload_artifact_yaml(snap_yaml)
+    if not snap_upload.get("success"):
+        return {
+            "success": False,
+            "error": f"failed to upload {PERSISTENCE_SNAPSHOT_ARTIFACT}: "
+                     f"{snap_upload.get('stderr') or snap_upload.get('error')}",
+            "_partial_results": flow_results,
+        }
+    snap_kick = collect_artifact(
+        client_id, PERSISTENCE_SNAPSHOT_ARTIFACT,
+        parameters={"WatchDirs": json.dumps(render.PERSISTENCE_WATCH_GLOBS)},
+    )
+    if not snap_kick.get("success") or not snap_kick.get("flow_id"):
+        return {
+            "success": False,
+            "error": f"failed to collect {PERSISTENCE_SNAPSHOT_ARTIFACT}: "
+                     f"{snap_kick.get('stderr') or snap_kick.get('error')}",
+            "_partial_results": flow_results,
+        }
+    snap_fid = snap_kick["flow_id"]
+    flow_ids.append(snap_fid)
+    snap_done = wait_for_flow(client_id, snap_fid, timeout_seconds=timeout_seconds)
+    if not snap_done.get("success") or snap_done.get("final_state") != "FINISHED":
+        return {
+            "success": False,
+            "error": f"flow {snap_fid} ({PERSISTENCE_SNAPSHOT_ARTIFACT}) did not finish: "
+                     f"{snap_done.get('error') or snap_done.get('stderr')}",
+            "_partial_results": flow_results,
+        }
+    flow_results[PERSISTENCE_SNAPSHOT_ARTIFACT] = (
+        get_collection_results(client_id, snap_fid, PERSISTENCE_SNAPSHOT_ARTIFACT).get("rows") or []
+    )
+
     process_names: set[str] = set()
     image_paths: set[str] = set()
     for row in flow_results.get("Linux.Sys.Pslist", []):
@@ -351,9 +396,11 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
             image_paths.add(row["Exe"])
 
     persistence_paths: set[str] = set()
-    for row in flow_results.get("Linux.Sys.Crontab", []):
-        if row.get("Path"):
-            persistence_paths.add(row["Path"])
+    for row in flow_results.get(PERSISTENCE_SNAPSHOT_ARTIFACT, []):
+        # The snapshot returns `path` (FullPath); tolerate either key.
+        p = row.get("path") or row.get("FullPath")
+        if p:
+            persistence_paths.add(p)
 
     endpoints: list[dict] = []
     for row in flow_results.get("Linux.Network.Netstat", []):

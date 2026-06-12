@@ -1,0 +1,29 @@
+name: Custom.TRUDI.PersistenceSnapshot
+description: |
+  TRUDI baseline helper: a ONE-SHOT enumeration of the cron/systemd
+  persistence surface, using the SAME glob as the Custom.TRUDI.NewPersistence
+  detector. monitor.baseline_capture collects this and records every returned
+  path as the known-good allowlist, so the detector (which flags files NOT in
+  that allowlist) doesn't fire on the host's pre-existing system files.
+
+  WatchDirs is passed in by baseline_capture from
+  monitoring/render.py:PERSISTENCE_WATCH_GLOBS — the same constant the detector
+  template is rendered with — so the two globs can never drift.
+
+type: CLIENT
+
+parameters:
+  - name: WatchDirs
+    description: JSON array of glob patterns (must match the NewPersistence detector).
+    default: |
+      ["/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*", "/etc/cron.weekly/*", "/etc/cron.monthly/*", "/etc/systemd/system/*", "/var/spool/cron/crontabs/*"]
+
+sources:
+  - query: |
+      LET watch <= parse_json_array(data=WatchDirs)
+      SELECT
+        FullPath AS path,
+        Size,
+        Mtime AS mtime_utc
+      FROM glob(globs=watch, accessor="auto")
+      WHERE Mode.IsDir = FALSE
