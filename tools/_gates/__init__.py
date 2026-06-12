@@ -14,19 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional, Any
 
-from . import (
-    mcp_routing,
-    dair_required,
-    confirmed_requires_linked_call_id,
-    linked_call_id_must_exist,
-    mitre_technique_validation,
-    confirmed_requires_supported_evaluate,
-    confidence_and_citation,
-    hypothesize_required,
-    attribution_required,
-    lineage_required,
-    negative_from_truncated,
-)
+from . import mcp_routing, dair_required, lineage_required, contracts
 
 
 @dataclass
@@ -81,22 +69,16 @@ class GateContext:
 
 GateFn = Callable[[GateContext], Optional[dict]]
 
-# Ordering is load-bearing — mcp_routing must run first so its specific message
-# wins over the generic dair_required refusal. Tier-specific gates come last so
-# infrastructure problems (DAIR not started, invalid linked_call_id) refuse before
-# we burn cycles on adversarial-review lookups.
+# Ordering is load-bearing. Infrastructure refusals run first; broad evidence
+# contracts then run from cheapest/most universal to most claim-specific.
 GATES: list[tuple[str, GateFn]] = [
     ("mcp_routing", mcp_routing.check),
     ("dair_required", dair_required.check),
     ("lineage_required", lineage_required.check),
-    ("confirmed_requires_linked_call_id", confirmed_requires_linked_call_id.check),
-    ("linked_call_id_must_exist", linked_call_id_must_exist.check),
-    ("negative_from_truncated", negative_from_truncated.check),
-    ("mitre_technique_validation", mitre_technique_validation.check),
-    ("confirmed_requires_supported_evaluate", confirmed_requires_supported_evaluate.check),
-    ("confidence_and_citation", confidence_and_citation.check),
-    ("hypothesize_required", hypothesize_required.check),
-    ("attribution_required", attribution_required.check),
+    ("evidence_strength", contracts.evidence_strength),
+    ("completeness", contracts.completeness),
+    ("attribution", contracts.attribution),
+    ("transfer", contracts.transfer),
 ]
 
 

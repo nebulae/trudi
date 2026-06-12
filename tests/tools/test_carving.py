@@ -14,7 +14,7 @@ class TestBulkExtractor:
     def test_output_dir_evidence_blocked(self):
         from tools.carving import bulk_extractor_scan
         with pytest.raises(Exception):
-            bulk_extractor_scan("/evidence/image.E01", "/cases/srl/evidence/bulk")
+            bulk_extractor_scan("/evidence/image.E01", "/cases/example/evidence/bulk")
 
     def test_basic_scan(self, mock_run, tmp_path):
         from tools.carving import bulk_extractor_scan
@@ -42,7 +42,7 @@ class TestForemost:
     def test_evidence_output_blocked(self):
         from tools.carving import foremost_carve
         with pytest.raises(Exception):
-            foremost_carve("/evidence/image.E01", "/cases/srl/evidence/foremost")
+            foremost_carve("/evidence/image.E01", "/cases/example/evidence/foremost")
 
     def test_basic_carve(self, mock_run, tmp_path):
         from tools.carving import foremost_carve
@@ -63,7 +63,7 @@ class TestScalpel:
     def test_evidence_output_blocked(self):
         from tools.carving import scalpel_carve
         with pytest.raises(Exception):
-            scalpel_carve("/evidence/image.E01", "/cases/srl/evidence/scalpel")
+            scalpel_carve("/evidence/image.E01", "/cases/example/evidence/scalpel")
 
     def test_basic_carve(self, mock_run, tmp_path):
         from tools.carving import scalpel_carve

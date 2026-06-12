@@ -44,9 +44,11 @@ def test_trace_viewer_links_to_chain():
     assert "chain_view.html" in body
     assert "Chain ↗" in body
     assert "updateGraphLink" in body  # kept the function name; just retargeted
-    # IR velocity pills still present
-    for metric_id in ["metric-ttf", "metric-tta", "metric-tts", "metric-wall"]:
-        assert metric_id in body, f"metric {metric_id} missing from trace_viewer"
+    # Wall-clock pill stays; the TTF/TT-A/TT-S velocity pills and the
+    # CrowdStrike/Horizon3 benchmark were removed per operator request.
+    assert "metric-wall" in body, "metric-wall missing from trace_viewer"
+    for gone in ["metric-ttf", "metric-tta", "metric-tts", "CrowdStrike", "Horizon"]:
+        assert gone not in body, f"{gone} should have been removed from trace_viewer"
 
 
 def test_chain_view_served_under_dashboard_prefix(tmp_path, monkeypatch):

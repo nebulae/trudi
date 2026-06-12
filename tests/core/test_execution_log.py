@@ -742,7 +742,7 @@ class TestSelfCorrection:
         l.configure("SC-001", str(tmp_path / "trace.json"))
         cid = l.record_self_correction(
             trigger="evaluate_challenged",
-            prior_belief="STUN.exe is a CrimsonOsprey C2 implant",
+            prior_belief="STUN.exe is a RedFox C2 implant",
             new_belief="STUN.exe identity refuted by missing API hooks",
             evidence="vol.malfind shows no inject markers",
         )
@@ -1103,7 +1103,7 @@ class TestDairPhaseStamping:
 
     def test_pop_with_next_phase_targets_the_named_phase(self, tmp_path):
         """pop → Report should land on Report even if Collect/Analyze are on top.
-        Matches the SRL-2018 live trace pattern: agent in Analyze pops → Report."""
+        Matches the EXAMPLE-CASE live trace pattern: agent in Analyze pops → Report."""
         l = ExecutionLog()
         l.configure("PHASE-008", str(tmp_path / "trace.json"))
         # Build the stack: Triage → Collect → Analyze → Scan → Report → Collect → Analyze

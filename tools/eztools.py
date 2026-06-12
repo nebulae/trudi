@@ -15,6 +15,42 @@ def _ez(dll: str, args: list[str], output_dir: Optional[str] = None, timeout: in
     return run_dotnet(dll, args, timeout=timeout, output_dir=output_dir)
 
 
+def _attach_evtx_coverage(result: dict, output_dir: str, output_file: str) -> None:
+    """Stamp the parsed log's event time-range (min/max TimeCreated) onto the
+    tool_call entry as `coverage_window`, so the negative_completeness gate can
+    tell whether the log actually covers a claim's window — a log that is silent
+    about the window cannot ground a negative. Best-effort; never raises."""
+    try:
+        cid = result.get("_trudi_call_id")
+        if not cid:
+            return
+        import csv as _csv
+        import os as _os
+        path = _os.path.join(output_dir, output_file)
+        if not _os.path.exists(path):
+            return
+        start = end = None
+        with open(path, newline="", encoding="utf-8", errors="replace") as fh:
+            rdr = _csv.DictReader(fh)
+            col = next((c for c in (rdr.fieldnames or [])
+                        if c.lstrip("﻿").strip().lower() == "timecreated"), None)
+            if not col:
+                return
+            for row in rdr:
+                ts = (row.get(col) or "").strip()
+                if not ts:
+                    continue
+                if start is None or ts < start:
+                    start = ts
+                if end is None or ts > end:
+                    end = ts
+        if start and end:
+            from core.execution_log import log
+            log.annotate_tool_call(cid, coverage_window={"start": start, "end": end})
+    except Exception:
+        pass
+
+
 # ── MFT ──────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -69,7 +105,9 @@ def ez_evtxecmd(
     args = [flag, evtx_path, "--csv", output_dir, "--csvf", output_file, "--maps", maps_dir]
     if event_ids:
         args += ["--inc", event_ids]
-    return _ez(f"{EZ}/EvtxeCmd/EvtxECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
+    result = _ez(f"{EZ}/EvtxeCmd/EvtxECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
+    _attach_evtx_coverage(result, output_dir, output_file)
+    return result
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

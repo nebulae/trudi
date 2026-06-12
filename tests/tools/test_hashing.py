@@ -123,7 +123,7 @@ class TestHashDirectory:
 
     def test_output_manifest_evidence_path_blocked(self, tmp_path):
         with pytest.raises(ValueError, match="protected evidence"):
-            hash_directory(str(tmp_path), output_manifest="/cases/srl/manifest.csv")
+            hash_directory(str(tmp_path), output_manifest="/cases/example/manifest.csv")
 
     def test_non_recursive(self, tmp_path):
         sub = tmp_path / "sub"

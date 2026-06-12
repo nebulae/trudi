@@ -5,6 +5,10 @@ import json
 from fastmcp import FastMCP
 from core.paths import REASON_TIMEOUT
 from core.timeout import with_tool_timeout
+from tools.tool_capabilities import (
+    annotate_directives_with_manifest,
+    format_tool_manifest_for_prompt,
+)
 
 # Watchdog budget: HTTP timeout (REASON_TIMEOUT, 90s default) handles a stalled
 # local LLM; the watchdog gives a 30s buffer for parsing, trace-logging, and
@@ -66,6 +70,11 @@ _EMPTY_DIRECTIVES: dict = {
     "focus_paths": [],
     "max_depth": "",
     "next_hypothesis_triggers": [],
+    # Exploratory allowance: the number of read-only "curiosity_probe" calls the
+    # agent may run of its OWN choosing this batch, on top of priority_tools.
+    # Granted by dair_assess, refreshed each call. 0 ⇒ today's strict
+    # directive-only behavior. Enforced by tools/_gates/curiosity_budget.py.
+    "curiosity_budget": 0,
 }
 
 _DIRECTIVES_INSTRUCTION = """\
@@ -82,12 +91,11 @@ DIRECTIVES:
   "next_hypothesis_triggers": []
 }
 Replace the example values with your actual recommendations. \
-Tool names must use TRUDI MCP format: namespace.tool \
-(e.g. vol.psscan, vol.cmdline, vol.netscan, vol.dlllist, vol.malfind, \
-ez.amcacheparser, ez.appcompatcacheparser, ez.mftecmd, ez.evtxecmd, \
-tsk.fls, tsk.icat, misc.regripper_hive, misc.evtx_dump, \
-enrich.vt_lookup_hash, enrich.vt_lookup_ip). \
-Do not invent tool names outside this list."""
+Tool names must use TRUDI MCP format: namespace.tool and must come from the \
+Tool Capability Manifest. \
+Do not invent tool names outside this list.
+
+""" + format_tool_manifest_for_prompt(max_tools_per_capability=6)
 
 
 _EVIDENCE_AUDIT_INSTRUCTION = """\
@@ -161,20 +169,20 @@ def _parse_directives(text: str) -> dict:
     On successful parse, missing keys are filled from the template.
     """
     if not text:
-        return _EMPTY_DIRECTIVES.copy()
+        return annotate_directives_with_manifest(_EMPTY_DIRECTIVES.copy())
     match = re.search(
         r"\*{0,2}DIRECTIVES\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\{.*?\})\s*(?:```)?",
         text,
         re.DOTALL | re.IGNORECASE,
     )
     if not match:
-        return _EMPTY_DIRECTIVES.copy()
+        return annotate_directives_with_manifest(_EMPTY_DIRECTIVES.copy())
     raw = match.group(1)
     raw = re.sub(r"\s*//[^\n]*", "", raw)  # strip // comments
     try:
-        return {**_EMPTY_DIRECTIVES, **json.loads(raw)}
+        return annotate_directives_with_manifest({**_EMPTY_DIRECTIVES, **json.loads(raw)})
     except (json.JSONDecodeError, ValueError):
-        return _EMPTY_DIRECTIVES.copy()
+        return annotate_directives_with_manifest(_EMPTY_DIRECTIVES.copy())
 
 
 def _cap_lines(text: str, max_lines: int) -> str:
@@ -364,7 +372,7 @@ def _log_reason(tool_name: str, result: dict,
                 input_call_ids: list[int] | None = None) -> None:
     try:
         from core.execution_log import log
-        log.record_reason_call(
+        cid = log.record_reason_call(
             tool=tool_name,
             success=result.get("success", False),
             conclusion=result.get("conclusion", ""),
@@ -376,6 +384,8 @@ def _log_reason(tool_name: str, result: dict,
             inputs=result.get("inputs"),
             input_call_ids=input_call_ids,
         )
+        if cid:
+            result["_trudi_call_id"] = cid
     except Exception as e:
         import sys
         print(f"[TRUDI WARN] _log_reason failed for {tool_name}: {e}", file=sys.stderr)
@@ -428,16 +438,51 @@ _HYPOTHESIZE_SYS = (
     "and what evidence would confirm or rule it out.\n"
     "Keep your response concise and structured.\n"
     "The DIRECTIVES block is the primary output — populate priority_tools with the "
-    "tools that would most efficiently confirm or rule out the top hypothesis, and "
-    "next_hypothesis_triggers with conditions that should prompt re-evaluation.\n"
+    "discriminators that resolve the TOP TWO competing hypotheses: the artifacts "
+    "that decide WHICH hypothesis is true (e.g. logon type/source, USB serials "
+    "across profiles, registry account bindings like OneDrive), not just tools that "
+    "support the leading one. Populate next_hypothesis_triggers with conditions "
+    "that should prompt re-evaluation.\n"
     "IMPORTANT: priority_tools MUST be non-empty if your conclusion names specific "
     "search patterns, artifact types, or investigative steps. Convert every concrete "
     "recommendation in your conclusion text into a priority_tools entry. Examples: "
-    "if you write 'search for tuckrige in Yahoo traffic', add "
-    "net.ngrep_search(pattern='tuckrige'); if you write 'check Yahoo Mail cookies', "
-    "add net.ngrep_search(pattern='Cookie: Y=') and net.tcpdump_extract_http. "
+    "if you write 'search for the suspect username in webmail traffic', add "
+    "net.ngrep_search(pattern='<username>'); if you write 'check webmail cookies', "
+    "add net.ngrep_search(pattern='Cookie:') and net.tcpdump_extract_http. "
     "An empty priority_tools alongside a conclusion that contains investigative "
     "recommendations is invalid — the structured directive must reflect the text."
+    + _DIRECTIVES_INSTRUCTION
+)
+
+# Absence-seeded mode. The presence-mode prompt above reasons over what was
+# already surfaced; this one reasons over what is MISSING. It is the structural
+# counterweight to single-actor lock-in and shallow coverage: it generates leads
+# about evidence that has NOT yet been looked at, which is where less-obvious
+# identity / attribution / exfil / second-principal evidence lives.
+_HYPOTHESIZE_ABSENCE_SYS = (
+    "You are a senior DFIR analyst doing a DIFFERENTIAL coverage review of a "
+    "live investigation. You are given the case question, the part of it still "
+    "UNRESOLVED, and the list of artifact categories ALREADY examined. Your job "
+    "is NOT to re-explain what was found — it is to name the high-value artifact "
+    "categories that have NOT yet been touched and could carry decisive evidence "
+    "for the unresolved question, especially:\n"
+    "  - IDENTITY / ATTRIBUTION (a second SID's profile, cookies, cert CNs, "
+    "comms-store correspondents, USB serials across profiles)\n"
+    "  - A SECOND PRINCIPAL (a newly-created or unseen account, a logon from an "
+    "unexpected source/type, a controller binding not yet established)\n"
+    "  - AN ALTERNATE EXFIL CHANNEL ranked weaker-evidenced but unchecked "
+    "(removable-media LNK/MountedDevices, FTP/transfer logs, cloud-client DB, "
+    "mail attachment, web upload) — a transfer artifact, not mere staging\n"
+    "  - INGRESS / INITIAL ACCESS overlooked by an egress-only lens "
+    "(setupapi.dev.log HID/composite / BadUSB when removable media is in evidence)\n"
+    "For each gap, state the one finding it would most plausibly produce and rank "
+    "by EXPECTED INFORMATION GAIN for the unresolved question — not by ease.\n"
+    "Do not propose categories already in the examined list. If a category was "
+    "examined but only sampled (first instance only), it IS a valid gap — say so.\n"
+    "The DIRECTIVES block is the primary output — populate priority_tools with one "
+    "concrete TRUDI MCP call per gap, highest-information-gain first. These become "
+    "the investigator's curiosity probes; keep the list to the top 3-5. Populate "
+    "next_hypothesis_triggers with the result conditions that would open a new line."
     + _DIRECTIVES_INSTRUCTION
 )
 
@@ -534,30 +579,124 @@ def reason_plan(case_description: str, evidence_available: str,
                 input_call_ids=input_call_ids)
 
 
+# ── Per-hypothesis split (sub-hypothesis tracking) ───────────────────────────
+# reason_hypothesize returns N ranked alternatives in ONE call under ONE
+# hypothesis_id. Parse them into individually-trackable records so the
+# exhaustion gate can require EACH contested principal to be driven to a verdict
+# (not just the leading one). Header form: "H1 — <title> (Likelihood: <level>)".
+_SUB_HYP_HEADER_RE = re.compile(
+    r"^\s*H(\d+)\s*[—–:\-]\s*(.+?)\s*\(\s*Likelihood\s*:\s*([A-Za-z/\- ]+?)\s*\)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_SUB_ENTITY_STOP = frozenset({
+    "PC", "IT", "THE", "THIS", "THAT", "NEW", "ADMIN", "USER", "SERVICE",
+    "DEFAULT", "SYSTEM", "NAME", "ACCOUNT", "PRINCIPAL",
+})
+_SUB_BUILTIN_ACCTS = ("guest", "administrator", "defaultaccount", "homegroupuser",
+                      "wdagutilityaccount", "krbtgt")
+
+
+def _sub_hyp_tier(level: str) -> str:
+    """Normalise a likelihood string to HIGH/MEDIUM/LOW ('MEDIUM-HIGH'→HIGH,
+    'LOW-MEDIUM'→MEDIUM, unknown→MEDIUM so it must still be resolved)."""
+    l = (level or "").lower()
+    if "high" in l:
+        return "HIGH"
+    if "med" in l:
+        return "MEDIUM"
+    if "low" in l:
+        return "LOW"
+    return "MEDIUM"
+
+
+def _sub_hyp_entities(block: str) -> list[str]:
+    """Principal/account tokens a sub-hypothesis contests: quoted account names
+    and built-in account names. Quoting is how analysts mark a real account
+    (e.g. 'svc_backup'); built-ins (Guest/Administrator) are valid subjects.
+    Deliberately does NOT scrape 'X account' — that is descriptive noise
+    ('OneDrive account binding', 'malware-created account')."""
+    ents: set[str] = set()
+    for m in re.finditer(r"[`'\"]([A-Za-z][\w.$-]{2,40})[`'\"]", block):
+        ents.add(m.group(1).upper())
+    low = block.lower()
+    for b in _SUB_BUILTIN_ACCTS:
+        if re.search(r"\b" + re.escape(b) + r"\b", low):
+            ents.add(b.upper())
+    return sorted(e for e in ents if e not in _SUB_ENTITY_STOP)
+
+
+def _parse_sub_hypotheses(conclusion: str, hid: str) -> list[dict]:
+    """Split a hypothesize conclusion's ranked 'H1 — … (Likelihood: …)' blocks
+    into per-hypothesis records {sub_id,label,title,likelihood_tier,entities}.
+    Returns [] when fewer than 2 parse, so callers fall back to per-call-id
+    tracking (non-breaking for differently-formatted output)."""
+    if not conclusion:
+        return []
+    matches = list(_SUB_HYP_HEADER_RE.finditer(conclusion))
+    if len(matches) < 2:
+        return []
+    subs: list[dict] = []
+    for i, m in enumerate(matches):
+        n = m.group(1)
+        title = (m.group(2) or "").strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(conclusion)
+        block = title + "\n" + conclusion[start:end]
+        subs.append({
+            "sub_id": f"{hid}.{n}",
+            "label": f"H{n}",
+            "title": title[:160],
+            "likelihood_tier": _sub_hyp_tier(m.group(3)),
+            "entities": _sub_hyp_entities(block),
+        })
+    return subs
+
+
 @mcp.tool()
 @with_tool_timeout(_REASON_WATCHDOG, label="reason_hypothesize")
 def reason_hypothesize(observation: str, evidence: str = "", context: str = "",
+                       mode: str = "presence",
                        input_call_ids: list[int] | None = None) -> dict:
     """
-    Generate ranked alternative hypotheses for a forensic observation before
-    committing to an interpretation. Call this when a finding has multiple
-    plausible explanations — malicious and benign.
+    Generate ranked hypotheses to guide the investigation. Two modes:
 
-    observation: the single behaviour or artifact being explained (one sentence,
-                 e.g. "cmd.exe PID 5024 spawned from orphaned PPID 2748 in Session 0")
-    evidence: raw artifact list supporting the observation (tool output excerpts,
-              event IDs, timestamps — paste verbatim)
-    context: broader case context (OS, known attacker TTPs, incident timeline)
-    input_call_ids: REQUIRED — list of _trudi_call_id values for the tool calls
-        that produced the observation/evidence.
+    mode="presence" (default) — ranked alternative explanations (malicious and
+    benign) for an artifact you HAVE surfaced. Call when a finding has multiple
+    plausible interpretations.
+      observation: the single behaviour/artifact being explained (one sentence,
+                   e.g. "cmd.exe PID 5024 spawned from orphaned PPID 2748")
+      evidence:    raw artifact list supporting it (tool output, EIDs, timestamps)
+
+    mode="absence" — DIFFERENTIAL coverage review: what high-value artifact
+    category has NOT been examined that could carry decisive identity /
+    attribution / second-principal / alternate-exfil evidence for the unresolved
+    question. Returns probe candidates in priority_tools. Fire this before any
+    phase-out / Triage max-pass-cap transition, and whenever coverage feels thin.
+      observation: the UNRESOLVED part of the case question (one sentence)
+      evidence:    the artifact categories ALREADY examined (so it proposes gaps)
+
+    context: broader case context (OS, known TTPs, incident timeline, roster).
+    input_call_ids: REQUIRED — _trudi_call_id values for the calls that informed this.
+
+    The returned hypothesis_id should be passed as `seeded_by` to any
+    misc.record_curiosity_probe spawned from an absence-mode gap.
     """
-    user = f"OBSERVATION:\n{observation}"
-    if evidence:
-        user += f"\n\nSUPPORTING EVIDENCE:\n{evidence}"
-    if context:
-        user += f"\n\nCASE CONTEXT:\n{context}"
+    if mode == "absence":
+        user = f"UNRESOLVED QUESTION:\n{observation}"
+        if evidence:
+            user += f"\n\nARTIFACT CATEGORIES ALREADY EXAMINED:\n{evidence}"
+        if context:
+            user += f"\n\nCASE CONTEXT:\n{context}"
+        system = _HYPOTHESIZE_ABSENCE_SYS
+    else:
+        user = f"OBSERVATION:\n{observation}"
+        if evidence:
+            user += f"\n\nSUPPORTING EVIDENCE:\n{evidence}"
+        if context:
+            user += f"\n\nCASE CONTEXT:\n{context}"
+        system = _HYPOTHESIZE_SYS
     hid = _next_hypothesis_id()
-    result = _ask(_HYPOTHESIZE_SYS, user, max_tokens=MAX_TOKENS_HYPOTHESIZE,
+    result = _ask(system, user, max_tokens=MAX_TOKENS_HYPOTHESIZE,
                   _tool_name="reason_hypothesize", hypothesis_id=hid,
                   input_call_ids=input_call_ids)
 
@@ -590,11 +729,31 @@ def reason_hypothesize(observation: str, evidence: str = "", context: str = "",
                 tool_name = m.group(1)
                 if tool_name not in extracted:
                     extracted.append(tool_name)
-            # Pattern C: HTTP cookie / session keywords trigger session inventory
-            if _re.search(r"\b(cookie|session|webmail|gmail|yahoo|hotmail|aol|facebook)\b",
-                          conclusion, _re.IGNORECASE):
+            # Pattern C: HTTP cookie / webmail keywords trigger session inventory.
+            # Bare "session" — meaning a *logon* session — must NOT pull an HTTP
+            # PCAP tool; that misfire emitted net.http_session_inventory for a
+            # logon-session (not web-session) hypothesis.
+            if _re.search(
+                r"\b(cookie|webmail|gmail|yahoo|hotmail|aol|http session|web session)\b",
+                conclusion, _re.IGNORECASE,
+            ):
                 if "net.http_session_inventory" not in extracted:
                     extracted.append("net.http_session_inventory")
+            # Pattern D: identity-discriminator phrases → the EZ/misc tool that
+            # extracts them, so the top-two competing hypotheses' discriminators
+            # become the actual work order (not a generic sweep). Closes the
+            # breakpoint where the model's confirm/rule-out recipe was dropped.
+            for _rx, _tool in (
+                (r"onedrive|account binding|registry .*account|cloud account|liveid", "ez.recmd_hive"),
+                (r"\busb\b|usbstor|device serial|removable .*serial|usb serial", "misc.usbdeviceforensics"),
+                (r"logon type|logon source|\b4624\b|\b4625\b|interactive logon|source address", "ez.evtxecmd"),
+                (r"prefetch|run count", "ez.pecmd"),
+                (r"shellbag", "ez.sbecmd"),
+                (r"userassist", "misc.regripper_hive"),
+                (r"amcache", "ez.amcacheparser"),
+            ):
+                if _re.search(_rx, conclusion, _re.IGNORECASE) and _tool not in extracted:
+                    extracted.append(_tool)
             # Cap to avoid runaway
             extracted = extracted[:12]
             if extracted:
@@ -607,6 +766,24 @@ def reason_hypothesize(observation: str, evidence: str = "", context: str = "",
         import sys as _sys
         print(f"[TRUDI WARN] hypothesize conclusion post-processor failed: {_ge}",
               file=_sys.stderr)
+
+    # ── Per-hypothesis split (Part 1) ───────────────────────────────────────
+    # Parse the ranked H1…Hn alternatives into individually-trackable records and
+    # persist them on this reason_call entry so the exhaustion gate can require
+    # each contested principal to reach a verdict (not just the leading one).
+    try:
+        subs = _parse_sub_hypotheses(result.get("conclusion", "") or "",
+                                     result.get("hypothesis_id", "") or "")
+        if subs:
+            cid = result.get("_trudi_call_id")
+            if cid:
+                from core.execution_log import log as _elog
+                _elog.update_reason_call(cid, sub_hypotheses=subs,
+                                         directives=result.get("directives"))
+            result["sub_hypotheses"] = subs
+    except Exception as _se:
+        import sys as _sys
+        print(f"[TRUDI WARN] hypothesize sub-split failed: {_se}", file=_sys.stderr)
 
     return result
 
@@ -1166,6 +1343,37 @@ def reason_pre_report_check() -> dict:
     if not has_synthesize:
         issues.append("reason.synthesize was not called — mandatory before writing report")
 
+    latest_synthesize = ""
+    for e in reversed(entries):
+        if e.get("type") == "reason_call" and e.get("tool") == "reason_synthesize":
+            latest_synthesize = e.get("conclusion") or ""
+            break
+    if latest_synthesize:
+        m = re.search(
+            r"(?:^|\n)\s*BLOCKERS?(?:\s*\([^)]*\))?\s*:\s*(.*?)(?=\n\s*[A-Z][A-Z _-]{2,}(?:\s*\([^)]*\))?\s*:|\Z)",
+            latest_synthesize,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            blocker_text = m.group(1).strip()
+            if blocker_text and not re.fullmatch(
+                r"(?:none|no blockers?|n/a|not applicable)[.\s-]*",
+                blocker_text,
+                re.IGNORECASE,
+            ):
+                issues.append(
+                    "Latest reason.synthesize still lists BLOCKERS. Resolve the "
+                    "blockers, run the requested tools or record why they are "
+                    "inapplicable, then re-run reason.synthesize before Report."
+                )
+        elif re.search(r"\bBLOCKER\b", latest_synthesize, re.IGNORECASE):
+            issues.append(
+                "Latest reason.synthesize still labels one or more gaps as "
+                "BLOCKER. Return to Triage/Collect/Analyze as needed, run the "
+                "missing evidence work, then re-run reason.synthesize before "
+                "Report. Do not try to satisfy this by rewording findings."
+            )
+
     # Case-question gate: if any reason.plan call carries an explicit case_question
     # (passed by the agent via the case_description), or if a CASE_QUESTION: marker
     # appears in any agent_message / dair_call case_context, require at least one
@@ -1178,6 +1386,12 @@ def reason_pre_report_check() -> dict:
             m = cq_re.search(blob)
             if m:
                 case_question = m.group(1).strip()
+                case_question = re.split(
+                    r"\b(?:Evidence|Case context|Known players|Comms channels|Starting pre-plan reads)\s*:",
+                    case_question,
+                    maxsplit=1,
+                    flags=re.IGNORECASE,
+                )[0].strip()
                 break
         if case_question:
             break
@@ -1281,6 +1495,402 @@ def reason_pre_report_check() -> dict:
     except Exception as _e:
         import sys as _sys
         print(f"[TRUDI WARN] audit_findings failed: {_e}", file=_sys.stderr)
+
+    # ── Structural-integrity checks (generic) ───────────────────────────────
+    # Catch the loose ends that let a verdict ship structurally wrong even when
+    # every individual finding passed its record-time gates:
+    #   #1 (blocking) a created/covert account whose controller was never
+    #       established and was never parked as controller-unknown;
+    #   #2 (warning) multiple un-ranked exfil channels;
+    #   #3 (warning) a named recipient with no evident roster cross-reference.
+    # #2/#3 are warnings because finding entries retain only the description,
+    # not the supporting_evidence the record-time gates inspect — so channel /
+    # recipient grounding cannot be soundly re-derived at report scope. #1 is
+    # blocking: a named account with no controller binding is detectable from
+    # descriptions alone and is the structural gap most likely to invert a case.
+    try:
+        from tools.dair import _extract_principal_tokens
+        from tools._gates.principal_attribution_grounding import _SESSION_RE
+        from tools._gates.exfil_channel_grounding import _EGRESS_RE, _CHANNEL_RE
+
+        s_findings = [e for e in entries if e.get("type") == "finding"]
+
+        def _ftier(e):
+            return (e.get("confidence") or "").upper()
+
+        # #1 — created/covert accounts named in CONFIRMED/LIKELY findings.
+        # RID/SID tokens are excluded: they don't match reliably across prose
+        # ("RID 1006" vs token "RID1006"); named accounts are trackable.
+        created_principals = {
+            p
+            for e in s_findings if _ftier(e) in {"CONFIRMED", "LIKELY"}
+            for p in _extract_principal_tokens(e.get("description") or "",
+                                               require_cue=True)
+            if not p.startswith("RID") and not p.startswith("S-1-")
+        }
+        for p in sorted(created_principals):
+            established = False
+            parked = False
+            for e in s_findings:
+                desc = e.get("description") or ""
+                if p.lower() not in desc.lower():
+                    continue
+                if _ftier(e) in {"CONFIRMED", "LIKELY"} and _SESSION_RE.search(desc):
+                    established = True
+                    break
+                if re.search(
+                    r"(?:controll?er|who controls)[^.\n]*"
+                    r"\b(?:unknown|unidentified|not established|unestablished)\b"
+                    r"|\bunattributed\b",
+                    desc, re.IGNORECASE,
+                ):
+                    parked = True
+            if not established and not parked:
+                issues.append(
+                    f"Created/covert account '{p}' is named in a CONFIRMED/LIKELY "
+                    f"finding but no finding establishes who controls it (no "
+                    f"logon/session/source binding) and none parks it as "
+                    f"controller-unknown. Pull the authentication artifact "
+                    f"(Security 4624/4625 logon type + source address) and "
+                    f"attribute it, or record an UNCONFIRMED 'controller unknown' "
+                    f"finding before Report."
+                )
+
+        # #2 — multiple distinct exfil channel *families* in CONFIRMED/LIKELY
+        # findings. Synonyms collapse to a family so "cloud via Dropbox" counts
+        # once, not twice.
+        def _channel_family(token: str) -> str:
+            t = token.lower()
+            if t in {"dropbox", "onedrive", "gdrive", "google drive", "mega", "box.com", "cloud"}:
+                return "cloud"
+            if t in {"ftp", "sftp", "tftp"}:
+                return "ftp"
+            if t in {"usb", "removable", "thumb drive", "flash drive"}:
+                return "usb/removable"
+            if t in {"email", "e-mail", "webmail", "smtp", "attachment"}:
+                return "email"
+            if t in {"web upload", "http upload"}:
+                return "web upload"
+            if t in {"c2", "telegram"}:
+                return "c2/messenger"
+            return t
+
+        channels: set[str] = set()
+        for e in s_findings:
+            if _ftier(e) not in {"CONFIRMED", "LIKELY"}:
+                continue
+            desc = e.get("description") or ""
+            if _EGRESS_RE.search(desc):
+                channels |= {_channel_family(m.group(0)) for m in _CHANNEL_RE.finditer(desc)}
+        if len(channels) >= 2:
+            warnings.append(
+                f"{len(channels)} distinct exfiltration channels appear in "
+                f"CONFIRMED/LIKELY findings ({', '.join(sorted(channels))}). "
+                f"Enumerate ALL candidate channels and ensure the verdict "
+                f"headlines the strongest-evidenced one — a transfer artifact "
+                f"beats tool/folder presence; do not over-weight a channel that "
+                f"lacks a transfer record."
+            )
+
+        # #3 — a recipient named in a CONFIRMED/LIKELY exfil finding with no
+        # evident roster cross-reference anywhere in the trace.
+        recipient_findings = [
+            e for e in s_findings
+            if _ftier(e) in {"CONFIRMED", "LIKELY"}
+            and _EGRESS_RE.search(e.get("description") or "")
+            and re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+|\brecipient\b|\bbuyer\b|\bsent to\b",
+                          e.get("description") or "", re.IGNORECASE)
+        ]
+        if recipient_findings:
+            xref_seen = any(
+                isinstance(e.get(f), str) and re.search(
+                    r"roster|cross-referenc|suspect list|not on (?:the )?roster"
+                    r"|knowns_pattern_generate|user directory",
+                    e.get(f), re.IGNORECASE,
+                )
+                for e in entries
+                for f in ("description", "content", "cmd", "conclusion")
+            )
+            if not xref_seen:
+                warnings.append(
+                    f"{len(recipient_findings)} exfil/dissemination finding(s) name "
+                    f"a recipient but no roster / suspect-list cross-reference is "
+                    f"evident in the trace. Inventory all correspondents and "
+                    f"cross-reference the named recipient against the case roster "
+                    f"(or note explicitly it is not on the roster) before Report."
+                )
+
+        # #4 — per-hypothesis exhaustion. reason_hypothesize returns N ranked
+        # alternatives under ONE id; Part 1 split them into sub_hypotheses with
+        # the principal entities each contests. EVERY contested principal at
+        # MEDIUM+ likelihood must be driven to a verdict before Report — its
+        # controller established (a CONFIRMED/LIKELY finding naming it WITH a
+        # session/identity binding) or the alternative refuted. "Controller
+        # unknown"/parked does NOT count (the single-actor lock-in dodge: a
+        # second-principal alternative and the prime-subject hypothesis both
+        # left unresolved while shipping a sole-actor verdict). When no
+        # sub_hypotheses were parsed, fall back to the per-call-id ledger.
+        idx = log.index()
+        _distinct_principal_re = re.compile(
+            r"(?:second (?:actor|principal|operator|user)\b|distinct principal\b"
+            r"|who controls\b|another (?:account|user|person)\b|separate principal\b"
+            r"|controller (?:of|unknown|unestablished)\b|who authenticated\b"
+            r"|different (?:actor|operator)\b|\brdp\b|logon type\s*(?:2|10)\b)",
+            re.IGNORECASE,
+        )
+        _refute_re = re.compile(
+            r"\b(?:refuted|ruled out|disproven|false positive|rejected|not supported"
+            r"|excluded|cannot be (?:attributed|established|determined)|unproven"
+            r"|indeterminate|no identif\w+ artifact)\b", re.IGNORECASE,
+        )
+        all_subs = [
+            s for e in entries
+            if e.get("type") == "reason_call" and e.get("tool") == "reason_hypothesize"
+            for s in (e.get("sub_hypotheses") or [])
+        ]
+        if all_subs:
+            _rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+            ent_tier: dict[str, str] = {}
+            ent_labels: dict[str, set] = {}
+            for s in all_subs:
+                t = s.get("likelihood_tier", "MEDIUM")
+                for ent in s.get("entities") or []:
+                    if _rank.get(t, 1) >= _rank.get(ent_tier.get(ent, "LOW"), 0):
+                        ent_tier[ent] = t
+                    ent_labels.setdefault(ent, set()).add(s.get("label") or "?")
+
+            def _entity_terminal(ent: str) -> bool:
+                el = ent.lower()
+                for fe in s_findings:
+                    d = fe.get("description") or ""
+                    if el not in d.lower():
+                        continue
+                    if _ftier(fe) in {"CONFIRMED", "LIKELY"} and _SESSION_RE.search(d):
+                        return True   # controller established
+                    if _refute_re.search(d):
+                        return True   # refuted / honestly exhausted
+                return False
+
+            for ent in sorted(ent_tier):
+                if _entity_terminal(ent):
+                    continue
+                labels = ", ".join(sorted(ent_labels.get(ent, set())))
+                tier = ent_tier[ent]
+                msg = (
+                    f"Contested principal '{ent}' (raised as hypothesis {labels}, "
+                    f"likelihood {tier}) was never driven to a verdict: no "
+                    f"CONFIRMED/LIKELY finding establishes its controller with a "
+                    f"session/identity binding (logon 4624/4625 + type/source, "
+                    f"OneDrive/registry account binding, USB serials), and no "
+                    f"finding refutes the alternative. 'Controller unknown'/parked "
+                    f"does not count — a sole-actor verdict cannot stand while "
+                    f"'{ent}' is unresolved. Resolve it to CONFIRMED or REFUTED "
+                    f"(run the discriminators) before Report."
+                )
+                if _rank.get(tier, 1) >= 1:   # MEDIUM / HIGH
+                    issues.append(msg)
+                else:                          # LOW
+                    warnings.append(msg)
+        else:
+            # Fallback (no sub_hypotheses parsed): per-call-id resolution ledger.
+            resolved_ids: set[str] = set()
+            for e in s_findings:
+                tid = (e.get("tested_hypothesis_id") or "").strip()
+                if tid:
+                    resolved_ids.add(tid)
+                gh = e.get("gated_by_hypothesize_call_id")
+                if gh:
+                    ghe = idx.by_call_id.get(gh) or {}
+                    ghid = (ghe.get("hypothesis_id") or "").strip()
+                    if ghid:
+                        resolved_ids.add(ghid)
+            open_generic: list[str] = []
+            for hid, hyp in sorted(idx.hypotheses_by_id.items()):
+                if not hid or hid in resolved_ids:
+                    continue
+                obs = ((hyp.get("inputs") or {}).get("user_message") or "")
+                is_distinct = bool(
+                    _distinct_principal_re.search(obs)
+                    or _distinct_principal_re.search(hyp.get("conclusion") or "")
+                )
+                if is_distinct:
+                    issues.append(
+                        f"Hypothesis {hid} frames a distinct/second principal or "
+                        f"controller question but was never resolved: no finding "
+                        f"carries it as tested_hypothesis_id and none parks it "
+                        f"controller-unknown. A competing-principal hypothesis "
+                        f"cannot be silently dropped — record a CONFIRMED/LIKELY "
+                        f"finding that resolves it (with a logon/session binding), "
+                        f"or an explicit UNCONFIRMED 'controller unknown' finding, "
+                        f"before Report."
+                    )
+                else:
+                    open_generic.append(hid)
+            if open_generic:
+                warnings.append(
+                    f"{len(open_generic)} hypothesis/es raised but never resolved "
+                    f"({', '.join(open_generic[:5])}"
+                    f"{'…' if len(open_generic) > 5 else ''}) — no finding cites "
+                    f"them as tested_hypothesis_id. Resolve or park each before Report."
+                )
+
+        # #5 (blocking) — attribution closure (i): a human/account attribution
+        # verdict cannot ship without a logon/RDP session inventory that could
+        # rule out a second principal operating the host. Scoped to human/account
+        # verdicts so a process/malware attribution in a memory-only case (no
+        # event logs) is not blocked.
+        from tools._gates.principal_attribution_grounding import _ACCOUNT_RE
+        from tools._gates.named_actor_attribution_grounding import (
+            _NAME_RE as _na_name_re, _NAME_STOPS as _na_stops,
+        )
+        _VERDICT_RE = re.compile(
+            r"\b(?:exfiltrat\w+|copied|stole|stol\w+|disseminat\w+|uploaded"
+            r"|transferred|transmit\w+|leaked|smuggled|operated by|controlled by"
+            r"|attributed to|logged ?in as|sole actor|acted alone"
+            r"|responsible for)\b", re.IGNORECASE,
+        )
+
+        def _is_human_or_account_verdict(desc: str) -> bool:
+            if not _VERDICT_RE.search(desc):
+                return False
+            if _ACCOUNT_RE.search(desc):
+                return True
+            if re.search(r"\bsole actor\b|\bacted alone\b|\bby [A-Z][a-z]+\b", desc):
+                return True
+            return bool(set(_na_name_re.findall(desc)) - _na_stops)
+
+        has_verdict = any(
+            _ftier(e) in {"CONFIRMED", "LIKELY"}
+            and _is_human_or_account_verdict(e.get("description") or "")
+            for e in s_findings
+        )
+        has_pcap_activity = any(
+            e.get("type") == "tool_call" and isinstance(e.get("cmd"), str)
+            and re.search(
+                r"\b(?:tcpdump|ngrep)\b|http_session_inventory|pcap_identity_timeline",
+                e["cmd"], re.IGNORECASE,
+            )
+            for e in entries
+        )
+        has_pcap_identity_closure = any(
+            (
+                e.get("type") == "tool_call"
+                and isinstance(e.get("cmd"), str)
+                and re.search(
+                    r"http_session_inventory|pcap_identity_timeline",
+                    e["cmd"], re.IGNORECASE,
+                )
+            )
+            or (
+                e.get("type") == "finding"
+                and re.search(
+                    r"net\.http_session_inventory|net\.pcap_identity_timeline",
+                    e.get("source") or "", re.IGNORECASE,
+                )
+            )
+            for e in entries
+        )
+        has_knowns_sweep = any(
+            isinstance(e.get(f), str)
+            and re.search(r"knowns_pattern_generate|roster", e.get(f), re.IGNORECASE)
+            for e in entries
+            for f in ("cmd", "description", "content", "conclusion")
+        )
+        _LOGON_TOOL_RE = re.compile(
+            r"(?:evtxecmd|chainsaw|evtx_filter|evtx_dump"
+            r"|\b4624\b|\b4625\b|\b4778\b|\b4779\b"
+            r"|\blast\b|wtmp|utmp|lastlog|\bwho\b)", re.IGNORECASE,
+        )
+        has_logon_enum = any(
+            e.get("type") == "tool_call" and isinstance(e.get("cmd"), str)
+            and _LOGON_TOOL_RE.search(e["cmd"])
+            for e in entries
+        )
+        if has_verdict and has_pcap_activity and not has_pcap_identity_closure:
+            issues.append(
+                "A human/account attribution verdict was recorded from PCAP "
+                "evidence, but no structured PCAP identity inventory appears "
+                "in the trace (net.http_session_inventory or "
+                "net.pcap_identity_timeline). Run one of those tools, compare "
+                "all identities on the sender host/session, and disposition "
+                "competing accounts before Report."
+            )
+        if has_verdict and has_pcap_activity and not has_knowns_sweep:
+            issues.append(
+                "A human/account attribution verdict was recorded from PCAP "
+                "evidence, but no roster/knowns sweep is evident. Generate "
+                "person-username variants with misc.knowns_pattern_generate and "
+                "sweep the PCAP or pass the roster to net.pcap_identity_timeline "
+                "before Report."
+            )
+        if has_verdict and not has_pcap_activity and not has_logon_enum:
+            issues.append(
+                "A human/account attribution verdict was recorded but no "
+                "logon/RDP session-enumeration appears anywhere in the trace "
+                "(no ez.evtxecmd / misc.chainsaw_hunt / misc.evtx_filter on "
+                "4624/4625/4778/4779, and no Linux last/wtmp). A sole-actor "
+                "verdict cannot stand without a logon-session inventory that "
+                "rules out a second principal operating the host — run it and "
+                "disposition every session before Report."
+            )
+
+        # #6 (blocking) — attribution closure (ii): every previously-unseen
+        # identity for which a controller question was opened, or which DAIR
+        # surfaced as a forced principal candidate, must be dispositioned:
+        # attributed-with-session, excluded-with-evidence, or parked
+        # controller-unknown. Focus harvesting is restricted to controller
+        # questions so an ordinary subject mention is not harvested.
+        surfaced: set[str] = set()
+        for e in entries:
+            if e.get("type") != "dair_call":
+                continue
+            focus = e.get("investigation_focus") or ""
+            if re.search(r"controls principal|who controls", focus, re.IGNORECASE):
+                surfaced |= _extract_principal_tokens(focus, require_cue=False)
+            for pivot in e.get("candidate_pivots") or []:
+                if not isinstance(pivot, dict):
+                    continue
+                if str(pivot.get("kind") or "").lower() != "principal":
+                    continue
+                if str(pivot.get("cue") or "").lower() != "forced":
+                    continue
+                value = str(pivot.get("value") or "")
+                surfaced |= _extract_principal_tokens(
+                    f"who controls principal {value}", require_cue=False)
+        surfaced = {p for p in surfaced
+                    if not p.startswith("RID") and not p.startswith("S-1-")}
+        for p in sorted(surfaced):
+            dispositioned = False
+            for e in s_findings:
+                d = e.get("description") or ""
+                if p.lower() not in d.lower():
+                    continue
+                if _ftier(e) in {"CONFIRMED", "LIKELY"} and _SESSION_RE.search(d):
+                    dispositioned = True
+                    break
+                if (re.search(r"\b(?:excluded|ruled out|not the (?:actor|operator)"
+                              r"|did not (?:log|authenticate))\b", d, re.IGNORECASE)
+                        and _SESSION_RE.search(d)):
+                    dispositioned = True
+                    break
+                if re.search(r"(?:controll?er|who controls)[^.\n]*\b(?:unknown"
+                             r"|unidentified|not established|unestablished)\b"
+                             r"|\bunattributed\b", d, re.IGNORECASE):
+                    dispositioned = True
+                    break
+            if not dispositioned:
+                issues.append(
+                    f"Previously-unseen identity '{p}' surfaced during the "
+                    f"investigation (a controller question was opened or DAIR "
+                    f"surfaced a forced principal candidate) but no finding "
+                    f"dispositions it: not attributed-with-session, not "
+                    f"excluded-with-evidence, and not parked "
+                    f"controller-unknown. Disposition '{p}' before Report."
+                )
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] structural-integrity check failed: {_e}",
+              file=_sys.stderr)
 
     ready = len(issues) == 0
 

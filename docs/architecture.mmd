@@ -1,0 +1,74 @@
+flowchart LR
+    User["DFIR practitioner"] --> Claude["Claude Code\nprimary analyst"]
+    Orchestrator["Global orchestrator\nclaude/CLAUDE.md"] --> Claude
+    CaseBrief["Case brief\ncases/CASE_ID/CLAUDE.md"] --> Claude
+
+    subgraph MCP["Architectural guardrail: TRUDI MCP boundary"]
+        Server["FastMCP server\nserver.py"]
+        Middleware["Middleware\nDAIR window + narration"]
+        Tools["Typed tool namespaces\nforensics, live, monitor, respond"]
+        Gates["Finding gates\nconfidence, lineage, citation, MCP routing"]
+    end
+
+    subgraph Guidance["Parallel guidance tools"]
+        DAIR["DAIR\nphase director"]
+        Reason["reason.*\nadversarial reviewer"]
+        DAIRBackend["DAIR backend"]
+        ReasonBackend["Reason backend"]
+    end
+
+    subgraph Execute["Execution boundary"]
+        Executor["Safe executor"]
+        PathGuard["Read-only evidence guard"]
+        SSH["Argv-only live SSH"]
+        SIFT["SIFT forensic tools"]
+    end
+
+    subgraph Targets["Evidence and endpoints"]
+        Evidence["Static evidence\nimages, memory, logs, PCAPs"]
+        Endpoint["Registered live endpoint"]
+        Velo["Velociraptor demo stack"]
+    end
+
+    subgraph Audit["Audit and output"]
+        Trace["Execution trace\n_trudi_call_id"]
+        Findings["Findings\nlinked_call_id required"]
+        Reports["Reports"]
+        Dashboard["Dashboard"]
+        Accuracy["Accuracy / coverage"]
+    end
+
+    Claude -- "MCP tool calls only" --> Server
+    Server --> Middleware --> Tools
+    Middleware --> Gates
+
+    Tools --> Executor --> PathGuard --> SIFT --> Evidence
+    Tools --> SSH --> Endpoint
+    Tools --> Velo
+
+    Tools --> DAIR --> DAIRBackend
+    Tools --> Reason --> ReasonBackend
+    DAIR -- "phase + priority_tools" --> Claude
+    Reason -- "plan + review" --> Claude
+
+    Executor --> Trace
+    SSH --> Trace
+    Middleware --> Trace
+    Gates -. blocks unsupported findings .-> Findings
+    Tools -- "misc.record_finding" --> Findings
+    Findings --> Trace
+    Trace --> Reports
+    Trace --> Dashboard
+    Trace --> Accuracy
+
+    PathGuard -. rejects evidence writes .-> Executor
+
+    classDef guard fill:#fff4e5,stroke:#c77700,stroke-width:2px,color:#111;
+    classDef evidence fill:#eef8f0,stroke:#2e7d32,stroke-width:2px,color:#111;
+    classDef audit fill:#f7efff,stroke:#7b1fa2,stroke-width:2px,color:#111;
+    classDef actor fill:#eef3ff,stroke:#4051b5,stroke-width:2px,color:#111;
+    style MCP fill:#f5f7ff,stroke:#4051b5,stroke-width:2px,color:#111
+    class Server,Middleware,Tools,Gates,Executor,PathGuard,SSH guard;
+    class Evidence,Endpoint,Velo evidence;
+    class Trace,Findings,Reports,Dashboard,Accuracy audit;
+    class User,Claude,Orchestrator,CaseBrief actor;

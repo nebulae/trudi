@@ -152,24 +152,30 @@ class TestAccuracyExportReport:
         from tools.accuracy import accuracy_export_report
         gt = _gt_file(tmp_path, [])
         with pytest.raises(ValueError):
-            accuracy_export_report(gt, "/mnt/rd01/accuracy.md")
+            accuracy_export_report(gt, "/mnt/host01/accuracy.md")
 
 
-class TestSrl2018GroundTruth:
-    """The bundled ground truth file is well-formed."""
+class TestGroundTruthSchema:
+    """Any ground_truth.json present under ~/cases/* is well-formed.
 
-    def test_file_loads(self):
-        import os
-        path = "/home/trin/cases/srl-2018-demo/ground_truth.json"
-        assert os.path.exists(path)
-        with open(path) as f:
-            gt = json.load(f)
-        assert gt["case_id"] == "SRL-2018-DEMO"
-        assert len(gt["expected_findings"]) > 10
-        for item in gt["expected_findings"]:
-            assert "id" in item
-            assert "description" in item
-            assert item.get("confidence_min") in ("CONFIRMED", "LIKELY", "SUSPECTED")
+    Case-agnostic: globs whatever ground-truth files exist and validates the
+    schema; skips when none are present so the suite has no hard coupling to a
+    particular dataset being installed."""
+
+    def test_present_ground_truth_files_validate(self):
+        import os, glob
+        paths = glob.glob(os.path.expanduser("~/cases/*/ground_truth.json"))
+        if not paths:
+            pytest.skip("no ground_truth.json present under ~/cases/")
+        for path in paths:
+            with open(path) as f:
+                gt = json.load(f)
+            assert gt.get("case_id")
+            assert isinstance(gt.get("expected_findings"), list)
+            for item in gt["expected_findings"]:
+                assert "id" in item
+                assert "description" in item
+                assert item.get("confidence_min") in ("CONFIRMED", "LIKELY", "SUSPECTED")
 
 
 class TestNegativeAssertionScoring:

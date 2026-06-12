@@ -31,7 +31,7 @@ class TestStringsExtract:
     def test_output_path_evidence_blocked(self):
         from tools.strings_tools import strings_extract
         with pytest.raises(Exception):
-            strings_extract("/malware/sample.exe", output_path="/cases/srl/evidence/strings.txt")
+            strings_extract("/malware/sample.exe", output_path="/cases/example/evidence/strings.txt")
 
     def test_output_path_safe(self, mock_run, tmp_path):
         from tools.strings_tools import strings_extract

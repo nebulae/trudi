@@ -71,16 +71,5 @@
       "mcp__trudi-sift__reason_reason_synthesize"
     ]
   },
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "mkdir -p ./analysis/ && echo \"$(date -u): $CONVERSATION_SUMMARY\" >> ./analysis/forensic_audit.log"
-          }
-        ]
-      }
-    ]
-  }
+  "hooks": {}
 }

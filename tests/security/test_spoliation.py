@@ -16,12 +16,12 @@ class TestEvidenceWriteRefusal:
     def test_refuses_cases_evidence_subpath(self):
         from core.paths import assert_output_safe
         with pytest.raises(ValueError, match="protected evidence"):
-            assert_output_safe("/cases/srl-2018-demo/evidence/foo.bin")
+            assert_output_safe("/cases/example-case/evidence/foo.bin")
 
     def test_refuses_cases_root(self):
         from core.paths import assert_output_safe
         with pytest.raises(ValueError, match="protected evidence"):
-            assert_output_safe("/cases/srl-2018-demo/analysis/foo.bin")
+            assert_output_safe("/cases/example-case/analysis/foo.bin")
 
     def test_refuses_mnt_path(self):
         from core.paths import assert_output_safe
@@ -171,3 +171,79 @@ class TestDairGatePreventsRogueTools:
             "ez_ez_jlecmd", "ez_ez_lecmd",
         ):
             assert ez_tool not in DAIR_GATE_ALLOWLIST
+
+
+class TestForensicAuditHook:
+    """The Stop-hook forensic audit writer (claude/hooks/forensic_audit.py)
+    resolves the audit log from the TRUDI session beacon (absolute), never the
+    shell CWD.
+
+    Closes a spoliation/bypass-test finding: the previous inline hook
+    `mkdir -p ./analysis/ && echo ... >> ./analysis/forensic_audit.log` is
+    CWD-relative — it scattered audit lines into exports/ and into a mailbox
+    export subfolder, failed (losing the entry) when CWD drifted into a
+    read-only evidence mount, and but for the read-only mount would have written
+    the audit log INTO evidence.
+    """
+
+    @staticmethod
+    def _hook():
+        import importlib.util
+        from pathlib import Path
+        hook_path = (Path(__file__).resolve().parents[2]
+                     / "claude" / "hooks" / "forensic_audit.py")
+        spec = importlib.util.spec_from_file_location("trudi_forensic_audit_hook", hook_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def _beacon(self, tmp_path, trace_path, case_id="CASE-X"):
+        import json
+        b = tmp_path / "session.json"
+        b.write_text(json.dumps({"case_id": case_id, "path": str(trace_path)}))
+        return b
+
+    def test_resolves_canonical_analysis_dir(self, tmp_path):
+        h = self._hook()
+        analysis = tmp_path / "cases" / "case-x" / "analysis"
+        analysis.mkdir(parents=True)
+        beacon = self._beacon(tmp_path, analysis / "CASE-X_trace.json")
+        assert h.resolve_audit_log(session_file=beacon) == analysis / "forensic_audit.log"
+
+    def test_ignores_cwd_drift(self, tmp_path, monkeypatch):
+        # The whole bug: location must not depend on where the shell last cd'd.
+        h = self._hook()
+        analysis = tmp_path / "cases" / "case-x" / "analysis"
+        analysis.mkdir(parents=True)
+        beacon = self._beacon(tmp_path, analysis / "CASE-X_trace.json")
+        drift = tmp_path / "exports" / "jean_pst.export" / "Message00016"
+        drift.mkdir(parents=True)
+        monkeypatch.chdir(drift)
+        assert h.resolve_audit_log(session_file=beacon) == analysis / "forensic_audit.log"
+
+    def test_refuses_evidence_beacon(self, tmp_path):
+        h = self._hook()
+        bad = tmp_path / "cases" / "case-x" / "evidence" / "analysis"
+        bad.mkdir(parents=True)
+        beacon = self._beacon(tmp_path, bad / "CASE-X_trace.json")
+        assert h.resolve_audit_log(session_file=beacon) is None
+
+    def test_refuses_mount_beacon(self, tmp_path):
+        h = self._hook()
+        bad = tmp_path / "cases" / "case-x" / "mnt" / "ntfs" / "analysis"
+        bad.mkdir(parents=True)
+        beacon = self._beacon(tmp_path, bad / "CASE-X_trace.json")
+        assert h.resolve_audit_log(session_file=beacon) is None
+
+    def test_no_active_session_no_write(self, tmp_path):
+        h = self._hook()
+        assert h.resolve_audit_log(session_file=tmp_path / "nope.json") is None
+
+    def test_case_template_has_no_cwd_relative_stop_hook(self):
+        # Regression guard for the distributable scaffold.
+        from pathlib import Path
+        tmpl = (Path(__file__).resolve().parents[2]
+                / "case-template" / ".claude" / "settings.json")
+        assert "mkdir -p ./analysis/" not in tmpl.read_text(), (
+            "case-template Stop hook regressed to the CWD-relative audit one-liner"
+        )

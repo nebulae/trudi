@@ -404,8 +404,8 @@ code, .mono {
 
 
 def build_html(data: dict) -> str:
-    case_id    = data.get("case_id", "SRL-001")
-    client     = data.get("client", "Stark Research Labs")
+    case_id    = data.get("case_id", "ORG-001")
+    client     = data.get("client", "Example Organization")
     prepared   = data.get("prepared_by", "DFIR Consulting Team")
     date_str   = data.get("date", datetime.datetime.utcnow().strftime("%Y-%m-%d"))
     title      = data.get("title", "DFIR Analysis Report")
@@ -491,13 +491,13 @@ BODY_HTML = """
 <h2><span class="section-num">01</span> Executive Summary</h2>
 
 <div class="exec-summary">
-  <p>During forensic analysis of the baseline memory image captured from <strong>BASE-RD-01</strong>
-  (the Remote Desktop Server at 172.16.6.11) on <strong>2018-09-06 at 18:57:17 UTC</strong>,
+  <p>During forensic analysis of the baseline memory image captured from <strong>BASE-HOST-01</strong>
+  (the Remote Desktop Server at 198.51.100.11) on <strong>2018-09-06 at 18:57:17 UTC</strong>,
   one non-standard process was identified with strong indicators of malicious activity.</p>
   <p>A single-character executable named <code>p.exe</code>, stored in a Windows Temp subdirectory,
   was found executing via a WMI-spawned PowerShell chain — a technique consistent with
   state-level APT tradecraft. Memory analysis of its process space revealed sequential IP addresses
-  spanning the entire Business Line subnet (172.16.7.0/24), indicating active internal reconnaissance.
+  spanning the entire Business Line subnet (203.0.113.0/24), indicating active internal reconnaissance.
   The process binary was scrubbed from memory (process-hollowing indicator).</p>
   <p>A second non-standard process, <code>subject_srv.exe</code>, was confirmed as a legitimate
   F-Response forensic collection agent deployed by the incident response team.</p>
@@ -527,13 +527,13 @@ BODY_HTML = """
 <table>
   <thead><tr><th>Property</th><th>Value</th></tr></thead>
   <tbody>
-    <tr><td>Hostname</td><td><code>BASE-RD-01</code></td></tr>
-    <tr><td>IP Address</td><td><code>172.16.6.11</code> (R&amp;D Network — 172.16.6.0/24)</td></tr>
+    <tr><td>Hostname</td><td><code>BASE-HOST-01</code></td></tr>
+    <tr><td>IP Address</td><td><code>198.51.100.11</code> (R&amp;D Network — 198.51.100.0/24)</td></tr>
     <tr><td>Operating System</td><td>Windows 10 x64, Build 16299 (Version 1709 — Fall Creators Update)</td></tr>
     <tr><td>Memory Image</td><td><code>base-rd_memory.img</code> (3.0 GB)</td></tr>
     <tr><td>Capture Timestamp</td><td>2018-09-06 18:57:17 UTC</td></tr>
     <tr><td>Logged-In User</td><td><code>tdungan</code></td></tr>
-    <tr><td>Endpoint AV</td><td>McAfee VirusScan 8800, managed by ePO (172.16.5.20)</td></tr>
+    <tr><td>Endpoint AV</td><td>McAfee VirusScan 8800, managed by ePO (192.0.2.20)</td></tr>
     <tr><td>Analysis Tool</td><td>Volatility 3 Framework v2.20.0 — <em>auto-detected OS (no profile selection)</em></td></tr>
   </tbody>
 </table>
@@ -581,14 +581,14 @@ frameworks such as Empire, Covenant, or Cobalt Strike.</p>
 may have been held by child <code>rundll32.exe</code> processes), the 604 MB VAD dump of the
 p.exe process address space contained sequential IP addresses spanning the entire Business Line subnet:</p>
 
-<div class="code-block"><span class="hl">Subnet scanned: 172.16.7.0/24 (Business Line — wksta01–wksta10)</span>
+<div class="code-block"><span class="hl">Subnet scanned: 203.0.113.0/24 (Business Line — wksta01–wksta10)</span>
 IPs observed in VAD memory:
-  <span class="red">172.16.7.55 → 172.16.7.255</span>  (201 sequential addresses)
+  <span class="red">203.0.113.55 → 203.0.113.255</span>  (201 sequential addresses)
 
 Additional internal IPs present in process memory:
-  <span class="blu">172.16.4.5, 172.16.4.10</span>   (Services network — DC / Squid proxy)
-  <span class="blu">172.16.5.20, 172.16.5.25</span>   (AV ePO server / unknown)
-  <span class="blu">172.16.6.11–16</span>             (R&amp;D network — local subnet)</div>
+  <span class="blu">192.0.2.5, 192.0.2.10</span>   (Services network — DC / web proxy)
+  <span class="blu">192.0.2.20, 192.0.2.25</span>   (AV ePO server / unknown)
+  <span class="blu">198.51.100.11–16</span>             (R&amp;D network — local subnet)</div>
 
 <h3>MITRE ATT&amp;CK Mapping</h3>
 <table>
@@ -597,7 +597,7 @@ Additional internal IPs present in process memory:
     <tr><td><code>T1047</code></td><td>Windows Management Instrumentation</td><td>WmiPrvSE.exe spawned PowerShell out-of-band</td></tr>
     <tr><td><code>T1059.001</code></td><td>PowerShell</td><td>32-bit PowerShell <code>-s -NoLogo -NoProfile</code></td></tr>
     <tr><td><code>T1218.011</code></td><td>Signed Binary Proxy — Rundll32</td><td>p.exe spawned rundll32.exe ×3 over two days</td></tr>
-    <tr><td><code>T1046</code></td><td>Network Service Discovery</td><td>Sequential IPs 172.16.7.55–255 in process memory</td></tr>
+    <tr><td><code>T1046</code></td><td>Network Service Discovery</td><td>Sequential IPs 203.0.113.55–255 in process memory</td></tr>
     <tr><td><code>T1055</code></td><td>Process Injection (suspected)</td><td>0-byte image dump; binary not recoverable from memory</td></tr>
   </tbody>
 </table>
@@ -617,7 +617,7 @@ Additional internal IPs present in process memory:
     <tr><td>PID</td><td>1096</td></tr>
     <tr><td>Full Path</td><td><code>C:\\Windows\\subject_srv.exe</code></td></tr>
     <tr><td>Command Line</td><td><code>subject_srv.exe -s "base-hunt.shieldbase.lan:5682" -l 3262 -v "F-Response Subject" -k "155522845"</code></td></tr>
-    <tr><td>Network</td><td>LISTENING tcp/3262 &nbsp;|&nbsp; ESTABLISHED → 172.16.5.50:39372 (examiner workstation)</td></tr>
+    <tr><td>Network</td><td>LISTENING tcp/3262 &nbsp;|&nbsp; ESTABLISHED → 192.0.2.50:39372 (examiner workstation)</td></tr>
     <tr><td>Verdict</td><td>F-Response Agent — Remote forensic evidence collection tool deployed by Roger Sydow (IT Admin)</td></tr>
   </tbody>
 </table>
@@ -628,27 +628,27 @@ Additional internal IPs present in process memory:
   <thead><tr><th>Source</th><th>Destination</th><th>Port</th><th>State</th><th>Assessment</th></tr></thead>
   <tbody>
     <tr>
-      <td>172.16.6.11</td><td>172.16.5.50</td><td>3262</td>
+      <td>198.51.100.11</td><td>192.0.2.50</td><td>3262</td>
       <td>ESTABLISHED</td>
       <td><span class="badge badge-benign">Benign</span> F-Response examiner</td>
     </tr>
     <tr>
-      <td>172.16.6.11</td><td>172.16.4.10</td><td>8080</td>
+      <td>198.51.100.11</td><td>192.0.2.10</td><td>8080</td>
       <td>ESTABLISHED (×3)</td>
-      <td><span class="badge badge-medium">Suspicious</span> Squid proxy — PID unresolved</td>
+      <td><span class="badge badge-medium">Suspicious</span> web proxy — PID unresolved</td>
     </tr>
     <tr>
-      <td>172.16.6.11</td><td>172.16.7.15</td><td>445</td>
+      <td>198.51.100.11</td><td>203.0.113.15</td><td>445</td>
       <td>ESTABLISHED</td>
       <td><span class="badge badge-high">Suspicious</span> SMB — Business Line host</td>
     </tr>
     <tr>
-      <td>172.16.6.11</td><td>172.16.4.5</td><td>445</td>
+      <td>198.51.100.11</td><td>192.0.2.5</td><td>445</td>
       <td>ESTABLISHED</td>
       <td><span class="badge badge-high">Suspicious</span> SMB — Services network</td>
     </tr>
     <tr>
-      <td>172.16.6.14</td><td>172.16.6.11</td><td>445</td>
+      <td>198.51.100.14</td><td>198.51.100.11</td><td>445</td>
       <td>ESTABLISHED (inbound)</td>
       <td><span class="badge badge-high">Suspicious</span> Inbound SMB from R&amp;D peer</td>
     </tr>
@@ -734,7 +734,7 @@ Additional internal IPs present in process memory:
     </tr>
     <tr>
       <td>Memory Indicator</td>
-      <td>Sequential IPs 172.16.7.55–172.16.7.255 in process VAD (subnet scan)</td>
+      <td>Sequential IPs 203.0.113.55–203.0.113.255 in process VAD (subnet scan)</td>
       <td><span class="badge badge-medium">Medium</span></td>
     </tr>
     <tr>
@@ -744,7 +744,7 @@ Additional internal IPs present in process memory:
     </tr>
     <tr>
       <td>Network</td>
-      <td>Unexplained ESTABLISHED SMB connections to 172.16.4.5:445 and 172.16.7.15:445</td>
+      <td>Unexplained ESTABLISHED SMB connections to 192.0.2.5:445 and 203.0.113.15:445</td>
       <td><span class="badge badge-medium">Medium</span></td>
     </tr>
   </tbody>
@@ -754,16 +754,16 @@ Additional internal IPs present in process memory:
 
 <div class="alert alert-red">
   <div class="alert-title">Immediate Actions Required</div>
-  <p>1. <strong>Isolate BASE-RD-01</strong> from the network if not already done — active attacker tooling was present at time of capture.</p>
-  <p>2. <strong>Sweep all 172.16.7.x hosts</strong> (Business Line) for signs of lateral movement — the subnet scan indicates the adversary was enumerating targets.</p>
-  <p>3. <strong>Preserve all logs</strong> from 172.16.4.5 (Services network) and 172.16.7.15 (Business Line) — both received unexplained SMB connections from BASE-RD-01.</p>
+  <p>1. <strong>Isolate BASE-HOST-01</strong> from the network if not already done — active attacker tooling was present at time of capture.</p>
+  <p>2. <strong>Sweep all 203.0.113.x hosts</strong> (Business Line) for signs of lateral movement — the subnet scan indicates the adversary was enumerating targets.</p>
+  <p>3. <strong>Preserve all logs</strong> from 192.0.2.5 (Services network) and 203.0.113.15 (Business Line) — both received unexplained SMB connections from BASE-HOST-01.</p>
 </div>
 
 <div class="alert alert-orange">
   <div class="alert-title">Follow-On Investigation</div>
   <p>4. <strong>Analyse rd01-memory.img</strong> (primary 5 GB capture) for persistence mechanisms and additional payloads — this baseline image predates the declared incident.</p>
   <p>5. <strong>Recover p.exe</strong> from disk image (<code>base-rd01-cdrive.E01</code>) via Sleuth Kit/MFT — the binary was scrubbed from memory but may survive on disk.</p>
-  <p>6. <strong>Review WMI subscriptions</strong> on BASE-RD-01 — the WMI execution chain suggests a persistent event subscription may be present.</p>
+  <p>6. <strong>Review WMI subscriptions</strong> on BASE-HOST-01 — the WMI execution chain suggests a persistent event subscription may be present.</p>
   <p>7. <strong>Correlate PowerShell logs</strong> (Event IDs 4103/4104) for the encoded payload delivered to the 32-bit PowerShell process.</p>
 </div>
 
@@ -787,14 +787,14 @@ Additional internal IPs present in process memory:
 
 if __name__ == "__main__":
     report_data = {
-        "case_id":     "SRL-2023-001",
-        "client":      "Stark Research Labs (SRL)",
+        "case_id":     "EXAMPLE-2024-001",
+        "client":      "Example Organization",
         "prepared_by": "DFIR Consulting Team",
         "date":        "2026-03-02",
         "title":       "Baseline Memory Analysis",
-        "subtitle":    "BASE-RD-01 · base-rd_memory.img · 2018-09-06",
+        "subtitle":    "BASE-HOST-01 · base-rd_memory.img · 2018-09-06",
         "body_html":   BODY_HTML,
     }
-    out = "/cases/srl/analysis/baseline-memory-analysis-report.pdf"
+    out = "/cases/example-org/analysis/baseline-memory-analysis-report.pdf"
     generate_report(report_data, out)
     print(f"PDF written: {out}")

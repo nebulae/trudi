@@ -11,7 +11,7 @@ the resulting trace against a hand-curated ground truth.
    ```json
    {
      "case_id": "NITROBA-2008",
-     "case_question": "Who sent the harassing email to lilytuckrige@yahoo.com?",
+     "case_question": "Who sent the harassing email to victim@example.com?",
      "expected_findings": [
        {
          "id": "F1",

@@ -152,7 +152,7 @@ class TestRun:
 
     def test_output_dir_evidence_path_raises(self, mock_sub, tmp_path):
         with pytest.raises(ValueError, match="protected evidence"):
-            run(["ls"], output_dir="/cases/srl/exports")
+            run(["ls"], output_dir="/cases/example/exports")
 
     def test_output_dir_safe_path_allowed(self, mock_sub, tmp_path):
         mock_sub.return_value = make_proc(0, b"ok", b"")

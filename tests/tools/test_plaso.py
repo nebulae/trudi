@@ -13,7 +13,7 @@ class TestPlasoCreateTimeline:
     def test_storage_file_evidence_blocked(self):
         from tools.plaso import plaso_create_timeline
         with pytest.raises(Exception):
-            plaso_create_timeline("/evidence/image.E01", "/cases/srl/evidence/timeline.plaso")
+            plaso_create_timeline("/evidence/image.E01", "/cases/example/evidence/timeline.plaso")
 
     def test_storage_file_safe(self, mock_run, tmp_path):
         from tools.plaso import plaso_create_timeline
@@ -41,7 +41,7 @@ class TestPlasoExport:
     def test_export_csv_output_blocked(self):
         from tools.plaso import plaso_export_csv
         with pytest.raises(Exception):
-            plaso_export_csv("timeline.plaso", "/cases/srl/evidence/out.csv")
+            plaso_export_csv("timeline.plaso", "/cases/example/evidence/out.csv")
 
     def test_export_csv_safe(self, mock_run, tmp_path):
         from tools.plaso import plaso_export_csv

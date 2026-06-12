@@ -2,10 +2,10 @@
 mitre_techniques.json table.
 
 The v15 build shipped with the entire T1036 family absent (0 of 467
-techniques, and cascaded to 0 of 165 groups). DEMO-LIVE / SRL-2018 runs cited
-T1036.005 (Match Legitimate Name or Location -> /tmp/.kworkerd) and T1036.008
-(Masquerade File Type) and were refused by the `mitre_technique_validation`
-gate on record_finding.
+techniques, and cascaded to 0 of 165 groups). Investigations citing T1036.005
+(Match Legitimate Name or Location, e.g. a binary masquerading under /tmp) and
+T1036.008 (Masquerade File Type) were therefore refused by the
+`mitre_technique_validation` gate on record_finding.
 
 Names/tactics/descriptions are factual ATT&CK v15 definitions. Keywords reuse
 the seeds in tools/mitre/keywords.py plus the artifacts actually observed in
@@ -103,7 +103,7 @@ def main() -> None:
     meta.setdefault("patches", []).append({
         "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "added": added,
-        "reason": "T1036 Masquerading family absent in v15 build; cited as T1036.005/T1036.008 in DEMO-LIVE/SRL-2018 runs and refused by mitre_technique_validation gate. Definitions from ATT&CK v15; group mappings deferred to authoritative CTI rebuild.",
+        "reason": "T1036 Masquerading family absent in v15 build; T1036.005/T1036.008 citations were refused by the mitre_technique_validation gate. Definitions from ATT&CK v15; group mappings deferred to authoritative CTI rebuild.",
         "by": "manual",
     })
 

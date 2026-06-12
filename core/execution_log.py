@@ -895,6 +895,45 @@ class ExecutionLog:
                       f"original: {detail[:200]}")
                 return 0
 
+    def record_curiosity_probe(
+        self,
+        rationale: str,
+        seeded_by: str = "",
+        input_call_ids: list[int] | None = None,
+    ) -> int:
+        """Log an exploratory 'curiosity_probe' — a read-only look the agent
+        chose ITSELF, outside directives.priority_tools.
+
+        Budget-gated by the caller (tools/_gates/curiosity_budget.py); this
+        method only writes the entry. A probe carries NO evidentiary weight on
+        its own: to support a finding its call_id must flow into reason.* /
+        record_finding via input_call_ids, where the finding gates apply. So a
+        probe can widen what gets looked at without ever loosening a gate.
+
+        rationale  — the hunch + what would confirm or kill it (the audit hook).
+        seeded_by  — hypothesis_id of the reason.hypothesize(mode="absence")
+                     that motivated the probe, if any.
+        """
+        with self._lock:
+            self._auto_recover()
+            self._require_configured("curiosity_probe")
+            cid = self._next_id()
+            entry: dict = {
+                "call_id": cid,
+                "type": "curiosity_probe",
+                "ts": _utcnow(),
+                "probe_rationale": rationale,
+                "seeded_by": seeded_by,
+            }
+            # Never an orphan in the causal DAG: default lineage to the most
+            # recent dair_assess (mirrors tool_call / narration behavior).
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            elif self._last_dair_cid:
+                entry["input_call_ids"] = [self._last_dair_cid]
+            self._append_entry(entry)
+            return cid
+
     def record_tool_call(
         self,
         cmd: str,
@@ -991,6 +1030,46 @@ class ExecutionLog:
             self._append_entry(entry)
             return cid
 
+    def update_reason_call(self, call_id: int, **fields) -> bool:
+        """Stamp additional fields onto an already-recorded reason_call entry
+        (e.g. `sub_hypotheses` parsed from the conclusion, or post-processed
+        directives). Returns True if the entry was found and updated. Used by
+        reason_hypothesize to attach per-hypothesis records after the model
+        round-trip. Bumps the index version so the next index() rebuild sees the
+        new fields. Non-None values only — never clobbers a field with None."""
+        if not call_id:
+            return False
+        with self._lock:
+            for e in self._entries:
+                if e.get("call_id") == call_id and e.get("type") == "reason_call":
+                    for k, v in fields.items():
+                        if v is not None:
+                            e[k] = v
+                    self._index_version += 1
+                    self._flush()
+                    return True
+        return False
+
+    def annotate_tool_call(self, call_id: int, **fields) -> bool:
+        """Stamp additional fields onto an already-recorded tool_call entry
+        (e.g. `coverage_window` = {start, end} of a parsed log, so the
+        negative_completeness gate can tell whether a source actually covers a
+        claim's time window). Mirrors update_reason_call: non-None values only,
+        bumps the index version. Used by the log-parsing wrappers (ez.evtxecmd,
+        misc.chainsaw_hunt) after they compute a log's event time-range."""
+        if not call_id:
+            return False
+        with self._lock:
+            for e in self._entries:
+                if e.get("call_id") == call_id and e.get("type") == "tool_call":
+                    for k, v in fields.items():
+                        if v is not None:
+                            e[k] = v
+                    self._index_version += 1
+                    self._flush()
+                    return True
+        return False
+
     def record_self_correction(
         self,
         trigger: str,
@@ -1086,6 +1165,7 @@ class ExecutionLog:
         inputs: dict | None = None,
         input_call_ids: list[int] | None = None,
         pending_pivots: list[str] | None = None,
+        candidate_pivots: list[dict] | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1125,6 +1205,11 @@ class ExecutionLog:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
             if pending_pivots:
                 entry["pending_pivots"] = [str(h) for h in pending_pivots if h]
+            if candidate_pivots:
+                entry["candidate_pivots"] = [
+                    p for p in candidate_pivots
+                    if isinstance(p, dict) and p.get("value")
+                ]
             self._append_entry(entry)
             self._last_dair_cid = cid
             return cid

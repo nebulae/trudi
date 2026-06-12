@@ -6,9 +6,9 @@ out of sync with the trace, which (after the F1 fix in core/execution_log.py)
 is now self-healing but logs a noisy WARN — better to reset cleanly.
 
 Usage:
-    python -m tools.trudi_reset --case-dir ~/cases/srl-2018-demo
-    python -m tools.trudi_reset --case-dir ~/cases/srl-2018-demo --keep-trace
-    python -m tools.trudi_reset --case-dir ~/cases/srl-2018-demo --purge-outputs
+    python -m tools.trudi_reset --case-dir ~/cases/example-case
+    python -m tools.trudi_reset --case-dir ~/cases/example-case --keep-trace
+    python -m tools.trudi_reset --case-dir ~/cases/example-case --purge-outputs
 
 What it does (under the shared fcntl lock so no in-flight write races):
     1. Backs up the active trace JSON + dashboard.url to
@@ -241,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Atomic reset of TRUDI cache + case trace.",
     )
     parser.add_argument("--case-dir", required=True,
-                        help="Path to the case directory (e.g. ~/cases/srl-2018-demo)")
+                        help="Path to the case directory (e.g. ~/cases/example-case)")
     parser.add_argument("--keep-trace", action="store_true",
                         help="Don't delete the trace JSON. Cache files still get cleared.")
     parser.add_argument("--no-backup", action="store_true",

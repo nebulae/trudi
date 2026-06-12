@@ -1,8 +1,20 @@
 """Tests for tools/dair.py — covers both claude and openai-compat backends."""
 import json
+import sys
+import types
 import pytest
 from contextlib import contextmanager
 from unittest.mock import patch, MagicMock
+
+
+if "anthropic" not in sys.modules:
+    anthropic_stub = types.ModuleType("anthropic")
+    anthropic_stub.Anthropic = MagicMock()
+    class _APITimeoutError(TimeoutError):
+        def __init__(self, *args, **kwargs):
+            super().__init__("request timed out")
+    anthropic_stub.APITimeoutError = _APITimeoutError
+    sys.modules["anthropic"] = anthropic_stub
 
 
 # ── Sample output fixtures ────────────────────────────────────────────────────
@@ -89,6 +101,8 @@ _CHALLENGE_VERIFIED_TRUE = (
 def _claude_mock(text: str):
     resp = MagicMock()
     resp.content = [MagicMock(text=text)]
+    resp.usage.input_tokens = 0
+    resp.usage.output_tokens = 0
     client = MagicMock()
     client.messages.create.return_value = resp
     anthro = MagicMock(return_value=client)
@@ -130,6 +144,14 @@ def _run(ctx_fn, text, stack="[]", context=""):
     from tools.dair import dair_assess
     with ctx_fn(text):
         return dair_assess("STUN.exe found in memory.", phase_stack=stack, case_context=context)
+
+
+def _candidate_values(result: dict, kind: str | None = None) -> set[str]:
+    return {
+        str(p.get("value", "")).upper()
+        for p in result.get("candidate_pivots") or []
+        if kind is None or p.get("kind") == kind
+    }
 
 
 # ── Success / failure basics ──────────────────────────────────────────────────
@@ -286,6 +308,7 @@ class TestDairDirectives:
         r = _run(ctx_fn, _ASSESSMENT_STAY)
         assert "directives" in r
         assert "priority_tools" in r["directives"]
+        assert "tool_manifest_version" in r["directives"]
 
     @pytest.mark.parametrize("ctx_fn", [_claude_ctx, _compat_ctx])
     def test_directives_parsed_from_raw(self, ctx_fn):
@@ -297,6 +320,30 @@ class TestDairDirectives:
         r = _run(_claude_ctx, bad)
         assert isinstance(r["directives"], dict)
         assert "priority_tools" in r["directives"]
+        assert r["directives"]["unknown_priority_tools"] == []
+
+    def test_unknown_priority_tool_is_annotated(self):
+        raw = (
+            'DAIR_ASSESSMENT:\n'
+            '{"current_phase": "Triage", "phase_rationale": "x",'
+            ' "transition_recommended": false, "next_phase": "",'
+            ' "transition_rationale": "", "stack_action": "stay",'
+            ' "investigation_focus": "x", "verification_challenges": [],'
+            ' "recommended_actions": [],'
+            ' "directives": {"priority_tools": ["vol.psscan", "vol.nope"],'
+            ' "skip_tools": [], "focus_pids": [], "focus_paths": [],'
+            ' "max_depth": "", "next_hypothesis_triggers": []}}'
+        )
+        r = _run(_claude_ctx, raw)
+        assert r["directives"]["priority_tools"] == ["vol.psscan", "vol.nope"]
+        assert r["directives"]["unknown_priority_tools"] == ["vol.nope"]
+
+    def test_system_prompt_includes_tool_capability_manifest(self):
+        from tools.dair import _DAIR_SYS
+
+        assert "TOOL CAPABILITY MANIFEST" in _DAIR_SYS
+        assert "network_pcap" in _DAIR_SYS
+        assert "vol.psscan" in _DAIR_SYS
 
 
 # ── Backend selection ─────────────────────────────────────────────────────────
@@ -661,12 +708,12 @@ class TestDairInputsCaptured:
             dair_assess(
                 "STUN.exe at C:\\Windows\\Temp confirmed.",
                 phase_stack=stack,
-                case_context="CRIMSON OSPREY at SRL",
+                case_context="REDFOX at ORG",
             )
         entry = [e for e in inst._entries if e["type"] == "dair_call"][-1]
         assert "inputs" in entry
         assert "STUN.exe" in entry["inputs"]["tool_results_summary"]
-        assert "CRIMSON OSPREY" in entry["inputs"]["case_context"]
+        assert "REDFOX" in entry["inputs"]["case_context"]
         assert isinstance(entry["inputs"]["phase_stack"], list)
         assert entry["inputs"]["phase_stack"][0]["phase"] == "Triage"
         assert "STUN.exe" in entry["inputs"]["user_message"]
@@ -694,7 +741,7 @@ class TestDairInputsCaptured:
         assert entry["inputs"]["case_context"] == "ctx"
 
 
-# ── Scan → Triage auto-push override ────────────────────────────────────────
+# ── Candidate pivot observation ──────────────────────────────────────────────
 
 _SCAN_STAY_NEW_HOST = (
     'DAIR_ASSESSMENT:\n'
@@ -721,8 +768,8 @@ def _scan_stack_json(case_id: str = "rd-01") -> str:
     )
 
 
-class TestDairScanAutoPush:
-    """Auto-push to Triage when Scan surfaces a host not in case_context."""
+class TestDairCandidatePivots:
+    """Record candidate pivots without mutating DAIR phase control."""
 
     def _run(self, summary: str, case_context: str, stack: str | None = None):
         from tools.dair import dair_assess
@@ -739,16 +786,14 @@ class TestDairScanAutoPush:
         l.configure("AUTOPUSH", str(tmp_path / "trace.json"))
         with patch("core.execution_log.log", l):
             r = self._run(
-                summary="ShimCache shows lateral hop to 172.16.4.6 c$ admin share",
-                case_context="Host rd-01 (172.16.6.11) — CRIMSON OSPREY APT",
+                summary="ShimCache shows lateral hop to 10.0.4.6 c$ admin share",
+                case_context="Host rd-01 (10.0.6.11) — REDFOX APT",
             )
         assert r["success"] is True
-        assert r["stack_action"] == "push", (
-            f"Expected auto-push but got {r['stack_action']!r}"
-        )
-        assert r["next_phase"] == "Triage"
-        assert "172.16.4.6" in r["transition_rationale"]
-        assert "server-enforced" in r["transition_rationale"].lower()
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "10.0.4.6" in _candidate_values(r, "host")
+        assert "server-enforced" not in (r.get("transition_rationale") or "").lower()
 
     def test_new_unc_path_hostname_forces_push(self, tmp_path):
         # UNC-path hostname extraction works with zero configuration —
@@ -760,11 +805,11 @@ class TestDairScanAutoPush:
         with patch("core.execution_log.log", l):
             r = self._run(
                 summary="ShimCache UNC path \\\\NORTH-DC4\\admin$\\ts.exe staging",
-                case_context="Host alpha-01 (172.16.6.11)",
+                case_context="Host alpha-01 (10.0.6.11)",
             )
-        assert r["stack_action"] == "push"
-        assert r["next_phase"] == "Triage"
-        assert "NORTH-DC4" in r["transition_rationale"].upper()
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "NORTH-DC4" in _candidate_values(r, "host")
 
     def test_env_var_prefix_hostname_forces_push(self, tmp_path, monkeypatch):
         # Case-specific hostname prefix detection is opt-in via the
@@ -778,11 +823,11 @@ class TestDairScanAutoPush:
         with patch("core.execution_log.log", l):
             r = self._run(
                 summary="wkstn-15 c$\\windows\\temp\\perfmon contains csrss.exe (suspicious)",
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
-        assert r["stack_action"] == "push"
-        assert r["next_phase"] == "Triage"
-        assert "WKSTN-15" in r["transition_rationale"].upper()
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "WKSTN-15" in _candidate_values(r, "host")
 
     def test_bare_hostname_without_env_var_does_not_push(self, tmp_path, monkeypatch):
         # Without TRUDI_PIVOT_HOSTNAME_PREFIXES, a bare "wkstn-15" mention
@@ -795,7 +840,7 @@ class TestDairScanAutoPush:
         with patch("core.execution_log.log", l):
             r = self._run(
                 summary="Sweep complete; no new lateral activity observed on wkstn-15",
-                case_context="Host alpha-01 (172.16.6.11)",
+                case_context="Host alpha-01 (10.0.6.11)",
             )
         # No IP, no UNC path → no push override; model "stay" is preserved.
         assert r["stack_action"] == "stay"
@@ -807,7 +852,7 @@ class TestDairScanAutoPush:
         with patch("core.execution_log.log", l):
             r = self._run(
                 summary="Continuing scan of rd-01 — no new external traffic",
-                case_context="Host rd-01 (172.16.6.11) — CRIMSON OSPREY",
+                case_context="Host rd-01 (10.0.6.11) — REDFOX",
             )
         # Model said "stay" and there's no new host — must stay.
         assert r["stack_action"] == "stay"
@@ -819,16 +864,15 @@ class TestDairScanAutoPush:
         with patch("core.execution_log.log", l):
             r = self._run(
                 summary=(
-                    "ShimCache enumerated UNC paths on 172.16.4.5, 172.16.4.6, "
+                    "ShimCache enumerated UNC paths on 10.0.4.5, 10.0.4.6, "
                     "wkstn-15, rd-04 — all containing perfmon\\*.exe staging."
                 ),
-                case_context="Host rd-01 (172.16.6.11) — CRIMSON OSPREY",
+                case_context="Host rd-01 (10.0.6.11) — REDFOX",
             )
-        assert r["stack_action"] == "push"
-        assert r["next_phase"] == "Triage"
-        # First pivot becomes the focus; remaining go to pending_pivots.
-        assert isinstance(r.get("pending_pivots"), list)
-        assert len(r["pending_pivots"]) >= 1
+        assert r["stack_action"] == "stay"
+        assert "10.0.4.5" in _candidate_values(r, "host")
+        assert "10.0.4.6" in _candidate_values(r, "host")
+        assert not r.get("pending_pivots")
 
     def test_stop_word_filters_unc_extracted_host(self, tmp_path):
         # If a UNC-path-like token happens to surface a stop-word as the
@@ -840,7 +884,7 @@ class TestDairScanAutoPush:
         with patch("core.execution_log.log", l):
             r = self._run(
                 summary="Scanning for \\\\WINDOWS\\system32 references — none new",
-                case_context="Host alpha-01 (172.16.6.11)",
+                case_context="Host alpha-01 (10.0.6.11)",
             )
         # "WINDOWS" is a stop-word → no push.
         assert r["stack_action"] == "stay"
@@ -862,9 +906,9 @@ class TestDairScanAutoPush:
         assert r["stack_action"] == "stay"
 
     def test_model_push_not_downgraded(self, tmp_path):
-        # If the model already said push, the override path doesn't fire
-        # (the guard checks stack_action == "stay"). This regression-locks
-        # the "never downgrade a push" invariant.
+        # If the model already said push, candidate observation does not
+        # downgrade it. This regression-locks the "never rewrite model phase"
+        # invariant.
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("AUTOPUSH", str(tmp_path / "trace.json"))
@@ -887,13 +931,13 @@ class TestDairScanAutoPush:
                 phase_stack=_scan_stack_json(),
                 case_context="Host rd-01 only",
             )
-        # Stays "push" — and the override doesn't append "server-enforced"
-        # text because the model already pushed.
+        # Stays "push" — and candidate observation doesn't append
+        # "server-enforced" text.
         assert r["stack_action"] == "push"
         assert "server-enforced" not in (r.get("transition_rationale") or "").lower()
 
 
-# ── Cross-phase pivot detection (Analyze / Collect / model-push enqueue) ─────
+# ── Cross-phase candidate detection ──────────────────────────────────────────
 
 _ANALYZE_STAY_NEW_HOST = (
     'DAIR_ASSESSMENT:\n'
@@ -936,9 +980,8 @@ _ANALYZE_PUSH_TO_SCAN_NEW_HOST = (
 
 
 class TestDairCrossPhasePivot:
-    """Pivot detection now fires from Scan, Analyze, AND Collect — any phase
-    that surfaces a host other than the one under investigation triggers a
-    push (or, on a model-emitted push to a non-Triage phase, an enqueue)."""
+    """Candidate detection runs from Scan, Analyze, AND Collect without
+    forcing a push or queue."""
 
     def test_analyze_surfaces_new_host_forces_push(self, tmp_path):
         from core.execution_log import ExecutionLog
@@ -953,14 +996,13 @@ class TestDairCrossPhasePivot:
         with patch("core.execution_log.log", l), \
              _claude_ctx(_ANALYZE_STAY_NEW_HOST):
             r = dair_assess(
-                "vol.netscan shows established session to 172.16.4.7:445 from PID 4044",
+                "vol.netscan shows established session to 10.0.4.7:445 from PID 4044",
                 phase_stack=stack,
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
-        assert r["stack_action"] == "push"
-        assert r["next_phase"] == "Triage"
-        assert "172.16.4.7" in r["transition_rationale"]
-        assert "Analyze" in r["transition_rationale"]
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "10.0.4.7" in _candidate_values(r, "host")
 
     def test_collect_surfaces_new_host_forces_push(self, tmp_path):
         from core.execution_log import ExecutionLog
@@ -977,16 +1019,15 @@ class TestDairCrossPhasePivot:
                 "Registry hive enumeration revealed \\\\BASE-RD-04\\C$ "
                 "mapped drive in HKCU\\Network",
                 phase_stack=stack,
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
-        assert r["stack_action"] == "push"
-        assert r["next_phase"] == "Triage"
-        assert "BASE-RD-04" in r["transition_rationale"].upper()
-        assert "Collect" in r["transition_rationale"]
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "BASE-RD-04" in _candidate_values(r, "host")
 
     def test_triage_does_not_pivot_on_own_focus(self, tmp_path):
         # A Triage entry investigating rd-01 mentioning a NEW host (e.g.
-        # 172.16.4.9) would normally pivot — but Triage is excluded from
+        # 10.0.4.9) would normally pivot — but Triage is excluded from
         # the eligible-phase set. Stays "stay".
         from core.execution_log import ExecutionLog
         from tools.dair import dair_assess
@@ -999,18 +1040,17 @@ class TestDairCrossPhasePivot:
         with patch("core.execution_log.log", l), \
              _claude_ctx(_ASSESSMENT_STAY):
             r = dair_assess(
-                "Verifying STUN.exe; also saw 172.16.4.9 in passing",
+                "Verifying STUN.exe; also saw 10.0.4.9 in passing",
                 phase_stack=stack,
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
         # Triage stays; no pivot push on its own surface mentions.
         assert r["stack_action"] == "stay"
 
     def test_model_push_to_non_triage_enqueues_overflow(self, tmp_path):
         # Model advances Analyze → Scan (per-host pipeline). Summary mentions
-        # a new pivot host. Server-enforced override does NOT downgrade the
-        # model push — it captures the pivot into pending_pivots for the
-        # drain preamble to handle next turn.
+        # a new candidate host. Candidate observation does NOT downgrade the
+        # model push and does not enqueue a follow-up.
         from core.execution_log import ExecutionLog
         from tools.dair import dair_assess
         l = ExecutionLog()
@@ -1023,27 +1063,25 @@ class TestDairCrossPhasePivot:
         with patch("core.execution_log.log", l), \
              _claude_ctx(_ANALYZE_PUSH_TO_SCAN_NEW_HOST):
             r = dair_assess(
-                "PsExec evidence to 172.16.4.8 confirmed; advancing to cross-host sweep",
+                "PsExec evidence to 10.0.4.8 confirmed; advancing to cross-host sweep",
                 phase_stack=stack,
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
         # Model push to Scan preserved.
         assert r["stack_action"] == "push"
         assert r["next_phase"] == "Scan"
-        # New pivot enqueued, not overridden.
-        assert "172.16.4.8" in (r.get("pending_pivots") or [])
-        assert "enqueued" in (r.get("transition_rationale") or "").lower()
+        # New pivot observed, not enqueued or overridden.
+        assert "10.0.4.8" in _candidate_values(r, "host")
+        assert not r.get("pending_pivots")
+        assert "enqueued" not in (r.get("transition_rationale") or "").lower()
 
 
-# ── Persistent pivot-queue drain ─────────────────────────────────────────────
+# ── Legacy pivot queues do not drive control flow ────────────────────────────
 
 class TestDairPivotQueueDrain:
-    """Pending pivots persist across dair_assess calls and drain
-    deterministically without invoking the model."""
+    """Legacy pending pivots no longer drive synthetic DAIR transitions."""
 
-    def test_drain_short_circuits_subsequent_call(self, tmp_path):
-        # First call: Scan surfaces three new hosts. First gets pushed,
-        # other two go into pending_pivots on the trace entry.
+    def test_candidate_pivots_do_not_short_circuit_subsequent_call(self, tmp_path):
         from core.execution_log import ExecutionLog
         from tools.dair import dair_assess
         l = ExecutionLog()
@@ -1051,56 +1089,46 @@ class TestDairPivotQueueDrain:
         with patch("core.execution_log.log", l), \
              _claude_ctx(_SCAN_STAY_NEW_HOST):
             r1 = dair_assess(
-                "ShimCache hits on 172.16.4.5, 172.16.4.6, 172.16.4.7",
+                "ShimCache hits on 10.0.4.5, 10.0.4.6, 10.0.4.7",
                 phase_stack=_scan_stack_json(),
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
-        assert r1["stack_action"] == "push"
-        assert len(r1.get("pending_pivots") or []) == 2
+        assert r1["stack_action"] == "stay"
+        assert {"10.0.4.5", "10.0.4.6", "10.0.4.7"} <= _candidate_values(r1, "host")
+        assert not r1.get("pending_pivots")
 
-        # Trace should record pending_pivots on the dair_call entry.
+        # Trace should record candidate_pivots on the dair_call entry.
         last_dair = [e for e in l._entries if e.get("type") == "dair_call"][-1]
-        assert last_dair.get("pending_pivots") == r1["pending_pivots"]
+        assert last_dair.get("candidate_pivots") == r1["candidate_pivots"]
 
-        # Second call — agent has finished the first pivot's full cycle
-        # and popped back. Now on Scan (or any non-Triage phase). The
-        # drain preamble fires WITHOUT calling the model, popping the
-        # next queued host.
-        anthro = MagicMock()  # would fail the test if called
+        # Second call still invokes the model; no synthetic drain is allowed.
         with patch("core.execution_log.log", l), \
-             patch("anthropic.Anthropic", anthro), \
-             patch("tools.dair.ANTHROPIC_API_KEY", "sk-test"), \
-             patch("tools.dair.DAIR_BACKEND", "claude"):
+             _claude_ctx(_SCAN_STAY_NEW_HOST) as client:
             r2 = dair_assess(
                 "Continuing cross-host sweep",
                 phase_stack=_scan_stack_json(),
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
-        # Drain produces a push to Triage for the next queued host.
-        assert r2["stack_action"] == "push"
-        assert r2["next_phase"] == "Triage"
-        assert r2["input_tokens"] == 0, "model should not have been called"
+        assert r2["stack_action"] == "stay"
+        assert r2["input_tokens"] == 0
         assert r2["output_tokens"] == 0
-        # Either 172.16.4.6 or 172.16.4.7 (sorted order) is now the focus.
-        assert any(h in r2["investigation_focus"]
-                   for h in ("172.16.4.6", "172.16.4.7"))
-        # Queue shrunk by one.
-        assert len(r2.get("pending_pivots") or []) == 1
-        anthro.assert_not_called()
+        assert "drained from queue" not in (r2.get("investigation_focus") or "")
+        assert not r2.get("pending_pivots")
+        client.messages.create.assert_called_once()
 
-    def test_drain_skipped_when_current_phase_is_triage(self, tmp_path):
-        # A Triage frame must run the model — drain doesn't fire mid-Triage.
+    def test_legacy_queue_ignored_when_current_phase_is_triage(self, tmp_path):
+        # A Triage frame must run the model; legacy queue entries are ignored.
         from core.execution_log import ExecutionLog
         from tools.dair import dair_assess
         l = ExecutionLog()
         l.configure("DRAIN", str(tmp_path / "trace.json"))
-        # Seed a prior dair_call entry with pending_pivots.
+        # Seed a prior legacy dair_call entry with pending_pivots.
         l.record_dair_call(
             current_phase="Scan", phase_rationale="prior",
             transition_recommended=True, next_phase="Triage",
             transition_rationale="prior push", stack_action="push",
             investigation_focus="prior triage focus",
-            pending_pivots=["172.16.4.99"],
+            pending_pivots=["10.0.4.99"],
         )
         # Now call dair_assess on a Triage frame.
         stack = json.dumps([
@@ -1113,42 +1141,265 @@ class TestDairPivotQueueDrain:
                 phase_stack=stack,
                 case_context="Host rd-01",
             )
-        # Model ran — Triage doesn't drain (model client invoked, no
-        # synthetic-drain investigation_focus, current_phase preserved).
+        # Model ran — no synthetic-drain investigation_focus, current_phase
+        # preserved.
         client.messages.create.assert_called_once()
         assert r["current_phase"] == "Triage"
         assert r["stack_action"] == "stay"
         assert "drained from queue" not in (r.get("investigation_focus") or "")
 
-    def test_drain_skipped_when_queued_host_already_investigated(self, tmp_path):
-        # Queued host appears in a later dair_call's investigation_focus →
-        # treated as known → drain returns empty → model is called.
+    def test_legacy_queue_ignored_when_queued_host_already_investigated(self, tmp_path):
+        # Queued host appears in a later dair_call's investigation_focus.
+        # The model is still called because legacy queue entries do not drive
+        # control flow.
         from core.execution_log import ExecutionLog
         from tools.dair import dair_assess
         l = ExecutionLog()
         l.configure("DRAIN", str(tmp_path / "trace.json"))
-        # Earlier entry queued 172.16.4.99…
+        # Earlier entry queued 10.0.4.99…
         l.record_dair_call(
             current_phase="Scan", phase_rationale="prior",
             transition_recommended=True, next_phase="Triage",
             transition_rationale="prior push", stack_action="push",
-            investigation_focus="Triage 172.16.4.5",
-            pending_pivots=["172.16.4.99"],
+            investigation_focus="Triage 10.0.4.5",
+            pending_pivots=["10.0.4.99"],
         )
         # …and a subsequent Triage entry already touched it.
         l.record_dair_call(
             current_phase="Triage", phase_rationale="pivot triage",
             transition_recommended=False, next_phase="",
             transition_rationale="", stack_action="stay",
-            investigation_focus="Triage pivot host 172.16.4.99",
+            investigation_focus="Triage pivot host 10.0.4.99",
         )
         with patch("core.execution_log.log", l), \
              _claude_ctx(_SCAN_STAY_NEW_HOST):
             r = dair_assess(
                 "Continuing sweep — no new hosts",
                 phase_stack=_scan_stack_json(),
-                case_context="Host rd-01 (172.16.6.11)",
+                case_context="Host rd-01 (10.0.6.11)",
             )
         # Queue empty → model runs → no synthetic push.
         # _SCAN_STAY_NEW_HOST has stack_action=stay, no new pivots in summary.
         assert r["stack_action"] == "stay"
+
+
+# ── Candidate principal detection ────────────────────────────────────────────
+# A newly-*created* account is a candidate lead just like a new host. Detection
+# keys on account-creation cues (high precision); a plain mention is ignored.
+
+_SCAN_STAY_EMPTY_FOCUS = (
+    'DAIR_ASSESSMENT:\n'
+    '{"current_phase": "Scan", "phase_rationale": "Continuing sweep",'
+    ' "transition_recommended": false, "next_phase": "",'
+    ' "transition_rationale": "",'
+    ' "stack_action": "stay",'
+    ' "investigation_focus": "",'
+    ' "verification_challenges": [], "recommended_actions": [],'
+    ' "directives": {"priority_tools": ["yara.scan_directory"], "skip_tools": [],'
+    ' "focus_pids": [], "focus_paths": [], "max_depth": "",'
+    ' "next_hypothesis_triggers": []}}'
+)
+
+
+class TestDairPrincipalCandidates:
+    """Record candidate principals without mutating DAIR phase control."""
+
+    def _run(self, summary, case_context, assessment=_SCAN_STAY_NEW_HOST):
+        from tools.dair import dair_assess
+        with _claude_ctx(assessment):
+            return dair_assess(summary,
+                               phase_stack=_scan_stack_json(),
+                               case_context=case_context)
+
+    def test_new_account_creation_forces_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="Security EID 4720 — new local admin account 'svc_x' was created",
+                case_context="Subject jdoe on host rd-01; no svc_x account known",
+            )
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "SVC_X" in _candidate_values(r, "principal")
+        assert "server-enforced" not in (r.get("transition_rationale") or "").lower()
+
+    def test_controller_question_becomes_focus(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="A covert local admin account 'printer_svc' was created on the host",
+                case_context="Subject jdoe on host rd-01",
+                assessment=_SCAN_STAY_EMPTY_FOCUS,
+            )
+        assert r["stack_action"] == "stay"
+        assert "PRINTER_SVC" in _candidate_values(r, "principal")
+        assert not (r.get("investigation_focus") or "")
+
+    def test_builtin_account_does_not_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="The built-in Guest account was created/enabled during the window",
+                case_context="Subject jdoe on host rd-01",
+            )
+        # 'Guest' is a built-in stop-word principal → no push.
+        assert r["stack_action"] == "stay"
+
+    def test_mention_without_creation_cue_does_not_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="account svc_x ran notepad.exe and opened a document",
+                case_context="Subject jdoe on host rd-01",
+            )
+        # Mention, not creation → no principal pivot.
+        assert r["stack_action"] == "stay"
+
+    def test_known_principal_in_context_no_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="new user account 'svc_x' was created on the host",
+                case_context="Known principal: account svc_x already under investigation",
+            )
+        # svc_x is already known (named in case_context) → no new candidate.
+        assert r["stack_action"] == "stay"
+
+    def test_rdp_logon_unknown_principal_forces_push(self, tmp_path):
+        # Tier A: an unknown identity authenticating over RDP forces a push —
+        # the second-principal class that creation-only detection missed.
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary=("Security 4778 — RDP session established for account "
+                         "svc_rdp (logon type 10)"),
+                case_context="Subject jdoe on host rd-01; no svc_rdp account known",
+                assessment=_SCAN_STAY_EMPTY_FOCUS,
+            )
+        assert r["stack_action"] == "stay"
+        assert r["next_phase"] == ""
+        assert "SVC_RDP" in _candidate_values(r, "principal")
+
+    def test_interactive_logon_unknown_principal_forces_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="account maint_op logged in interactively (logon type 2)",
+                case_context="Subject jdoe on host rd-01",
+                assessment=_SCAN_STAY_EMPTY_FOCUS,
+            )
+        assert r["stack_action"] == "stay"
+        assert "MAINT_OP" in _candidate_values(r, "principal")
+
+    def test_network_logon_unknown_principal_queues_not_forces(self, tmp_path):
+        # Tier B: noisier network logon enqueues rather than pre-empting stay.
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="account batch_svc network logon type 3 observed",
+                case_context="Subject jdoe on host rd-01",
+                assessment=_SCAN_STAY_EMPTY_FOCUS,
+        )
+        assert r["stack_action"] == "stay"
+        assert not r.get("pending_pivots")
+        assert "BATCH_SVC" in _candidate_values(r, "principal")
+        candidate = next(
+            p for p in r.get("candidate_pivots") or []
+            if p.get("value", "").upper() == "BATCH_SVC"
+        )
+        assert candidate.get("cue") == "appearance"
+
+    def test_known_rdp_principal_in_context_no_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="account svc_rdp logged in via RDP (logon type 10)",
+                case_context="account svc_rdp already under investigation on host rd-01",
+                assessment=_SCAN_STAY_EMPTY_FOCUS,
+            )
+        # Known-set gating: svc_rdp already under investigation → no re-pivot.
+        assert r["stack_action"] == "stay"
+
+    def test_rdp_logon_by_known_subject_no_push(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("PRINCIPALPUSH", str(tmp_path / "trace.json"))
+        with patch("core.execution_log.log", l):
+            r = self._run(
+                summary="jdoe logged in via RDP (logon type 10)",
+                case_context="Subject jdoe on host rd-01",
+                assessment=_SCAN_STAY_EMPTY_FOCUS,
+            )
+        # The case subject's own logon must not pivot — 'Subject jdoe' makes
+        # jdoe a known principal.
+        assert r["stack_action"] == "stay"
+
+
+class TestPrincipalTokenExtraction:
+    """Unit coverage for the principal token helpers."""
+
+    def test_creation_cue_required_by_default(self):
+        from tools.dair import _extract_principal_tokens
+        assert _extract_principal_tokens("user svc_x logged in") == set()
+        assert "SVC_X" in _extract_principal_tokens(
+            "new local admin account 'svc_x' was created")
+
+    def test_cue_free_extraction_for_known_set(self):
+        from tools.dair import _extract_principal_tokens
+        # require_cue=False is how the known set reads case_context / focus.
+        toks = _extract_principal_tokens(
+            "Establish who controls principal PRINTER_SVC", require_cue=False)
+        assert "PRINTER_SVC" in toks
+
+    def test_builtins_filtered(self):
+        from tools.dair import _extract_principal_tokens
+        toks = _extract_principal_tokens(
+            "new admin account 'Administrator' created and Guest account created")
+        assert "ADMINISTRATOR" not in toks
+        assert "GUEST" not in toks
+
+    def test_interactive_auth_cue_emits_token_under_forced(self):
+        from tools.dair import _extract_principal_tokens
+        toks = _extract_principal_tokens(
+            "svc_rdp logged in via RDP (logon type 10)", cue="forced")
+        assert "SVC_RDP" in toks
+
+    def test_network_logon_is_appearance_not_forced(self):
+        from tools.dair import _extract_principal_tokens
+        text = "account batch_svc network logon type 3 observed"
+        assert _extract_principal_tokens(text, cue="forced") == set()
+        assert "BATCH_SVC" in _extract_principal_tokens(text, cue="appearance")
+
+    def test_any_cue_is_union_but_bare_mention_still_empty(self):
+        from tools.dair import _extract_principal_tokens
+        assert "SVC_X" in _extract_principal_tokens(
+            "account svc_x logged in via rdp", cue="any")
+        # A bare mention with no cue family still yields nothing.
+        assert _extract_principal_tokens(
+            "account svc_x ran notepad.exe", cue="any") == set()
+
+    def test_default_cue_stays_creation_only(self):
+        # Default must remain creation-only so existing callers are unchanged:
+        # an interactive logon does NOT extract under the default cue.
+        from tools.dair import _extract_principal_tokens
+        assert _extract_principal_tokens("svc_rdp logged in via rdp") == set()
+        assert "SVC_RDP" in _extract_principal_tokens(
+            "new admin account 'svc_rdp' was created")
