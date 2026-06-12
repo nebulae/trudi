@@ -248,6 +248,17 @@ def _write_open_investigation(case_id: str, record: dict) -> None:
     os.replace(tmp, p)
 
 
+def _mutate_open_investigation(case_id: str, fn) -> Optional[dict]:
+    """Read-modify-write the open-investigation tracker via `fn(record)`.
+    No-op (returns None) if no investigation is open."""
+    rec = _read_open_investigation(case_id)
+    if rec is None:
+        return None
+    fn(rec)
+    _write_open_investigation(case_id, rec)
+    return rec
+
+
 def _next_inv_seq(case_id: str) -> int:
     """fcntl-locked atomic increment of the per-case INV counter."""
     import fcntl
@@ -926,6 +937,185 @@ def _append_containment_section(case_id: str, report_base: Path) -> int:
     return len(suggestions)
 
 
+def _load_executions(case_id: str) -> list[dict]:
+    """Read all ACT-*.json execution records for the case, in order."""
+    ex_dir = (CASES_ROOT / case_id / "monitoring" / "response" / "executions")
+    out: list[dict] = []
+    if not ex_dir.is_dir():
+        return out
+    for p in sorted(ex_dir.glob("ACT-*.json")):
+        try:
+            out.append(json.loads(p.read_text()))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
+def _would_be_rollback(suggestion: dict) -> Optional[str]:
+    """Best-effort rollback command for an action not yet executed (awaiting
+    approval), derived from its revert_template + raw_evidence."""
+    rt = suggestion.get("revert_template")
+    if not rt:
+        return None
+    try:
+        from core import ssh_exec
+        argv = ssh_exec.build_argv(rt, suggestion.get("raw_evidence") or {})
+        if len(argv) >= 3 and argv[0:2] == ["/bin/sh", "-c"]:
+            return argv[2]
+        return " ".join(argv)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _append_response_section(case_id: str, report_base: Path) -> int:
+    """Append an 'Autonomous Response Actions' section to the report `.md` and
+    mirror a structured ledger into the `.json`. Records what TRUDI actually
+    did (auto-executed / approved / reverted / awaiting approval), each with its
+    verbatim rollback/undo command. Returns the number of action rows written.
+
+    Like `_append_containment_section`, this runs AFTER `log.export()` and
+    touches only the per-investigation report files.
+    """
+    executions = _load_executions(case_id)
+    rec = _read_open_investigation(case_id) or {}
+    awaiting = set(rec.get("awaiting_approval") or [])
+    if not executions and not awaiting:
+        return 0
+
+    suggestions = _load_suggestions(case_id)
+    exec_by_id = {e.get("action_id"): e for e in executions}
+
+    ledger: list[dict] = []
+    rows: list[str] = []
+    rollback_lines: list[str] = []
+    for s in suggestions:
+        aid = s.get("action_id")
+        e = exec_by_id.get(aid)
+        if e:
+            cls = e.get("classification", "?")
+            if e.get("reverted"):
+                status = "reverted"
+            elif e.get("success"):
+                status = "auto-executed" if e.get("mode") == "auto" else "executed (approved)"
+            else:
+                status = "execution FAILED"
+            cmd = e.get("command_str", "")
+            result = f"exit {e.get('exit_code')}"
+            rollback = e.get("rollback_command") or "—"
+        elif aid in awaiting:
+            cls = "NEEDS_APPROVAL"
+            status = "awaiting operator approval"
+            cmd = (s.get("manual_command") or "").strip()
+            result = "—"
+            rollback = _would_be_rollback(s) or "—"
+        else:
+            continue
+
+        ledger.append({
+            "action_id": aid, "classification": cls, "status": status,
+            "detector": s.get("detector"), "command": cmd,
+            "result": result, "rollback_command": None if rollback == "—" else rollback,
+        })
+        rows.append(f"| {aid} | {cls} | {status} | `{cmd}` | {result} | "
+                    f"{('`' + rollback + '`') if rollback != '—' else '—'} |")
+        if rollback != "—":
+            rollback_lines.append(f"# undo {aid} ({status})\n{rollback}")
+
+    if not rows:
+        return 0
+
+    lines = [
+        "",
+        "## Autonomous Response Actions",
+        "",
+        "TRUDI auto-executes only the **reversible + low-risk** tier; destructive "
+        "actions wait for an operator-typed `approve ACT-N`. Every action below is "
+        "logged with the exact command run and its rollback/undo command.",
+        "",
+        "| Action | Class | Status | Command run | Result | Rollback / undo |",
+        "|--------|-------|--------|-------------|--------|-----------------|",
+        *rows,
+        "",
+    ]
+    if rollback_lines:
+        lines += ["### Rollback commands (run to undo)", "", "```bash",
+                  "\n\n".join(rollback_lines), "```", ""]
+
+    md_path = Path(str(report_base) + ".md")
+    try:
+        with md_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError:
+        return 0
+
+    json_path = Path(str(report_base) + ".json")
+    try:
+        doc = json.loads(json_path.read_text())
+        if isinstance(doc, dict):
+            doc["autonomous_response_actions"] = ledger
+            json_path.write_text(json.dumps(doc, indent=2))
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return len(rows)
+
+
+@mcp.tool()
+@output_safe
+def get_response_state(case_id: str) -> dict:
+    """Report autonomous-response state for the open investigation.
+
+    Returns paused (True while any action awaits operator approval),
+    awaiting_approval (action_ids), and auto_executed (action_ids that ran
+    autonomously). The slash command reads this at tick start: while paused it
+    re-surfaces the pending `approve ACT-N` prompts and takes no new autonomous
+    action."""
+    rec = _read_open_investigation(case_id)
+    awaiting = list((rec or {}).get("awaiting_approval") or [])
+    auto_done = [e.get("action_id") for e in _load_executions(case_id)
+                 if e.get("mode") == "auto" and e.get("success")]
+    return {
+        "success": True,
+        "open": rec is not None,
+        "investigation_id": (rec or {}).get("investigation_id"),
+        "paused": bool(awaiting),
+        "awaiting_approval": awaiting,
+        "auto_executed": auto_done,
+    }
+
+
+@mcp.tool()
+@output_safe
+def set_awaiting_approval(case_id: str, action_ids: list[str]) -> dict:
+    """Mark destructive action_ids as awaiting operator approval — pauses
+    autonomous response for the open investigation until they're approved."""
+    def _add(rec):
+        cur = set(rec.get("awaiting_approval") or [])
+        cur.update(action_ids or [])
+        rec["awaiting_approval"] = sorted(cur)
+    rec = _mutate_open_investigation(case_id, _add)
+    if rec is None:
+        return {"success": False, "error": "no open investigation to pause"}
+    return {"success": True, "awaiting_approval": rec.get("awaiting_approval", []),
+            "paused": bool(rec.get("awaiting_approval"))}
+
+
+@mcp.tool()
+@output_safe
+def clear_awaiting_approval(case_id: str, action_id: str) -> dict:
+    """Clear one action_id from the awaiting-approval set (after it's approved +
+    executed). When the set empties, autonomy resumes and the investigation may
+    close."""
+    def _rm(rec):
+        rec["awaiting_approval"] = [a for a in (rec.get("awaiting_approval") or [])
+                                    if a != action_id]
+    rec = _mutate_open_investigation(case_id, _rm)
+    if rec is None:
+        return {"success": False, "error": "no open investigation"}
+    return {"success": True, "awaiting_approval": rec.get("awaiting_approval", []),
+            "paused": bool(rec.get("awaiting_approval"))}
+
+
 @mcp.tool()
 @output_safe
 def end_investigation(case_id: str,
@@ -962,6 +1152,20 @@ def end_investigation(case_id: str,
         warning = (f"open investigation is {rec.get('investigation_id')!r}, "
                    f"but caller passed {investigation_id!r}")
 
+    # Loop-pause: keep the investigation OPEN while any action awaits operator
+    # approval, so a later /loop tick (after `approve ACT-N`) resumes the same
+    # trace. Do not export/swap/unlink here.
+    if rec and rec.get("awaiting_approval"):
+        return {
+            "success": True,
+            "closed": False,
+            "paused": True,
+            "investigation_id": investigation_id,
+            "awaiting_approval": rec.get("awaiting_approval"),
+            "message": "Investigation kept open — awaiting operator approval for: "
+                       + ", ".join(rec.get("awaiting_approval")),
+        }
+
     report_base = _investigation_report_base(case_id, investigation_id)
 
     from core.execution_log import log
@@ -975,6 +1179,8 @@ def end_investigation(case_id: str,
     # Append operator-runnable containment commands to the report as a fallback.
     # Touches only the per-investigation report files, never the shared export().
     containment_written = _append_containment_section(case_id, report_base)
+    # Append the autonomous-response ledger (what TRUDI actually did + rollbacks).
+    response_actions_written = _append_response_section(case_id, report_base)
 
     case_wide = _case_wide_trace_path(case_id)
     case_wide.parent.mkdir(parents=True, exist_ok=True)
@@ -1005,6 +1211,8 @@ def end_investigation(case_id: str,
         "json_wrote": export_result.get("json_wrote", False),
         "md_wrote": export_result.get("md_wrote", False),
         "containment_commands_written": containment_written,
+        "response_actions_written": response_actions_written,
+        "closed": True,
     }
     if warning:
         out["warning"] = warning

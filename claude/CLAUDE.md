@@ -214,31 +214,60 @@ When the operator stands up a Velociraptor-backed live-monitoring case
    DAIR's "last 30 entries" gate window is scoped per-trace, so
    phase stacks and `confidence_and_citation` matches don't bleed
    between independent attack scenarios.
-5. For CONFIRMED/LIKELY findings, the slash command auto-calls
-   `respond.suggest_containment` and surfaces 1–3 action options to the
-   operator. **Nothing executes** without the operator typing
-   `approve <action_id>` literally — that prompt is captured into the
-   active per-alert trace by the `UserPromptSubmit` hook, and the
-   `operator_text_required` gate matches against it before
-   `respond.approve_action` → `respond.execute_action` run.
+5. For CONFIRMED/LIKELY findings, the slash command runs **auto-protect**:
+   `respond.suggest_containment` then `respond.execute_action(mode="auto")`
+   per action. The **reversible + low-risk** tier auto-executes (with its
+   rollback command surfaced); destructive actions are queued and **pause
+   the loop** until the operator types `approve <action_id>` literally —
+   captured into the per-investigation trace by the `UserPromptSubmit`
+   hook, matched by `operator_text_required` before
+   `respond.approve_action` → `respond.execute_action(mode="operator")`.
+   See "Gated response & auto-protect" below.
 
 ---
 
-## Gated response (live-monitoring only)
+## Gated response & auto-protect (live-monitoring only)
 
 TRUDI's strict read-only-on-evidence stance is preserved everywhere
-*except* the `respond.*` namespace, which is allowed only against an
-active live-monitoring case (server-side enforced by the
-`live_monitoring_scope` gate). All response actions ride on
-`Custom.TRUDI.Respond.*` Velociraptor remediation artifacts — there is
-no free-form command execution path. Three server-side gates back the
-namespace:
+*except* the `respond.*` namespace, allowed only against an active
+live-monitoring case (server-enforced by `live_monitoring_scope`). In
+**auto-protect** mode (default ON), TRUDI is an autonomous blue-team
+agent: it auto-executes the **reversible + low-risk** tier of containment
+and asks the operator to approve anything destructive.
+
+**Execution substrate.** Actions run over a gated write-capable SSH path
+(`core/ssh_exec.py`) as **structured, validated argv** mirroring the
+`Custom.TRUDI.Respond.*` artifacts — never a free-form command string.
+Every evidence value is type-validated (pid/ip/port/path-allowlist) before
+it enters the argv, so injection is structurally impossible. The writable
+runner has no MCP surface; only `respond.execute_action` /
+`respond.revert_action` reach it, and it re-checks `live_monitoring_scope`
+itself.
+
+**The auto vs approval boundary is server-classified** from the recipe's
+`risk`/`reversible` metadata (`response/policy.py:classify`) — the agent
+cannot reclassify. AUTO = reversible AND risk:low. Everything else (any
+irreversible action, or risk ≥ medium) requires an operator-typed
+`approve ACT-N`. Passing `mode="auto"` to `execute_action` on a
+destructive action does NOT bypass approval — permission is recomputed
+from disk every call.
+
+**Loop-pause.** When a destructive action is recommended, the watcher
+queues it (`monitor.set_awaiting_approval`) and pauses autonomous response
+for that investigation; it stays open across `/loop` ticks until the
+operator approves. Every action — auto-executed, approved, or reverted —
+is logged with its **rollback/undo command** to the console and the
+report's *Autonomous Response Actions* section.
 
 | Gate | Applies to | Refuses unless… |
 |---|---|---|
-| `live_monitoring_scope` | every `respond.*` call | `case_id` has a populated `monitoring/baselines/` directory; resolves the target client from there |
-| `operator_text_required` | `respond.approve_action` | `action_id` is literally present in `operator_text` AND a matching `user_message` trace entry exists in the last 8 entries (the agent cannot self-approve — the trace records who wrote each entry) |
-| `approval_required` | `respond.execute_action`, `respond.revert_action` | a non-expired approval record exists at `<case>/monitoring/response/approvals/<action_id>.json` |
+| `live_monitoring_scope` | every `respond.*` call **and `core/ssh_exec` itself** | `case_id` has a populated `monitoring/baselines/` directory |
+| `operator_text_required` | `respond.approve_action` | `action_id` is literally in `operator_text` AND a matching `user_message` trace entry exists in the recent window (the agent cannot self-approve) |
+| `check_execution_permitted` | `respond.execute_action`, `respond.revert_action` | the action is AUTO-classified (reversible+low) with auto-protect enabled, OR a non-expired operator approval token exists (composes `approval_required`) |
+
+Auto-protect is per-case: `monitoring/config.json`
+`{"auto_protect":{"enabled":false}}` reverts to fully operator-gated
+(every action needs `approve ACT-N`). Default (no file) = enabled.
 
 `respond.*` cannot touch anything under `/cases/.../evidence/`,
 `/mnt/`, or `/media/` — those refusals are unchanged.

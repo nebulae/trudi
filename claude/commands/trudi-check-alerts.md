@@ -141,45 +141,75 @@ If `rehydrated_entries > 0` AND `alerts.empty` (we're just here to
 check approvals on a previously-opened investigation), SKIP this
 step — go straight to step 5.
 
-### 5. Recommend containment commands (TRUDI does NOT execute)
+### 5. Auto-protect: contain CONFIRMED/LIKELY threats
 
-If any finding's tier is **CONFIRMED or LIKELY**, call
+**First, check whether we're paused.** Call
+`monitor.get_response_state(case_id)`. If `paused == true`, the previous
+tick queued a destructive action awaiting the operator. Do NOT classify
+or execute anything new — re-surface each pending `approve ACT-N` prompt
+(with its would-be rollback) and **skip straight to step 7** (do not close;
+the investigation stays open). Handle any operator approval per step 6.
+
+Otherwise, for each finding with tier **CONFIRMED or LIKELY**, call
 `respond.suggest_containment(case_id, finding_id=<record_finding cid>,
 detector="Custom.TRUDI.<NewNetwork|NewProcess|NewPersistence|YaraProcess>",
-evidence=<the alert's evidence dict>)` for each such finding.
+evidence=<the alert's evidence dict>)`. Then, for each returned `ACT-N`
+that has **no** `unresolved_placeholders`, attempt autonomous execution:
 
-TRUDI performs **no** remediation — there is no approve/execute step.
-Render the returned actions to the operator as a numbered menu. For each
-`ACT-N` show its `description`, `risk`/`reversible`, and the **copyable
-command** (`manual_command`) verbatim in a fenced block, e.g.:
-
-> **ACT-1** — iptables REJECT outbound to 203.0.113.10:8080 · risk: low · reversible
-> ```
-> iptables -I OUTPUT -d 203.0.113.10 -p tcp --dport 8080 -m comment --comment TRUDI_RESPOND -j REJECT
-> ```
-
-If a host alias for the victim is registered in
-`~/cases/.common/live_hosts.json`, you may also show the
-`ssh <alias> -- <manual_command>` form so it runs from a normal terminal.
-Tell the operator plainly: "run any of these yourself to contain — nothing
-is executed for you." Skip actions whose `unresolved_placeholders` is
-non-empty (evidence was missing) or flag them as incomplete.
-
-### 6. Close the investigation
-
-The investigation always closes at the end of the tick (there is no
-approval/execution to wait on):
 ```
-monitor.end_investigation(case_id, investigation_id,
-    outcome_note="<detector mix / verdict / recommended commands>")
+respond.execute_action(case_id, action_id="ACT-N", mode="auto")
+```
+
+The server decides — you do not classify. Two outcomes:
+
+- **Permitted (AUTO tier — reversible AND low-risk, auto-protect enabled):**
+  the action runs over the gated write-SSH path. Tell the operator what
+  ran and **print the `rollback_command` from the return verbatim** so
+  they can undo it. Example:
+  > 🛡️ Auto-contained **ACT-1** (reversible/low): `kill -STOP 4242` → OK
+  > Undo: `kill -CONT 4242`
+
+- **Refused with `gate: "approval_required"` (destructive — irreversible
+  or risk ≥ medium):** do NOT retry. Queue it and pause:
+  `monitor.set_awaiting_approval(case_id, action_ids=["ACT-N"])`, then
+  surface the approval prompt with the command and the rollback that
+  *would* run:
+  > ⛔ **ACT-2** needs approval (irreversible): `kill -9 4242`
+  > Type `approve ACT-2` to authorise. Autonomous response is paused until you do.
+
+  Once any action is queued for approval, stop taking new autonomous
+  actions this tick.
+
+Skip actions whose `unresolved_placeholders` is non-empty (flag them as
+incomplete — evidence was missing).
+
+### 6. Operator approvals (resume path)
+
+If the operator has typed `approve ACT-N` (the `UserPromptSubmit` hook has
+already written it to this investigation's trace), authorise + execute it:
+```
+respond.approve_action(case_id, "ACT-N", operator_text="approve ACT-N")
+respond.execute_action(case_id, "ACT-N", mode="operator")
+monitor.clear_awaiting_approval(case_id, "ACT-N")
+```
+Print the `rollback_command` for the executed action. To undo a prior
+action on request, call `respond.revert_action(case_id, "ACT-N")`.
+
+### 7. Close the investigation (unless paused)
+
+Call `monitor.end_investigation(case_id, investigation_id,
+outcome_note="<detector mix / verdict / actions taken>")`. If actions are
+still awaiting approval it returns `closed: false, paused: true` and keeps
+the investigation open for a later tick — that's expected; just continue.
+When it does close, it writes two report sections: **Recommended
+Containment Commands (run manually)** and **Autonomous Response Actions**
+(what TRUDI executed, with rollback/undo commands). Then ack the bundle:
+```
 for alert_id in bundle.alert_ids:
     monitor.ack_alert(case_id, alert_id)
 ```
-`end_investigation` writes the recommended commands into the report's
-**Recommended Containment Commands (run manually)** section, so the runnable
-commands are preserved in the report even after the tick ends.
 
-### 7. Write last-seen seq
+### 8. Write last-seen seq
 
 Update `~/cases/<case>/monitoring/_last_check_seq.txt` to the highest
 seq we **drained** in step 2 (whether or not the investigation closed
