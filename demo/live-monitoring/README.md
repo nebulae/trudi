@@ -9,26 +9,42 @@ attacks that fire the `Custom.TRUDI.*` detector artifacts.
 
 ```bash
 cd demo/live-monitoring
+./bring-up.sh
+```
+
+`bring-up.sh` runs `docker compose up -d --build`, then performs every
+post-boot wiring step idempotently: waits for and pulls the Velociraptor API
+config, pulls the victim's freshly-generated SSH key to `~/.ssh/trudi_live`,
+**merges** the `trudi-victim` entry into `~/cases/.common/live_hosts.json`
+(preserving any other hosts), and smoke-tests the SSH path `live.*` uses.
+Re-run it any time after `docker compose down -v` — it re-pulls the new key
+and leaves `live.*` working.
+
+```bash
+./bring-up.sh --no-up      # stack already running; just (re)wire the host
+./bring-up.sh --no-build   # up without --build
+```
+
+<details>
+<summary>Manual equivalent (what bring-up.sh automates)</summary>
+
+```bash
 docker compose up -d --build
+docker compose logs --tail=20 velo-server | grep -i enroll   # ~30s to enroll
 
-# Wait ~30s for config gen + client enrollment, then:
-docker compose logs --tail=20 velo-server | grep -i enroll
-
-# Talk to the server from the SIFT host:
+# Velociraptor API config:
 mkdir -p ~/.config/trudi/velociraptor
 docker compose cp velo-server:/config/api.config.yaml \
     ~/.config/trudi/velociraptor/api.config.yaml
-
-# Sanity check that the API works:
 velociraptor --api_config ~/.config/trudi/velociraptor/api.config.yaml \
     query --format=json "SELECT client_id, os_info.hostname FROM clients()"
 
-# Pull the SSH keypair so live.* can SSH into the victim:
+# SSH keypair for live.*:
 docker compose cp victim:/shared/trudi_live ~/.ssh/trudi_live
 docker compose cp victim:/shared/trudi_live.pub ~/.ssh/trudi_live.pub
 chmod 600 ~/.ssh/trudi_live
 
-# Register the host for live.*:
+# Register the host (this snippet CLOBBERS the file — bring-up.sh merges instead):
 mkdir -p ~/cases/.common
 cat > ~/cases/.common/live_hosts.json <<'EOF'
 {
@@ -42,6 +58,7 @@ cat > ~/cases/.common/live_hosts.json <<'EOF'
 EOF
 ssh -i ~/.ssh/trudi_live -p 2222 victim@localhost id   # smoke test
 ```
+</details>
 
 ## Staging attacks
 
