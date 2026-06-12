@@ -22,6 +22,7 @@
     --finding-suspected: #ffd86b;
     --finding-unconfirmed: #8a93a6;
     --self-correct: #ffcb6b;
+    --curiosity: #5ed1d1;
     --ok: #4ad295;
     --warn: #ffa86b;
     --err: #ff6b6b;
@@ -271,6 +272,7 @@
   .block.kind-finding.tier-SUSPECTED  { border-left-color: var(--finding-suspected); }
   .block.kind-finding.tier-UNCONFIRMED{ border-left-color: var(--finding-unconfirmed); }
   .block.kind-self_correction         { border-left-color: var(--self-correct); }
+  .block.kind-curiosity_probe         { border-left-color: var(--curiosity); }
   .block.kind-narration               { border-left-color: var(--fg-dim); }
 
   /* Tier pill on findings */
@@ -343,6 +345,7 @@
       <label><input type="checkbox" class="kind-filter" value="reason_audit_findings" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.audit</label>
       <label><input type="checkbox" class="kind-filter" value="finding" checked> <span class="legend-dot" style="background:var(--finding-confirmed)"></span> Findings</label>
       <label><input type="checkbox" class="kind-filter" value="self_correction" checked> <span class="legend-dot" style="background:var(--self-correct)"></span> Self-corrections</label>
+      <label><input type="checkbox" class="kind-filter" value="curiosity_probe" checked> <span class="legend-dot" style="background:var(--curiosity)"></span> Curiosity probes</label>
       <label><input type="checkbox" class="kind-filter" value="narration"> <span class="legend-dot" style="background:var(--fg-dim)"></span> Agent notes</label>
       <label><input type="checkbox" id="show-hook-ops"> <span class="legend-dot" style="background:var(--fg-dim);opacity:0.5"></span> Agent shell ops (Bash/Read/Edit)</label>
     </div>
@@ -409,7 +412,7 @@ const State = {
       'reason_hypothesize', 'reason_evaluate_finding',
       'reason_confidence_score', 'reason_cite_check',
       'reason_synthesize', 'reason_pre_report_check', 'reason_audit_findings',
-      'finding', 'self_correction',
+      'finding', 'self_correction', 'curiosity_probe',
     ]),
     showHookOps: false,  // PostToolUse hook entries (Bash/Read/Edit/Write) — off by default
   },
@@ -780,6 +783,7 @@ function blockTitle(b) {
     }
     case 'finding':                 return 'finding';
     case 'self_correction':         return `self-correction · ${e.trigger || ''}`;
+    case 'curiosity_probe':         return `🔍 curiosity probe${e.seeded_by ? ' · ' + e.seeded_by : ''}`;
     case 'narration':               return 'agent note';
     default:                        return e.type || 'entry';
   }
@@ -875,6 +879,11 @@ function blockBody(b) {
       return inOutBody(
         truncate((e.prior_belief || '').replace(/\s+/g, ' '), 60),
         truncate((e.new_belief || '').replace(/\s+/g, ' '), 60),
+      );
+    case 'curiosity_probe':
+      return inOutBody(
+        e.seeded_by ? `seeded by ${e.seeded_by}` : 'self-directed probe',
+        truncate((e.probe_rationale || '').replace(/\s+/g, ' '), 80),
       );
     case 'narration':
       return inOutBody('', truncate((e.content || '').replace(/\s+/g, ' '), 80));
@@ -1292,12 +1301,18 @@ function renderEntryDetail(e, kind, lines) {
     if (e.trigger) lines.push(`<div class="d-row"><b>trigger</b>: ${escapeHtml(e.trigger)}</div>`);
     if (e.prior_belief) lines.push(`<div class="d-row"><b>prior_belief</b>: ${escapeHtml(e.prior_belief)}</div>`);
     if (e.evidence) lines.push(`<div class="d-row"><b>evidence</b>: ${escapeHtml(e.evidence)}</div>`);
+  } else if (kind === 'curiosity_probe') {
+    if (e.seeded_by) lines.push(`<div class="d-row"><b>seeded_by</b>: ${escapeHtml(e.seeded_by)} <span style="color:var(--fg-dim);">(absence hypothesis)</span></div>`);
+    if (Array.isArray(e.input_call_ids) && e.input_call_ids.length) {
+      lines.push(`<div class="d-row"><b>probed</b>: ${e.input_call_ids.map(c => `<a class="d-link" onclick="focusBlock('${State.blockOfCid.get(c) || ''}')">#${c}</a>`).join(' ')}</div>`);
+    }
+    lines.push('<div class="d-row" style="color:var(--fg-dim);">Self-directed read-only look — no evidentiary weight until its call_id flows into a finding.</div>');
   } else {
     lines.push('<div class="d-row" style="color:var(--fg-dim);">(no captured inputs)</div>');
   }
 
   // BODY / CONCLUSION
-  const body = e.conclusion || e.description || e.content || e.new_belief || '';
+  const body = e.conclusion || e.description || e.content || e.new_belief || e.probe_rationale || '';
   if (body) {
     lines.push('<div class="d-section">Output / Conclusion</div>');
     lines.push(`<div class="d-row">${escapeHtml(body)}</div>`);

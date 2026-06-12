@@ -22,6 +22,7 @@
     --finding-suspected: #ffd86b;
     --finding-unconfirmed: #8a93a6;
     --self-correct: #ffcb6b;
+    --curiosity: #5ed1d1;
     --ok: #4ad295;
   }
   * { box-sizing: border-box; }
@@ -126,6 +127,7 @@
       <label><input type="checkbox" class="node-filter" value="reason_audit_findings" checked> <span class="legend-dot" style="background:#b48cff"></span> reason.audit</label>
       <label><input type="checkbox" class="node-filter" value="dair_call" checked> <span class="legend-dot" style="background:var(--dair)"></span> DAIR phases</label>
       <label><input type="checkbox" class="node-filter" value="self_correction" checked> <span class="legend-dot" style="background:var(--self-correct)"></span> Self-corrections</label>
+      <label><input type="checkbox" class="node-filter" value="curiosity_probe" checked> <span class="legend-dot" style="background:var(--curiosity)"></span> Curiosity probes</label>
       <label><input type="checkbox" class="node-filter" value="tool_call"> <span class="legend-dot" style="background:var(--tool)"></span> Tool calls (noisy)</label>
       <label><input type="checkbox" class="node-filter" value="narration"> <span class="legend-dot" style="background:var(--tool)"></span> Agent notes</label>
     </div>
@@ -187,7 +189,7 @@ const State = {
     // Default: ALL reason calls, findings, dair, self-correction. Tool calls + narration off
     // (toggle them on for full-fidelity audit view; they swamp the layout otherwise).
     types: new Set([
-      'finding', 'dair_call', 'self_correction',
+      'finding', 'dair_call', 'self_correction', 'curiosity_probe',
       'reason_plan', 'reason_hypothesize', 'reason_evaluate_finding',
       'reason_confidence_score', 'reason_cite_check', 'reason_synthesize',
       'reason_pre_report_check', 'reason_audit_findings',
@@ -324,6 +326,10 @@ function nodeFor(entry) {
       label = `#${cid} ⟲ ${entry.trigger || 'self-correction'}`;
       color = '#ffcb6b';
       break;
+    case 'curiosity_probe':
+      label = `#${cid} 🔍 probe${entry.seeded_by ? ' ' + entry.seeded_by : ''}`;
+      color = '#5ed1d1';
+      break;
     case 'investigation_narration':
       label = `#${cid} ✎ note`;
       color = '#8a93a6';
@@ -341,6 +347,7 @@ function nodeFor(entry) {
              : kind.startsWith('reason_') ? 'tag'
              : kind === 'dair_call' ? 'hexagon'
              : kind === 'self_correction' ? 'star'
+             : kind === 'curiosity_probe' ? 'vee'
              : kind === 'narration' ? 'triangle'
              : 'ellipse',
     },
@@ -375,6 +382,19 @@ function edgesFor(entry, byCid, hypById) {
         edges.push({
           data: { id: `ecns${cid}_${inp}`, source: `n${cid}`, target: `n${inp}`, kind: 'consumes' },
           style: { 'line-color': '#8a93a6', 'target-arrow-color': '#8a93a6', 'opacity': 0.5 },
+        });
+      }
+    }
+  }
+
+  // Curiosity probes — link them to the artifacts they looked at (the
+  // read-only entries the agent chose to inspect outside the work order).
+  if (entry.type === 'curiosity_probe' && Array.isArray(entry.input_call_ids)) {
+    for (const inp of entry.input_call_ids) {
+      if (byCid.has(inp)) {
+        edges.push({
+          data: { id: `eprb${cid}_${inp}`, source: `n${cid}`, target: `n${inp}`, kind: 'probes' },
+          style: { 'line-color': '#5ed1d1', 'target-arrow-color': '#5ed1d1', 'line-style': 'dashed', 'opacity': 0.6 },
         });
       }
     }

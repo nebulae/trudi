@@ -113,9 +113,9 @@ The point of all of this is that the guardrails are architectural, not just prom
 | Confirmed claims require review | confidence-score, citation-check, hypothesis, lineage, and adversarial-evaluate gates hard-block unsupported CONFIRMED/LIKELY findings |
 | Response stays advisory | TRUDI runs no containment or remediation; recommended actions are printed as commands in the report for the analyst to run, keeping the human in the loop on every system-changing action |
 
-Every tool call, reasoning call, DAIR transition, self-correction, and finding is written to a
-live JSON/Markdown trace, rendered in a dashboard, and scored by an accuracy framework against
-ground truth (precision, recall, F1, and negative-coverage).
+Every tool call, reasoning call, DAIR transition, self-correction, curiosity probe, and finding
+is written to a live JSON/Markdown trace, rendered in a dashboard, and scored by an accuracy
+framework against ground truth (precision, recall, F1, and negative-coverage).
 
 ## Challenges I ran into
 

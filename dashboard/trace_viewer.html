@@ -22,6 +22,7 @@
     --finding-suspected: #ffd86b;
     --finding-unconfirmed: #8a93a6;
     --self-correct: #ffcb6b;
+    --curiosity: #5ed1d1;
     --error: #ff6b6b;
     --ok: #4ad295;
   }
@@ -121,6 +122,7 @@
   .pill.finding-suspected { background: rgba(255,216,107,.15); color: var(--finding-suspected); }
   .pill.finding-unconfirmed { background: rgba(138,147,166,.15); color: var(--finding-unconfirmed); }
   .pill.self-correction { background: rgba(255,203,107,.15); color: var(--self-correct); }
+  .pill.curiosity { background: rgba(94,209,209,.15); color: var(--curiosity); }
   .pill.narration { background: rgba(138,147,166,.10); color: var(--fg-dim); }
   .pill.error { background: rgba(255,107,107,.15); color: var(--error); }
   .pill.ok { background: rgba(74,210,149,.15); color: var(--ok); }
@@ -260,6 +262,7 @@
       <label><input type="checkbox" class="type-filter" value="tool_call" checked><span class="pill tool">TOOL</span><span class="count" data-count="tool_call">0</span></label>
       <label><input type="checkbox" class="type-filter" value="finding" checked><span class="pill finding-confirmed">FIND</span><span class="count" data-count="finding">0</span></label>
       <label><input type="checkbox" class="type-filter" value="self_correction" checked><span class="pill self-correction">🔄 SC</span><span class="count" data-count="self_correction">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="curiosity_probe" checked><span class="pill curiosity">🔍 PROBE</span><span class="count" data-count="curiosity_probe">0</span></label>
       <label><input type="checkbox" class="type-filter" value="investigation_narration" checked><span class="pill narration">NOTE</span><span class="count" data-count="investigation_narration">0</span></label>
       <label><input type="checkbox" class="type-filter" value="call_initiated"><span class="pill narration">init</span><span class="count" data-count="call_initiated">0</span></label>
       <label><input type="checkbox" class="type-filter" value="call_abandoned" checked><span class="pill error">abort</span><span class="count" data-count="call_abandoned">0</span></label>
@@ -534,6 +537,19 @@ function entrySummary(e) {
         meta: escapeHtml(e.trigger) + chip,
       };
     }
+    case 'curiosity_probe': {
+      const refs = e.input_call_ids || [];
+      const chips = refs.length
+        ? refs.slice(0, 5).map(c => _linkChip(c, `→ #${c}`)).join('')
+          + (refs.length > 5 ? ` +${refs.length - 5}` : '')
+        : '';
+      const seeded = e.seeded_by ? ` <code>${escapeHtml(e.seeded_by)}</code>` : '';
+      return {
+        pill: '<span class="pill curiosity">🔍 PROBE</span>',
+        line: escapeHtml(shorten(e.probe_rationale, 120)),
+        meta: seeded + chips,
+      };
+    }
     case 'investigation_narration': {
       const refs = e.input_call_ids || [];
       const chips = refs.length
@@ -694,6 +710,7 @@ function renderDetail(e) {
     case 'dair_call': body = renderDairCall(e); break;
     case 'finding': body = renderFinding(e); break;
     case 'self_correction': body = renderSelfCorrection(e); break;
+    case 'curiosity_probe': body = renderCuriosityProbe(e); break;
     case 'investigation_narration': body = renderNarration(e); break;
     case 'call_initiated':
     case 'call_abandoned': body = renderInit(e); break;
@@ -825,6 +842,19 @@ function renderNarration(e) {
   return `
     ${refs.length ? `<div class="kv"><span class="k">refers to</span><span class="v">${refs.map(c => `<span class="link" data-jump="${c}">#${c}</span>`).join(' ')}</span></div>` : ''}
     <h3>content</h3><pre>${escapeHtml(e.content)}</pre>
+  `;
+}
+
+function renderCuriosityProbe(e) {
+  const refs = e.input_call_ids || [];
+  return `
+    <div class="kv">
+      ${e.seeded_by ? `<span class="k">seeded by</span><span class="v"><code>${escapeHtml(e.seeded_by)}</code> <span style="color:var(--fg-dim);font-size:10px;">(absence hypothesis)</span></span>` : ''}
+      ${refs.length ? `<span class="k">probed</span><span class="v">${refs.map(c => `<span class="link" data-jump="${c}">#${c}</span>`).join(' ')}</span>` : ''}
+    </div>
+    <h3>probe rationale</h3><pre>${escapeHtml(e.probe_rationale || '')}</pre>
+    <p style="color:var(--fg-dim);font-size:11px;">A self-directed read-only look outside the work order. Carries no evidentiary weight alone — its <code>call_id</code> must flow into a finding via <code>input_call_ids</code> for the gates to apply.</p>
+    ${_findingsLinkedHere(e.call_id)}
   `;
 }
 
