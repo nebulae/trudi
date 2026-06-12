@@ -129,13 +129,13 @@ per-investigation trace.
 Then execute the DAIR `priority_tools` batch (velo.* substrate per the
 existing guidance, see Substrate section below). Per finding:
 - `reason.confidence_score` + `reason.cite_check` (so the
-  `evidence_strength` gate passes for tier >= LIKELY)
+  `confidence_and_citation` gate passes for tier ≥ LIKELY)
 - `misc.record_finding(...)` with
   - `linked_call_id = <source tool cid>`
   - `input_call_ids = [genesis_call_id, hypothesize_cid, <tool cids>]`
   - `tested_hypothesis_id = <hypothesis_id>`
   - description including detector T-numbers where applicable so
-    `evidence_strength` can validate them.
+    `mitre_technique_validation` passes.
 
 If `rehydrated_entries > 0` AND `alerts.empty` (we're just here to
 check approvals on a previously-opened investigation), SKIP this
