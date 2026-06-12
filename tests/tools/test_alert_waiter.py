@@ -3,6 +3,10 @@ backs /trudi-watch-alerts. Loaded via importlib because the filename is
 hyphenated (not a normal module name)."""
 import importlib.util
 import json
+import select
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -70,7 +74,7 @@ class TestMain:
         out = json.loads(capsys.readouterr().out.strip())
         assert out["status"] == "HEARTBEAT"
 
-    def test_explicit_since_overrides_file(self, waiter, case, capsys):
+    def test_explicit_since_overrides_file_oneshot(self, waiter, case, capsys):
         root, cid, alerts = case
         (root / cid / "monitoring" / "_last_check_seq.txt").write_text("0")
         (alerts / "3_NewProcess.json").write_text("{}")
@@ -78,3 +82,42 @@ class TestMain:
                           "--since-seq", "3", "--interval", "0.2", "--timeout", "0.3"])
         out = json.loads(capsys.readouterr().out.strip())
         assert out["status"] == "HEARTBEAT"  # since=3 means seq 3 is not "new"
+
+
+def _readline_timeout(proc, timeout):
+    """Read one stdout line from a Popen within `timeout`s, or fail."""
+    end = time.time() + timeout
+    while time.time() < end:
+        r, _, _ = select.select([proc.stdout], [], [], 0.2)
+        if r:
+            line = proc.stdout.readline()
+            if line:
+                return line
+    raise AssertionError("no output line within timeout")
+
+
+class TestFollowMode:
+    """--follow runs persistently (for the Monitor tool), emitting one line per
+    new-alert batch with no re-arm — the fix for the dropped-re-arm gap."""
+
+    def test_emits_initial_then_only_new(self, case):
+        root, cid, alerts = case
+        (alerts / "00000001_NewProcess.json").write_text("{}")
+        proc = subprocess.Popen(
+            [sys.executable, str(_WAITER), "--follow", "--case-id", cid,
+             "--cases-root", str(root), "--interval", "0.3"],
+            stdout=subprocess.PIPE, text=True)
+        try:
+            d1 = json.loads(_readline_timeout(proc, 6))
+            assert d1["status"] == "ALERTS" and d1["new_seqs"] == [1]
+            # A new alert arriving later is reported as its own event (cursor
+            # advanced — seq 1 is not re-reported).
+            (alerts / "00000002_NewNetwork.json").write_text("{}")
+            d2 = json.loads(_readline_timeout(proc, 6))
+            assert d2["new_seqs"] == [2]
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
