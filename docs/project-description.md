@@ -70,6 +70,39 @@ TRUDI is a three-model system sitting behind a typed MCP boundary.
   Collect, Analyze, Scan, Report), prescribes the next tool batch, and pushes a new Triage
   loop whenever lateral movement points at a new host.
 
+### How a conclusion gets earned
+
+The reasoning isn't one "analyze" step. It's a loop with named checkpoints, and every checkpoint
+leaves a row in the trace.
+
+It starts with the **case question**. Before any tool runs, `reason.hypothesize` turns that
+question ("who sent the harassing email?", "what was exfiltrated?") into a set of competing,
+testable hypotheses, and it is *required* to produce at least one that isn't the obvious
+narrative: a genuinely different actor or mechanism. Each hypothesis gets an ID (`H0007`), and the
+call hands back the **discriminators**, the specific tool calls that would separate the top two
+explanations (a logon type and source address, USB serials across user profiles, a
+registry-to-account binding). Those become the work order. The goal is to attack the question from
+more than one direction at once instead of locking onto the first plausible story, which is the
+single most expensive failure mode in an investigation.
+
+`reason.plan` runs at the top of every triage phase and turns the current evidence picture into a
+prioritized, manifest-backed tool sequence, so the agent collects in a sensible order instead of
+flailing. As artifacts come in, hypotheses are confirmed, refuted, or split, and a contested actor
+can't just be left dangling: a competing principal rated medium-likelihood or higher has to be
+driven to CONFIRMED or REFUTED (or explicitly parked as evidence-unavailable) before the case can
+close.
+
+Before any strong claim is written, a finding has to survive a per-finding review chain:
+`reason.evaluate_finding` (does the evidence actually support this, or is it CHALLENGED?),
+`reason.confidence_score` (an evidence-grounded tier and a 0–1 score; if it comes back lower than
+intended, the finding is downgraded), and `reason.cite_check` (does every concrete claim, every
+path, IP, hash, and technique ID, cite a real artifact?). At the end, `reason.synthesize` checks
+the whole finding set for cross-consistency and `reason.pre_report_check` refuses to let the report
+be written while any blocking issue remains: an unresolved second principal, an attribution with no
+logon/session evidence behind it, a case question left unanswered. Each finding carries the ID of
+the hypothesis it tested, so the trace reads as hypothesis → evidence → verdict, not a flat list of
+assertions.
+
 Everything the agent does crosses one boundary: the TRUDI MCP server, which mounts over 250
 typed tools across 24 namespaces. The agent never shells out to `vol` or `RECmd.dll`
 directly. It calls a typed wrapper, and a safe executor runs the court-vetted binary with
@@ -109,6 +142,46 @@ The point of all of this is that the guardrails are architectural, not just prom
 | Findings must be traceable | `misc.record_finding` requires a `linked_call_id` pointing at the producing `_trudi_call_id`. No link, no finding |
 | Confirmed claims require review | confidence-score, citation-check, hypothesis, lineage, and adversarial-evaluate gates hard-block unsupported CONFIRMED/LIKELY findings |
 | Response stays advisory | TRUDI runs no containment or remediation; recommended actions are printed as commands in the report for the analyst to run, keeping the human in the loop on every system-changing action |
+
+### Gates that can refuse a finding
+
+The checkpoints above are advice until something enforces them. What makes them real is that
+`record_finding` (and the final report export) run through a set of **server-side gates** that
+return a hard refusal, not a warning, when a finding doesn't clear the bar. The agent can't talk
+its way past them, because they're computed from the trace and the finding's own metadata, not from
+the prose of the request. A representative few:
+
+- **`confirmed_requires_linked_call_id` / `linked_call_id_must_exist`** — a CONFIRMED finding must
+  point at the real `_trudi_call_id` of the tool execution that produced it. No link, or a
+  made-up one, no finding.
+- **`confirmed_requires_supported_evaluate`** — if the most recent `reason.evaluate_finding` came
+  back CHALLENGED or UNCERTAIN, the CONFIRMED claim is refused until it is supported or downgraded.
+- **`confidence_and_citation`** — a CONFIRMED/LIKELY finding needs a fresh confidence score and
+  citation check tied to *its own* text; one review can't be reused to wave a second finding
+  through.
+- **`hypothesize_required`** — a finding about a process, service, persistence, C2, or lateral
+  movement has to trace back to a hypothesis, so conclusions stay tied to a question that was
+  actually asked.
+- **`principal_attribution_grounding` / `named_actor_attribution_grounding`** — binding an account
+  or a named person to an action ("X exfiltrated…", "account Y is operated by Z") is refused
+  unless the evidence includes an authentication/session artifact (a 4624/4625 logon by type and
+  source, an RDP session, an SSH login). An account name is not a person.
+- **`exfil_channel_grounding`** — claiming data left the host over a channel needs a transfer
+  artifact (bytes moved, an FTP log, a USN write, a mail attachment), not just "the tool was
+  installed" or "a file sat in a sync folder." Staging is not egress.
+- **`mcp_routing`** — a finding that cites a raw shelled-out binary instead of the typed MCP
+  wrapper is refused, which keeps the audit trail inside the boundary.
+- **`negative_completeness` / `negative_from_truncated`** — an absence claim ("no RDP logons", "no
+  persistence") is refused unless the trace searched the complete source set for that claim, and
+  refused outright if its evidence was a truncated scan.
+- **`mitre_technique_validation`** — any ATT&CK technique ID in a finding is validated against the
+  real ATT&CK catalog; an invented `T####` is rejected with the offending string.
+- **`reformulation_depth_limit`** — re-evaluating the same finding repeatedly with no new evidence
+  in between is blocked, so the agent can't grind a weak finding through review by rewording it.
+
+This is why "autonomous" doesn't mean "unaccountable." Most of the hardening work was finding a new
+way to be wrong on a real case (below) and then turning the fix into a gate, so the same mistake
+can't recur on the next case, or the next user's.
 
 Every tool call, reasoning call, DAIR transition, self-correction, curiosity probe, and finding
 is written to a live JSON/Markdown trace, rendered in a dashboard, and scored by an accuracy
