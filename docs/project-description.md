@@ -2,11 +2,9 @@
 
 *Find Evil! Hackathon — Written Project Description (Devpost story)*
 
-> TRUDI is an autonomous DFIR agent that runs a full incident-response investigation on
-> the SANS SIFT Workstation: disk triage, memory forensics, Windows artifacts, network
-> and YARA hunting. It produces a court-defensible report where every conclusion has
-> survived an adversarial reviewer and links back to the exact tool execution that
-> produced it.
+## TL;DR
+
+Most AI agents are a single model grading their own work, which is how a confident hallucination ends up in a report. TRUDI splits the job across three. Claude runs the tools, a DAIR director decides what to examine next, and an adversarial reviewer challenges every conclusion before it's written. Each finding is tagged CONFIRMED, LIKELY, or SUSPECTED, and server-enforced gates make integrity structural: a CONFIRMED finding cannot be recorded without a link to the tool call that proves it. Machine-speed investigation, conclusions you can defend.
 
 ---
 
@@ -60,7 +58,7 @@ traced through NTLM logon records.
 
 ## How I built it
 
-TRUDI is a two-model system sitting behind a typed MCP boundary.
+TRUDI is a three-model system sitting behind a typed MCP boundary.
 
 - **Claude (primary analyst)** orchestrates the investigation, selects tools, interprets
   output, and writes the report.
@@ -83,14 +81,13 @@ retry, timeout, and a line cap. What the boundary exposes:
   network tooling (`net.*`), EWF and image mounting (`ewf.*`, `img.*`), hashing (`hash.*`),
   static analysis (`strings.*`), and a `misc.*` namespace covering email, registry,
   event-log, and macro tooling.
-- **Beyond static evidence.** TRUDI doesn't stop at dead-box images. `live.*` does read-only
-  live endpoint analysis over argv-only SSH (processes, connections, persistence, open files,
-  log tails). `velo.*` wraps the Velociraptor API surface (client enumeration, artifact
-  collection, event tables, VQL queries). `monitor.*` drives a live-monitoring lifecycle
-  (baseline capture, watchers, alert draining). TRUDI never runs containment or remediation
-  itself. Response steps are printed as copy-pasteable commands in the report for the analyst
-  to run, which keeps the agent strictly read-only and the human in the loop on anything that
-  changes a system.
+- **Read-only by construction.** This submission investigates static evidence (disk images,
+  memory captures, PCAPs). The agent has no write path to the system under analysis, and
+  response is advisory only: recommended actions are printed as copy-pasteable commands in the
+  report for the analyst to run, keeping the human in the loop on anything that changes a system.
+  (An experimental live-endpoint layer, `live.*` / `velo.*` / `monitor.*`, extends the same
+  read-only boundary to running hosts. It runs today but is still in progress and is **not part
+  of this submission**, see *What's next*.)
 - **Added analysis tooling.** `enrich.*` (threat-intel lookups), `correlate.*` (cross-tool
   joins and ATT&CK mapping), `af.*` (anti-forensics detection), `attribution.*`,
   `accuracy.*`, and `coverage.*` for scoring and ground-truth comparison.
@@ -115,7 +112,9 @@ The point of all of this is that the guardrails are architectural, not just prom
 
 Every tool call, reasoning call, DAIR transition, self-correction, curiosity probe, and finding
 is written to a live JSON/Markdown trace, rendered in a dashboard, and scored by an accuracy
-framework against ground truth (precision, recall, F1, and negative-coverage).
+framework against ground truth: precision, recall, $F_1 = 2 \cdot \frac{P \cdot R}{P + R}$, and a
+negative-coverage metric that rewards the "we looked for X and found nothing" findings instead of
+ignoring them.
 
 ## Challenges I ran into
 
@@ -224,17 +223,6 @@ network-only harassment attribution from a single PCAP, plus M57, Schardt, and R
 depth, not just coverage: individual runs produced 16–28 tiered findings over traces of 100 to
 350-plus fully linked entries.
 
-**The system worked well enough that I extended it past dead-box forensics.** TRUDI started as a
-post-incident, read-only investigator of static evidence: disk images, memory, PCAPs. Once it
-had proven itself case after case, I extended the same architecture to live endpoints. There's
-now a Velociraptor-backed live-monitoring loop that baselines a host, watches for drift, and
-opens a focused, per-alert investigation when something fires, running the identical
-`hypothesize → dair_assess → record_finding` chain it runs against a disk image, into the same
-trace under the same gates. The read-only stance carries over without changes: monitoring
-observes and recommends, and the analyst runs the printed remediation. The fact that the
-guardrail architecture dropped cleanly onto a live host without loosening any of it is the best
-evidence I have that the design generalizes beyond the cases it was built on.
-
 **The constraint layer is architectural, not prose.** TRUDI physically can't write to an
 evidence file or submit an unlinked finding, because the MCP boundary, the read-only path guard,
 and the finding gates reject it before anything runs. The judges' distinction between
@@ -251,8 +239,9 @@ the tools.
 
 ## What's next
 
-- Broaden the live-monitoring loop (Velociraptor-backed) from demo to a standing deployment,
-  with richer printed-remediation playbooks for the analyst.
+- Promote the experimental live-monitoring layer (Velociraptor-backed) from in-progress
+  scaffolding to a supported, standing deployment. It already runs today (baselining a host and
+  opening a per-alert investigation under the same gates) but is out of scope for this submission.
 - Expand the ground-truth corpus so the accuracy framework reports FP/FN and negative-coverage
   across all bundled cases, not just the demo.
 - Package additional reference datasets so any practitioner can reproduce a full investigation
