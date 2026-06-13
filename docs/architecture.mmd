@@ -6,11 +6,11 @@ flowchart LR
     subgraph MCP["Architectural guardrail: TRUDI MCP boundary"]
         Server["FastMCP server\nserver.py"]
         Middleware["Middleware\nDAIR window + narration"]
-        Tools["Typed tool namespaces\nforensics, live, monitor, respond"]
-        Gates["Finding gates\nconfidence, lineage, citation, MCP routing"]
+        Tools["Typed tool namespaces\nstatic forensics (submission)\nlive · monitor · respond (experimental)"]
+        Gates["Finding gates\nconfidence, lineage, citation,\nattribution, MCP routing"]
     end
 
-    subgraph Guidance["Parallel guidance tools"]
+    subgraph Guidance["Parallel guidance tools (three-model system)"]
         DAIR["DAIR\nphase director"]
         Reason["reason.*\nadversarial reviewer"]
         DAIRBackend["DAIR backend"]
@@ -20,12 +20,15 @@ flowchart LR
     subgraph Execute["Execution boundary"]
         Executor["Safe executor"]
         PathGuard["Read-only evidence guard"]
-        SSH["Argv-only live SSH"]
         SIFT["SIFT forensic tools"]
     end
 
-    subgraph Targets["Evidence and endpoints"]
+    subgraph Targets["Static evidence (submission scope)"]
         Evidence["Static evidence\nimages, memory, logs, PCAPs"]
+    end
+
+    subgraph Experimental["Experimental: live monitoring (not part of submission)"]
+        SSH["Argv-only SSH\nread-only live + gated respond"]
         Endpoint["Registered live endpoint"]
         Velo["Velociraptor demo stack"]
     end
@@ -34,7 +37,7 @@ flowchart LR
         Trace["Execution trace\n_trudi_call_id"]
         Findings["Findings\nlinked_call_id required"]
         Reports["Reports"]
-        Dashboard["Dashboard"]
+        Dashboard["Dashboard\ntrace · chain · graph"]
         Accuracy["Accuracy / coverage"]
     end
 
@@ -43,8 +46,8 @@ flowchart LR
     Middleware --> Gates
 
     Tools --> Executor --> PathGuard --> SIFT --> Evidence
-    Tools --> SSH --> Endpoint
-    Tools --> Velo
+    Tools -. experimental .-> SSH --> Endpoint
+    Tools -. experimental .-> Velo
 
     Tools --> DAIR --> DAIRBackend
     Tools --> Reason --> ReasonBackend
@@ -67,8 +70,11 @@ flowchart LR
     classDef evidence fill:#eef8f0,stroke:#2e7d32,stroke-width:2px,color:#111;
     classDef audit fill:#f7efff,stroke:#7b1fa2,stroke-width:2px,color:#111;
     classDef actor fill:#eef3ff,stroke:#4051b5,stroke-width:2px,color:#111;
+    classDef experimental fill:#f3f3f3,stroke:#9e9e9e,stroke-width:1px,color:#555;
     style MCP fill:#f5f7ff,stroke:#4051b5,stroke-width:2px,color:#111
-    class Server,Middleware,Tools,Gates,Executor,PathGuard,SSH guard;
-    class Evidence,Endpoint,Velo evidence;
+    style Experimental fill:#fafafa,stroke:#9e9e9e,stroke-width:1px,color:#555
+    class Server,Middleware,Tools,Gates,Executor,PathGuard guard;
+    class Evidence evidence;
+    class SSH,Endpoint,Velo experimental;
     class Trace,Findings,Reports,Dashboard,Accuracy audit;
     class User,Claude,Orchestrator,CaseBrief actor;

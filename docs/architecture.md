@@ -15,11 +15,11 @@ flowchart LR
     subgraph MCP["Architectural guardrail: TRUDI MCP boundary"]
         Server["FastMCP server\nserver.py"]
         Middleware["Middleware\nDAIR window + narration"]
-        Tools["Typed tool namespaces\nforensics, live, monitor, respond"]
-        Gates["Finding gates\nconfidence, lineage, citation, MCP routing"]
+        Tools["Typed tool namespaces\nstatic forensics (submission)\nlive · monitor · respond (experimental)"]
+        Gates["Finding gates\nconfidence, lineage, citation,\nattribution, MCP routing"]
     end
 
-    subgraph Guidance["Parallel guidance tools"]
+    subgraph Guidance["Parallel guidance tools (three-model system)"]
         DAIR["DAIR\nphase director"]
         Reason["reason.*\nadversarial reviewer"]
         DAIRBackend["DAIR backend"]
@@ -29,12 +29,15 @@ flowchart LR
     subgraph Execute["Execution boundary"]
         Executor["Safe executor"]
         PathGuard["Read-only evidence guard"]
-        SSH["Argv-only live SSH"]
         SIFT["SIFT forensic tools"]
     end
 
-    subgraph Targets["Evidence and endpoints"]
+    subgraph Targets["Static evidence (submission scope)"]
         Evidence["Static evidence\nimages, memory, logs, PCAPs"]
+    end
+
+    subgraph Experimental["Experimental: live monitoring (not part of submission)"]
+        SSH["Argv-only SSH\nread-only live + gated respond"]
         Endpoint["Registered live endpoint"]
         Velo["Velociraptor demo stack"]
     end
@@ -43,7 +46,7 @@ flowchart LR
         Trace["Execution trace\n_trudi_call_id"]
         Findings["Findings\nlinked_call_id required"]
         Reports["Reports"]
-        Dashboard["Dashboard"]
+        Dashboard["Dashboard\ntrace · chain · graph"]
         Accuracy["Accuracy / coverage"]
     end
 
@@ -52,8 +55,8 @@ flowchart LR
     Middleware --> Gates
 
     Tools --> Executor --> PathGuard --> SIFT --> Evidence
-    Tools --> SSH --> Endpoint
-    Tools --> Velo
+    Tools -. experimental .-> SSH --> Endpoint
+    Tools -. experimental .-> Velo
 
     Tools --> DAIR --> DAIRBackend
     Tools --> Reason --> ReasonBackend
@@ -76,12 +79,20 @@ flowchart LR
     classDef evidence fill:#eef8f0,stroke:#2e7d32,stroke-width:2px,color:#111;
     classDef audit fill:#f7efff,stroke:#7b1fa2,stroke-width:2px,color:#111;
     classDef actor fill:#eef3ff,stroke:#4051b5,stroke-width:2px,color:#111;
+    classDef experimental fill:#f3f3f3,stroke:#9e9e9e,stroke-width:1px,color:#555;
     style MCP fill:#f5f7ff,stroke:#4051b5,stroke-width:2px,color:#111
-    class Server,Middleware,Tools,Gates,Executor,PathGuard,SSH guard;
-    class Evidence,Endpoint,Velo evidence;
+    style Experimental fill:#fafafa,stroke:#9e9e9e,stroke-width:1px,color:#555
+    class Server,Middleware,Tools,Gates,Executor,PathGuard guard;
+    class Evidence evidence;
+    class SSH,Endpoint,Velo experimental;
     class Trace,Findings,Reports,Dashboard,Accuracy audit;
     class User,Claude,Orchestrator,CaseBrief actor;
 ```
+
+> **Scope:** the submission is the read-only static-evidence investigator. The
+> live-monitoring layer (`live.*`, `monitor.*`, `respond.*`, SSH, Velociraptor —
+> shown dashed) runs today but is experimental and out of scope; it inherits the
+> same MCP boundary, trace, and gates.
 
 ## Guardrail Summary
 
@@ -89,21 +100,23 @@ flowchart LR
 | --- | --- | --- |
 | Forensic tools must route through MCP | `core/middleware.py` detects direct forensic binary use and points the agent to typed wrappers | `core/middleware.py`, `tools/_gates/mcp_routing.py` |
 | Evidence remains read-only | Output paths resolving under `/cases/`, `/mnt/`, `/media/`, or any `evidence/` segment are rejected before subprocess execution | `core/paths.py`, `core/executor.py` |
-| Live endpoint commands avoid shell injection | Live tools use registered host aliases and fixed argv command construction over SSH | `core/ssh.py`, `tools/live.py` |
+| Live endpoint commands avoid shell injection *(experimental layer)* | Live tools use registered host aliases and fixed argv command construction over SSH; the gated `respond.*` write path validates every argv parameter | `core/ssh.py`, `core/ssh_exec.py`, `tools/live.py` |
 | Findings must be traceable | `misc.record_finding` requires `linked_call_id` to point to the producing `_trudi_call_id` | `tools/misc.py`, `tools/_gates/linked_call_id_must_exist.py` |
-| Confirmed claims require review | Confidence, citation, DAIR, lineage, and adversarial-review gates block unsupported findings | `tools/_gates/*`, `tools/reasoning.py`, `tools/dair.py` |
+| Confirmed claims require review | Confidence, citation, hypothesis, lineage, attribution-grounding, exfil-channel, negative-completeness, and adversarial-review gates block unsupported findings | `tools/_gates/*`, `tools/reasoning.py`, `tools/dair.py` |
 | Audit trail is durable | Tool calls, reason calls, DAIR transitions, self-corrections, curiosity probes, and findings are written to JSON/Markdown trace logs | `core/execution_log.py`, `dashboard/*` |
 
 ## DAIR And Reason
 
 DAIR and `reason.*` are separate MCP tool families. Claude invokes each through
 the TRUDI MCP server and consumes their returned guidance; neither component
-calls the other directly.
+calls the other directly. Together with Claude (the primary analyst) they form
+the three-model system: an analyst that does the work, a director that decides
+what to examine next, and an adversary that challenges every conclusion.
 
 | Component | Purpose | Typical output | Trace entry |
 | --- | --- | --- | --- |
-| DAIR phase director | Maintains the investigation phase model: Triage, Scope, Analyze, Verify, and Report. It challenges whether the investigation is ready to move forward, identifies missing work, and returns `priority_tools` for the next batch. | Phase assessment, transition recommendation, verification challenges, investigation focus, priority tools | `dair_call` |
-| `reason.*` adversarial reviewer | Provides analytical review around the evidence. It creates initial plans, generates hypotheses for ambiguous artifacts, evaluates whether findings are supported, performs citation/confidence checks, and synthesizes the final report posture. | Plan, hypothesis, finding evaluation, confidence score, citation check, synthesis, pre-report readiness | `reason_call` |
+| DAIR phase director | Maintains the investigation phase model: Triage, Collect, Analyze, Scan, and Report. It challenges whether the investigation is ready to move forward, identifies missing work, and returns `priority_tools` for the next batch. | Phase assessment, transition recommendation, verification challenges, investigation focus, priority tools, curiosity budget | `dair_call` |
+| `reason.*` adversarial reviewer | Provides analytical review around the evidence. It creates initial plans, generates competing hypotheses for the case question and ambiguous artifacts, evaluates whether findings are supported, performs citation/confidence checks, and synthesizes the final report posture. | Plan, hypothesis, finding evaluation, confidence score, citation check, synthesis, pre-report readiness | `reason_call` |
 
 Tool selection is grounded by `tools/tool_capabilities.py`, a curated capability
 manifest that maps phases and evidence types to allowed tool IDs and substitution
