@@ -316,10 +316,13 @@ negative-coverage metric.
 
 **The same agent and the same guardrails across very different cases.** TRUDI has run an 8-host
 enterprise APT (memory, disk, event logs), a multi-channel insider data theft (five exfil
-channels across email, two USBs, a CD-R, and cloud, with per-device anti-forensics), and a
-network-only harassment attribution from a single PCAP, plus M57, Schardt, and ROCBA. It's
-depth, not just coverage: individual runs produced 16–28 tiered findings over traces of 100 to
-350-plus fully linked entries.
+channels across email, two USBs, a CD-R, and cloud, with per-device anti-forensics), the Vanko
+"Abducted Zebrafish" insider case shown in the **[demo video](https://youtu.be/Dbx5DcH6V5E)**
+(a full 42 GB Surface physical image: BadUSB initial access, FTP/USB/Dropbox exfil, and a covert
+admin account — the complete run is committed at `docs/demo/vanko/`), and a network-only
+harassment attribution from a single PCAP, plus M57, Schardt, and ROCBA. It's depth, not just
+coverage: individual runs produced 16–28 tiered findings over traces of 100 to 350-plus fully
+linked entries.
 
 **The constraint layer is architectural, not prose.** TRUDI physically can't write to an
 evidence file or submit an unlinked finding, because the MCP boundary, the read-only path guard,

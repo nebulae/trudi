@@ -25,3 +25,6 @@ mft*.json
 
 # OS
 .DS_Store
+
+# Keep the committed demo-run bundle for judges (overrides *_trace.json / *.log / *.csv above)
+!docs/demo/**

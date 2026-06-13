@@ -250,6 +250,7 @@ Every investigation writes a live JSON trace; the bundled dashboard renders it i
 -->
 
 > 📹 **Demo video:** [Find Evil! — TRUDI walkthrough](https://youtu.be/Dbx5DcH6V5E)
+> · 📦 **Demo run bundle** (trace, report, console): [docs/demo/vanko/](docs/demo/vanko/README.md)
 
 ---
 
@@ -266,7 +267,7 @@ The eight required submission components and where each one lives. Items marked 
 | 5 | Dataset Documentation | _TODO — no standalone doc yet_ |
 | 6 | Accuracy Report | _TODO — draft inputs in [docs/hallucination-catches.md](docs/hallucination-catches.md); generate with `accuracy.accuracy_export_report`_ |
 | 7 | Try-It-Out Instructions | [Setup](#setup) + [Starting a case](#starting-a-case) (this README) |
-| 8 | Agent Execution Logs | Auto-generated per case to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log`; sample audit log at [docs/analysis/](docs/analysis/) |
+| 8 | Agent Execution Logs | Committed demo-run trace + report + console at [docs/demo/vanko/](docs/demo/vanko/README.md); generated per case to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log` |
 
 Supporting material: [docs/live-endpoint-testing.md](docs/live-endpoint-testing.md) (live-monitoring walkthrough), [docs/media/](docs/media/README.md) (dashboard screenshots + demo video notes).
 
