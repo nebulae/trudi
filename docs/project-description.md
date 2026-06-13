@@ -2,6 +2,8 @@
 
 ## "We are all smarter than any of us."
 
+*— Mahyar Raissi, co-founder of Quo (formerly OpenPhone), and a former boss of mine. It stuck.*
+
 *Find Evil! Hackathon — Written Project Description (Devpost story)*
 
 ## TL;DR
@@ -27,12 +29,13 @@ is honest about what it doesn't know.
 
 So I didn't model TRUDI on a faster analyst. I modeled it on a *team* of them. In a good IR shop no
 single person's conclusion ships unchallenged: someone plans the approach, someone does the work,
-and someone plays skeptic and tries to break the finding before it reaches the report. That
-cross-checking is where accuracy comes from; none of us is as sharp alone as all of us are
-together. TRUDI turns that team into roles a machine can hold
-open at once: a director that decides what to examine, an analyst that does the work, and an
-adversary that challenges every conclusion before it's allowed to stand. Speed is a side effect.
-Trust is the point.
+someone plays skeptic and tries to break the finding before it reaches the report, and someone is
+curious enough to chase the thread nobody was assigned. That mix of skepticism and curiosity is
+where accuracy comes from; none of us is as sharp alone as all of us are together. TRUDI turns that
+team into roles a machine can hold open at once: a director that decides what to examine, an analyst
+that does the work, and an adversary that challenges every conclusion before it's allowed to stand,
+plus a bounded budget of curiosity so the agent can still follow a hunch the work order didn't name.
+Speed is a side effect. Trust is the point.
 
 ## What it does
 
