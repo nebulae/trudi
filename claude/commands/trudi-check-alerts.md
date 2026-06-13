@@ -141,7 +141,7 @@ If `rehydrated_entries > 0` AND `alerts.empty` (we're just here to
 check approvals on a previously-opened investigation), SKIP this
 step — go straight to step 5.
 
-### 5. Auto-protect: contain CONFIRMED/LIKELY threats
+### 5. Auto-protect: contain CONFIRMED/LIKELY threats and exercise-positive demo TTPs
 
 **First, check whether we're paused.** Call
 `monitor.get_response_state(case_id)`. If `paused == true`, the previous
@@ -150,7 +150,17 @@ or execute anything new — re-surface each pending `approve ACT-N` prompt
 (with its would-be rollback) and **skip straight to step 7** (do not close;
 the investigation stays open). Handle any operator approval per step 6.
 
-Otherwise, for each finding with tier **CONFIRMED or LIKELY**, call
+`monitor.get_response_state` also returns `demo_response`. In normal cases,
+synthetic/demo markers are false-positive evidence and should not trigger
+endpoint mutation. In an explicitly opted-in exercise case
+(`demo_response.enabled == true` AND
+`demo_response.respond_to_synthetic == true`), treat CONFIRMED/LIKELY planted
+demo TTP findings as **exercise-positive threats**: they are response-eligible
+even when the infrastructure is lab-only (for example TEST-NET addresses or
+`TRUDI_DEMO_*` markers). Word the report as "contained planted demo TTPs", not
+"remediated a real compromise".
+
+Otherwise, for each response-eligible finding with tier **CONFIRMED or LIKELY**, call
 `respond.suggest_containment(case_id, finding_id=<record_finding cid>,
 detector="Custom.TRUDI.<NewNetwork|NewProcess|NewPersistence|YaraProcess>",
 evidence=<the alert's evidence dict>)`. Then, for each returned `ACT-N`

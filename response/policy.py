@@ -9,6 +9,8 @@ arguments) so the agent cannot talk its way into a higher autonomy tier:
 - `load_config(case_id)` — reads `~/cases/<case>/monitoring/config.json`.
   auto_protect.enabled defaults to True when the file is absent or unparseable
   ("enabled when unconfigured"), so the feature is on by default with no file.
+  demo_response.respond_to_synthetic defaults to False: demo/synthetic findings
+  are not response-eligible unless a lab case opts in explicitly.
 
 This file is machine-read configuration (sibling to live_hosts.json), NOT
 agent-parsed prose — keeping it out of any CLAUDE.md preserves the guardrail
@@ -41,15 +43,20 @@ def classify(suggestion: dict) -> str:
     return NEEDS_APPROVAL
 
 
-def _config_path(case_id: str) -> Path:
-    return CASES_ROOT / case_id / "monitoring" / "config.json"
+def _config_path(case_id: str, cases_root: Optional[Path] = None) -> Path:
+    root = cases_root or CASES_ROOT
+    return root / case_id / "monitoring" / "config.json"
 
 
-def load_config(case_id: str) -> dict:
+def load_config(case_id: str, cases_root: Optional[Path] = None) -> dict:
     """Return the normalized case config. Defaults auto_protect.enabled=True when
-    the file is missing or unreadable."""
-    default = {"auto_protect": {"enabled": True}, "host": None}
-    path = _config_path(case_id)
+    the file is missing or unreadable. Demo-response is opt-in."""
+    default = {
+        "auto_protect": {"enabled": True},
+        "demo_response": {"enabled": False, "respond_to_synthetic": False},
+        "host": None,
+    }
+    path = _config_path(case_id, cases_root)
     if not path.exists():
         return default
     try:
@@ -60,11 +67,35 @@ def load_config(case_id: str) -> dict:
     enabled = True
     if isinstance(ap, dict):
         enabled = bool(ap.get("enabled", True))
-    return {"auto_protect": {"enabled": enabled}, "host": doc.get("host")}
+    dr = doc.get("demo_response")
+    demo_enabled = False
+    respond_to_synthetic = False
+    if isinstance(dr, dict):
+        demo_enabled = bool(dr.get("enabled", False))
+        respond_to_synthetic = bool(dr.get("respond_to_synthetic", demo_enabled))
+    return {
+        "auto_protect": {"enabled": enabled},
+        "demo_response": {
+            "enabled": demo_enabled,
+            "respond_to_synthetic": respond_to_synthetic,
+        },
+        "host": doc.get("host"),
+    }
 
 
 def auto_protect_enabled(case_id: str) -> bool:
     return bool(load_config(case_id)["auto_protect"]["enabled"])
+
+
+def demo_response_enabled(case_id: str) -> bool:
+    """Whether confirmed exercise/demo TTPs should receive containment.
+
+    This is intentionally opt-in per live-monitoring case. A synthetic marker
+    in a normal case remains evidence for false-positive handling, not a
+    permission to mutate the endpoint.
+    """
+    dr = load_config(case_id).get("demo_response") or {}
+    return bool(dr.get("enabled") and dr.get("respond_to_synthetic"))
 
 
 def configured_host(case_id: str) -> Optional[str]:

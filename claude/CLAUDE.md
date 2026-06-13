@@ -222,6 +222,9 @@ When the operator stands up a Velociraptor-backed live-monitoring case
    captured into the per-investigation trace by the `UserPromptSubmit`
    hook, matched by `operator_text_required` before
    `respond.approve_action` → `respond.execute_action(mode="operator")`.
+   Exercise/demo cases may opt in to responding to confirmed planted TTPs via
+   `monitoring/config.json` `demo_response.respond_to_synthetic=true`; those
+   findings are treated as exercise-positive threats, not false positives.
    See "Gated response & auto-protect" below.
 
 ---
@@ -268,6 +271,11 @@ report's *Autonomous Response Actions* section.
 Auto-protect is per-case: `monitoring/config.json`
 `{"auto_protect":{"enabled":false}}` reverts to fully operator-gated
 (every action needs `approve ACT-N`). Default (no file) = enabled.
+Demo response is separately opt-in:
+`{"demo_response":{"enabled":true,"respond_to_synthetic":true}}` means
+CONFIRMED/LIKELY planted demo TTPs are response-eligible even when their
+markers prove lab/exercise infrastructure. Keep the language precise:
+"contained planted demo TTPs", not "remediated a real compromise".
 
 `respond.*` cannot touch anything under `/cases/.../evidence/`,
 `/mnt/`, or `/media/` — those refusals are unchanged.
@@ -280,7 +288,10 @@ Auto-protect is per-case: `monitoring/config.json`
 
 ## DAIR Phase Director (dair.*)
 
-DAIR is a **recursive state machine**, not a checklist. TRUDI is read-only: Improve & Response actions are never executed — only recommended in the final report. Investigation begins with a confirmed positive detection in hand.
+DAIR is a **recursive state machine**, not a checklist. Outside the gated
+live-monitoring `respond.*` namespace, TRUDI is read-only: static-case Improve
+& Response actions are never executed — only recommended in the final report.
+Investigation begins with a confirmed positive detection in hand.
 
 | Phase | Role | reason.* | Recursive? |
 |-------|------|-----------|------------|

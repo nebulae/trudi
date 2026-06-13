@@ -29,6 +29,7 @@ from typing import Any, Optional
 from fastmcp import FastMCP
 
 from core import output_safe
+from response import policy as response_policy
 
 mcp = FastMCP("monitor")
 
@@ -1121,6 +1122,7 @@ def get_response_state(case_id: str) -> dict:
     awaiting = list((rec or {}).get("awaiting_approval") or [])
     auto_done = [e.get("action_id") for e in _load_executions(case_id)
                  if e.get("mode") == "auto" and e.get("success")]
+    cfg = response_policy.load_config(case_id, cases_root=CASES_ROOT)
     return {
         "success": True,
         "open": rec is not None,
@@ -1128,6 +1130,8 @@ def get_response_state(case_id: str) -> dict:
         "paused": bool(awaiting),
         "awaiting_approval": awaiting,
         "auto_executed": auto_done,
+        "auto_protect_enabled": bool(cfg["auto_protect"]["enabled"]),
+        "demo_response": cfg.get("demo_response") or {},
     }
 
 

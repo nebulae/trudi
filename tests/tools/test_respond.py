@@ -226,6 +226,7 @@ class TestConfigDefaultTrue:
     def test_enabled_when_file_absent(self, tmp_path, monkeypatch):
         monkeypatch.setattr(policy_mod, "CASES_ROOT", tmp_path)
         assert policy_mod.auto_protect_enabled("X") is True
+        assert policy_mod.demo_response_enabled("X") is False
 
     def test_disabled_when_configured(self, tmp_path, monkeypatch):
         monkeypatch.setattr(policy_mod, "CASES_ROOT", tmp_path)
@@ -240,6 +241,28 @@ class TestConfigDefaultTrue:
         d.mkdir(parents=True)
         (d / "config.json").write_text("{ not json")
         assert policy_mod.auto_protect_enabled("X") is True
+        assert policy_mod.demo_response_enabled("X") is False
+
+    def test_demo_response_opt_in(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(policy_mod, "CASES_ROOT", tmp_path)
+        d = tmp_path / "X" / "monitoring"
+        d.mkdir(parents=True)
+        (d / "config.json").write_text(json.dumps({
+            "demo_response": {"enabled": True, "respond_to_synthetic": True},
+        }))
+        cfg = policy_mod.load_config("X")
+        assert cfg["demo_response"]["enabled"] is True
+        assert cfg["demo_response"]["respond_to_synthetic"] is True
+        assert policy_mod.demo_response_enabled("X") is True
+
+    def test_demo_response_enabled_alone_implies_respond(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(policy_mod, "CASES_ROOT", tmp_path)
+        d = tmp_path / "X" / "monitoring"
+        d.mkdir(parents=True)
+        (d / "config.json").write_text(json.dumps({
+            "demo_response": {"enabled": True},
+        }))
+        assert policy_mod.demo_response_enabled("X") is True
 
 
 # ── execute_action gate composition ───────────────────────────────────────────
@@ -400,9 +423,14 @@ class TestResponseReportAndPause:
         case_id = "DEMO-TEST"
         mon = tmp_path / case_id / "monitoring"
         mon.mkdir(parents=True)
+        (mon / "config.json").write_text(json.dumps({
+            "demo_response": {"enabled": True, "respond_to_synthetic": True},
+        }))
         (mon / "_open_investigation.json").write_text(json.dumps(
             {"investigation_id": "INV-001", "alert_ids": ["a"]}))
-        assert m.get_response_state(case_id)["paused"] is False
+        st0 = m.get_response_state(case_id)
+        assert st0["paused"] is False
+        assert st0["demo_response"]["respond_to_synthetic"] is True
         m.set_awaiting_approval(case_id, ["ACT-2"])
         st = m.get_response_state(case_id)
         assert st["paused"] is True and "ACT-2" in st["awaiting_approval"]
