@@ -92,6 +92,17 @@ can't just be left dangling: a competing principal rated medium-likelihood or hi
 driven to CONFIRMED or REFUTED (or explicitly parked as evidence-unavailable) before the case can
 close.
 
+There's a deliberate tension built into that loop. DAIR hands down a strict work order and the
+agent runs exactly that, no improvising mid-batch, but a rigid agent misses the artifact nobody
+told it to look for. So once the prescribed batch is done, DAIR also grants a **curiosity budget**:
+a small, bounded number of read-only probes the agent may spend on its own hunches, a second user's
+Recycle Bin, an untouched mailbox, a `setupapi.dev.log` nobody asked about, a weaker exfil channel
+worth ruling out. Each probe is logged with the reason the agent looked
+(`misc.record_curiosity_probe`), and crucially a probe is *not* a finding: it carries no
+evidentiary weight until whatever it turns up is fed back through the same hypothesis-and-gate path
+as everything else. It widens coverage without loosening a single gate, and the budget is zero in
+the Report phase, so the agent can't go wandering when it should be writing up.
+
 Before any strong claim is written, a finding has to survive a per-finding review chain:
 `reason.evaluate_finding` (does the evidence actually support this, or is it CHALLENGED?),
 `reason.confidence_score` (an evidence-grounded tier and a 0–1 score; if it comes back lower than
@@ -309,6 +320,12 @@ to show its work: a phase director that won't let it skip ahead, an adversary th
 findings through, and a trace where every claim has a foreign key back to the command that
 produced it. Once that structure exists, the speed comes for free. The slow part of IR was never
 the tools.
+
+But structure alone makes a rigid agent, and rigid agents miss things. The harder lesson was that
+the two have to coexist: the same framework that refuses an ungrounded finding also has to give the
+agent room to chase a hunch, as long as that exploration is logged and carries no weight until it
+survives the gates. That's what the curiosity budget is for. Curiosity you can audit is the part
+that turns a checklist-runner into an investigator.
 
 ## What's next
 
