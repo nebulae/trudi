@@ -1,27 +1,38 @@
 # TRUDI — Threat Response Unit for Digital Investigation
 
+## "We are all smarter than any of us."
+
 *Find Evil! Hackathon — Written Project Description (Devpost story)*
 
 ## TL;DR
 
-Most AI agents are a single model grading their own work, which is how a confident hallucination ends up in a report. TRUDI splits the job across three. Claude runs the tools, a DAIR director decides what to examine next, and an adversarial reviewer challenges every conclusion before it's written. Each finding is tagged CONFIRMED, LIKELY, or SUSPECTED, and server-enforced gates make integrity structural: a CONFIRMED finding cannot be recorded without a link to the tool call that proves it. Machine-speed investigation, conclusions you can defend.
+Most AI agents are a single model grading their own work, which is how a confident hallucination ends up in a report. TRUDI splits the job across three. Claude runs the tools, a DAIR director decides what to examine next, and an adversarial reviewer challenges every conclusion before it's written. Each finding is tagged CONFIRMED, LIKELY, or SUSPECTED, and server-enforced gates make integrity structural: a CONFIRMED finding cannot be recorded without a link to the tool call that proves it. The goal isn't speed; it's a whole analyst team's worth of skepticism applied to every finding.
 
 ---
 
 ## Inspiration
 
-AI adversaries already move at machine speed. CrowdStrike clocked a 7-minute fastest
-breakout. Horizon3's autonomous agent went from foothold to full privilege escalation in
-60 seconds. MIT's 2024 work measured AI-driven attacks running about 47× faster than human
-operators. Incident response, meanwhile, is still paced by a human analyst typing `vol`,
-reading the output, deciding the next command, and writing notes by hand.
+The obvious pitch for an AI forensics agent is speed. AI adversaries already move at machine
+speed: CrowdStrike clocked a 7-minute fastest breakout, Horizon3's autonomous agent went from
+foothold to full privilege escalation in 60 seconds, and MIT's 2024 work measured AI-driven
+attacks running about 47× faster than human operators. Incident response, meanwhile, is still
+paced by a human analyst typing `vol`, reading the output, and writing notes by hand.
 
-TRUDI is my answer to that gap. It's an autonomous responder that keeps up with adversary
-speed without giving up the two things that make forensic work admissible: evidence
-integrity and analytical accuracy. The hard part was never running the tools fast. It was
-running them fast while guaranteeing the agent can't tamper with evidence, can't hallucinate
-a finding into a report, and can't make a claim that doesn't trace back to a specific
-command. 
+But speed was never what worried me about pointing a language model at forensic evidence. Trust
+was. An agent that runs a hundred tools an hour and confidently invents a single finding is worse
+than no agent at all, because in forensics a fabricated conclusion can put the wrong person in
+front of a judge. The hard problem isn't getting an LLM to *do* forensics. It's getting one you
+can rely on not to make things up, whose every claim traces back to a specific command, and that
+is honest about what it doesn't know.
+
+So I didn't model TRUDI on a faster analyst. I modeled it on a *team* of them. In a good IR shop no
+single person's conclusion ships unchallenged: someone plans the approach, someone does the work,
+and someone plays skeptic and tries to break the finding before it reaches the report. That
+cross-checking is where accuracy comes from; none of us is as sharp alone as all of us are
+together. TRUDI turns that team into roles a machine can hold
+open at once: a director that decides what to examine, an analyst that does the work, and an
+adversary that challenges every conclusion before it's allowed to stand. Speed is a side effect.
+Trust is the point.
 
 ## What it does
 
