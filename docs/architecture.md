@@ -92,7 +92,7 @@ flowchart LR
 | Live endpoint commands avoid shell injection | Live tools use registered host aliases and fixed argv command construction over SSH | `core/ssh.py`, `tools/live.py` |
 | Findings must be traceable | `misc.record_finding` requires `linked_call_id` to point to the producing `_trudi_call_id` | `tools/misc.py`, `tools/_gates/linked_call_id_must_exist.py` |
 | Confirmed claims require review | Confidence, citation, DAIR, lineage, and adversarial-review gates block unsupported findings | `tools/_gates/*`, `tools/reasoning.py`, `tools/dair.py` |
-| Audit trail is durable | Tool calls, reason calls, DAIR transitions, self-corrections, and findings are written to JSON/Markdown trace logs | `core/execution_log.py`, `dashboard/*` |
+| Audit trail is durable | Tool calls, reason calls, DAIR transitions, self-corrections, curiosity probes, and findings are written to JSON/Markdown trace logs | `core/execution_log.py`, `dashboard/*` |
 
 ## DAIR And Reason
 
@@ -110,6 +110,19 @@ manifest that maps phases and evidence types to allowed tool IDs and substitutio
 rules. DAIR and `reason.*` include the manifest in their prompts, and parsed
 directives are annotated with `tool_manifest_version`, `priority_tool_capabilities`,
 and `unknown_priority_tools`.
+
+Beyond the prescribed work order, `dair_assess` returns a `curiosity_budget`: a
+small allowance of read-only, self-directed looks the agent may take to chase a
+hunch the work order did not name (a second SID's recycle bin, an untouched comms
+store, a weaker exfil channel). Each look is logged as a `curiosity_probe` trace
+entry via `misc.record_curiosity_probe` and is budget-enforced by
+`tools/_gates/curiosity_budget.py`. A probe carries no evidentiary weight on its
+own — to support a finding, its `call_id` must flow into `reason.*` or
+`misc.record_finding` through `input_call_ids`, where the normal finding gates
+apply. This widens coverage without loosening a gate. All three dashboard views
+(`dashboard/trace_viewer.html`, `chain_view.html`, `graph_view.html`) render
+curiosity probes and the lineage edges that connect them to the artifacts they
+inspected and any finding they ultimately fed.
 
 ## Primary Data Flow
 

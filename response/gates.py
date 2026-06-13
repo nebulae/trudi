@@ -181,3 +181,29 @@ def check_approval(case_id: str, action_id: str) -> tuple[Optional[dict], Option
             f"Operator must re-approve.",
         )
     return record, None
+
+
+def check_execution_permitted(
+    case_id: str, action_id: str, suggestion: dict, *, mode: str = "operator"
+) -> Optional[dict]:
+    """The single permission decision for respond.execute_action / revert_action.
+
+    Composes the auto-protect policy with the existing approval gate:
+
+      * If the action is server-classified AUTO (reversible AND low-risk) AND
+        auto-protect is enabled for the case, permit with no approval token.
+      * Otherwise (destructive, OR auto-protect disabled) fall through to
+        check_approval — which requires a non-expired operator-issued token.
+
+    `mode` is advisory (recorded for audit only). Permission is recomputed from
+    disk every call, so passing mode='auto' on a destructive action does NOT
+    bypass approval — classify() returns NEEDS_APPROVAL and the call falls into
+    check_approval regardless. The agent therefore cannot self-execute a
+    destructive action.
+    """
+    from response import policy
+    tier = policy.classify(suggestion)
+    if tier == policy.AUTO and policy.auto_protect_enabled(case_id):
+        return None
+    _, refusal = check_approval(case_id, action_id)
+    return refusal

@@ -698,6 +698,99 @@ class TestReasonPreReportCheck:
         assert r["ready_to_report"] is True
         assert r["blocking_issues"] == []
 
+    # ── BLOCKER detection (negation-aware fallback) ───────────────────────────
+
+    def _full_passing_trace(self, log, synth_conclusion, finding_desc="PerfSvc.exe persistence"):
+        log.record_tool_call("vol.psscan", True, False, 0, 0)
+        log.record_reason_call("reason_plan", True, "plan", {})
+        log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        log.record_reason_call("reason_synthesize", True, synth_conclusion, {})
+        log.record_finding(finding_desc, "CONFIRMED", "ez.mftecmd")
+
+    def test_negated_blocker_prose_passes(self, configured_log):
+        # The old bare-word \bBLOCKER\b fallback wrongly blocked clean syntheses
+        # that merely said there were none.
+        from tools.reasoning import reason_pre_report_check
+        self._full_passing_trace(
+            configured_log,
+            "All artifact categories exhausted; no blocker conditions found.")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
+        assert not any("BLOCKER" in i for i in r["blocking_issues"])
+
+    def test_canonical_blockers_none_passes(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        self._full_passing_trace(configured_log, "Synthesis complete.\nBLOCKERS: None")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is True
+
+    def test_real_blocker_header_blocks(self, configured_log):
+        from tools.reasoning import reason_pre_report_check
+        self._full_passing_trace(
+            configured_log, "Findings incomplete.\nBLOCKERS: identity unresolved")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("BLOCKER" in i for i in r["blocking_issues"])
+
+    def test_unnegated_blocker_prose_blocks(self, configured_log):
+        # Non-canonical prose flagging a real blocker still blocks (fallback).
+        from tools.reasoning import reason_pre_report_check
+        self._full_passing_trace(
+            configured_log, "One blocker remains: registry hive was never parsed.")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("BLOCKER" in i for i in r["blocking_issues"])
+
+    # ── Case-question gate (extraction + bounded threshold) ────────────────────
+
+    _POLLUTED_CQ = (
+        "CASE_QUESTION: What hacking tools did Greg Schardt install and use? "
+        "Plan: verify evidence hash, mount the E01 image, parse SAM SOFTWARE "
+        "SYSTEM registry hives via RECmd, enumerate UserAssist Prefetch "
+        "AppCompatCache execution artifacts, run DAIR triage collect analyze "
+        "scan report phases against all 31 NIST questions"
+    )
+
+    def test_polluted_case_question_satisfied_by_finding(self, configured_log):
+        # CASE_QUESTION jammed onto one line with plan text used to inflate the
+        # token threshold so no finding could satisfy it. Now extraction stops
+        # at '?' and the threshold is capped.
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_agent_message(self._POLLUTED_CQ)
+        configured_log.record_reason_call("reason_synthesize", True, "done\nBLOCKERS: None", {})
+        configured_log.record_finding(
+            "Greg Schardt installed and used hacking tools (Cain & Abel, Ethereal, "
+            "Network Stumbler) under the Mr. Evil account",
+            "CONFIRMED", "ez.pecmd")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert not any("Case question" in i for i in r["blocking_issues"]), r["blocking_issues"]
+        assert r["ready_to_report"] is True
+
+    def test_case_question_unanswered_still_blocks(self, configured_log):
+        # The gate must still fire when no finding addresses the question.
+        from tools.reasoning import reason_pre_report_check
+        configured_log.record_tool_call("vol.psscan", True, False, 0, 0)
+        configured_log.record_reason_call("reason_plan", True, "plan", {})
+        configured_log.record_reason_call("reason_hypothesize", True, "hyp", {})
+        configured_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
+        configured_log.record_agent_message(self._POLLUTED_CQ)
+        configured_log.record_reason_call("reason_synthesize", True, "done\nBLOCKERS: None", {})
+        configured_log.record_finding("Disk image acquired and hashed", "CONFIRMED", "ewf.info")
+        with patch("core.execution_log.log", configured_log):
+            r = reason_pre_report_check()
+        assert any("Case question" in i for i in r["blocking_issues"])
+        assert r["ready_to_report"] is False
+
     def test_token_totals_reported(self, configured_log):
         from tools.reasoning import reason_pre_report_check
         configured_log.record_reason_call("reason_plan", True, "plan", {}, input_tokens=300, output_tokens=100)

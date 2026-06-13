@@ -16,8 +16,10 @@ parameters:
       JSON array of glob patterns to walk every poll cycle. Each entry must
       end in `/*` (or `/**` for recursion) to enumerate files inside the
       directory — a bare `/etc/cron.d` would only match the dir itself.
+      Substituted from monitoring/render.py:PERSISTENCE_WATCH_GLOBS so the
+      baseline snapshot globs the identical set.
     default: |
-      ["/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*", "/etc/cron.weekly/*", "/etc/cron.monthly/*", "/etc/systemd/system/*", "/var/spool/cron/crontabs/*"]
+      ${watch_dirs}
   - name: PollSeconds
     description: How often to re-walk the watched dirs.
     type: int

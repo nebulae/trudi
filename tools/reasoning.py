@@ -551,7 +551,13 @@ _SYNTHESIZE_SYS = (
     "category. Flag as BLOCKER if found identities were never cross-referenced against "
     "a suspect list that was available in the case context.\n\n"
     "Return a structured punch list. Mark BLOCKERS (must fix before report is "
-    "written) separately from ADVISORIES (should note, not blocking)."
+    "written) separately from ADVISORIES (should note, not blocking).\n\n"
+    "ALWAYS end your response with a single canonical line in EXACTLY this form, "
+    "on its own line:\n"
+    "  BLOCKERS: None        (when there are no blockers)\n"
+    "  BLOCKERS: <1-line summary of each blocker>   (when there are)\n"
+    "This line is machine-parsed. Do not use the word 'blocker' elsewhere to "
+    "describe a gap you are NOT blocking on — call those ADVISORIES."
     + _DIRECTIVES_INSTRUCTION
 )
 
@@ -1295,6 +1301,30 @@ def reason_synthesize(findings: str, investigation_summary: str = "",
                 input_call_ids=derived_ids)
 
 
+_BLOCKER_NEGATION_RE = re.compile(
+    r"(?:no|zero|0|without|not|n/?a|none|never|free of|resolved|cleared|"
+    r"are no|were no|there are no|there were no)[\s\w]{0,15}$",
+    re.IGNORECASE,
+)
+
+
+def _has_unnegated_blocker(text: str) -> bool:
+    """True if `text` mentions a 'blocker'/'blockers' that is NOT negated.
+
+    Used only as a fallback when no canonical 'BLOCKERS:' header is present.
+    A negated mention ("no blockers", "free of blockers", "0 blockers",
+    "no blocker conditions found") is not a real blocker and must pass — the
+    previous bare-word `\\bBLOCKER\\b` check wrongly flagged those, and also
+    only matched the singular. Here we scan every blocker(s) occurrence and
+    require at least one whose preceding context carries no negation.
+    """
+    for mt in re.finditer(r"blockers?\b", text, re.IGNORECASE):
+        pre = text[max(0, mt.start() - 25):mt.start()]
+        if not _BLOCKER_NEGATION_RE.search(pre):
+            return True
+    return False
+
+
 @mcp.tool()
 @with_tool_timeout(_REASON_WATCHDOG, label="reason_pre_report_check")
 def reason_pre_report_check() -> dict:
@@ -1357,7 +1387,7 @@ def reason_pre_report_check() -> dict:
         if m:
             blocker_text = m.group(1).strip()
             if blocker_text and not re.fullmatch(
-                r"(?:none|no blockers?|n/a|not applicable)[.\s-]*",
+                r"(?:none|no blockers?|n/a|not applicable|0)[.\s-]*",
                 blocker_text,
                 re.IGNORECASE,
             ):
@@ -1366,7 +1396,11 @@ def reason_pre_report_check() -> dict:
                     "blockers, run the requested tools or record why they are "
                     "inapplicable, then re-run reason.synthesize before Report."
                 )
-        elif re.search(r"\bBLOCKER\b", latest_synthesize, re.IGNORECASE):
+        elif _has_unnegated_blocker(latest_synthesize):
+            # No canonical "BLOCKERS:" header, but a non-negated "blocker"
+            # mention remains in the prose. A negated mention ("no blockers",
+            # "free of blockers", "0 blockers") is NOT a blocker and must pass —
+            # the old bare-word \bBLOCKER\b check false-positived on those.
             issues.append(
                 "Latest reason.synthesize still labels one or more gaps as "
                 "BLOCKER. Return to Triage/Collect/Analyze as needed, run the "
@@ -1386,12 +1420,26 @@ def reason_pre_report_check() -> dict:
             m = cq_re.search(blob)
             if m:
                 case_question = m.group(1).strip()
-                case_question = re.split(
-                    r"\b(?:Evidence|Case context|Known players|Comms channels|Starting pre-plan reads)\s*:",
-                    case_question,
-                    maxsplit=1,
-                    flags=re.IGNORECASE,
-                )[0].strip()
+                # The question proper ends at the first '?'. Opening narrations
+                # sometimes jam the case question + plan text onto one line; if
+                # we keep all of it, the token-match threshold below inflates
+                # and no single finding can satisfy it. Truncate to the actual
+                # question.
+                qmark = case_question.find("?")
+                if qmark != -1:
+                    case_question = case_question[:qmark + 1]
+                else:
+                    # No '?': trim trailing plan/context text by keyword, then
+                    # by first sentence, then a hard char cap.
+                    case_question = re.split(
+                        r"\b(?:Evidence|Case context|Known players|Comms channels|"
+                        r"Starting pre-plan reads|Plan|Approach|Steps)\s*:",
+                        case_question,
+                        maxsplit=1,
+                        flags=re.IGNORECASE,
+                    )[0].strip()
+                    case_question = case_question.split(". ")[0][:200]
+                case_question = case_question.strip()
                 break
         if case_question:
             break
@@ -1412,9 +1460,13 @@ def reason_pre_report_check() -> dict:
                 if tier not in {"CONFIRMED", "LIKELY"}:
                     continue
                 desc_l = (e.get("description") or "").lower()
-                # Address = at least half the content tokens appear in the finding
+                # Address = the finding mentions the question's key entities.
+                # Cap the bar at 5 so a long (or still slightly polluted)
+                # question can't demand an unreasonable number of token hits in
+                # a single finding — the failure mode the SCHARDT run hit.
                 hits = sum(1 for t in q_tokens if t in desc_l)
-                if hits >= max(2, len(q_tokens) // 2):
+                required = min(max(2, len(q_tokens) // 2), 5)
+                if hits >= required:
                     addressed = True
                     break
         if not addressed:

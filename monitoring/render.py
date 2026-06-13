@@ -18,6 +18,21 @@ from typing import Any, Mapping
 
 ARTIFACTS_DIR = Path(__file__).parent / "artifacts"
 
+# Canonical persistence watch surface — the ONE source of truth shared by the
+# Custom.TRUDI.NewPersistence detector (via ${watch_dirs}) and the
+# Custom.TRUDI.PersistenceSnapshot baseline helper (via monitor.baseline_capture).
+# Both must glob the SAME paths or the baseline allowlist won't match what the
+# detector watches (the empty-allowlist false-positive bug).
+PERSISTENCE_WATCH_GLOBS = [
+    "/etc/cron.d/*",
+    "/etc/cron.hourly/*",
+    "/etc/cron.daily/*",
+    "/etc/cron.weekly/*",
+    "/etc/cron.monthly/*",
+    "/etc/systemd/system/*",
+    "/var/spool/cron/crontabs/*",
+]
+
 
 def _vql_array(values) -> str:
     """Render a Python iterable as a VQL array literal."""
@@ -46,6 +61,9 @@ def render_template(name: str, baseline: Mapping[str, Any]) -> str:
         "baseline_persistence_paths": _vql_array(
             baseline.get("persistence_paths") or []
         ),
+        # Watch dirs come from the canonical constant, not the baseline, so the
+        # detector and the PersistenceSnapshot helper always glob the same set.
+        "watch_dirs": _vql_array(PERSISTENCE_WATCH_GLOBS),
         "baseline_endpoints_ips": _vql_array(
             (ep["remote_ip"] for ep in (baseline.get("endpoints") or []))
         ),

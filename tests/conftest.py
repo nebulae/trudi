@@ -60,7 +60,12 @@ def isolate_session_file(tmp_path):
     internal.mkdir(exist_ok=True)
     fake_session = str(internal / "session.json")
     fake_trace = str(internal / "trace.json")
-    with patch.object(elog, "_SESSION_FILE", fake_session):
+    fake_counter = str(internal / "call_id.counter")
+    # Isolate the shared call_id counter too — otherwise tests that assert
+    # call_id == 1 race against the real ~/.cache/trudi/call_id.counter (shared
+    # with any live TRUDI session AND any concurrently-running pytest process).
+    with patch.object(elog, "_SESSION_FILE", fake_session), \
+         patch.object(elog, "_CALL_ID_COUNTER_FILE", fake_counter):
         # save_session=False is belt-and-suspenders alongside the
         # _SESSION_FILE patch: ensures even if the patch is bypassed (or
         # a test re-imports the module), the global session file stays

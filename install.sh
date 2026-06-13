@@ -224,52 +224,66 @@ ok "Installed TRUDI orchestrator to $CLAUDE_MD_DEST"
 step "Installing Claude Code hooks"
 
 HOOKS_SRC="$TRUDI_DIR/claude/hooks"
-HOOKS_DEST="$CLAUDE_DIR/hooks"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 
-mkdir -p "$HOOKS_DEST"
-cp "$HOOKS_SRC/"*.py "$HOOKS_DEST/"
-ok "Installed hook scripts to $HOOKS_DEST/"
+# Hooks run directly from the repo (HOOKS_SRC) — the same convention as the
+# MCP server (server.py) and the Stop/UserPromptSubmit hooks. We do NOT copy
+# them into ~/.claude/hooks: a deployed copy silently drifts from the repo on
+# every edit. One source of truth = no drift.
 
-# Merge PostToolUse hook into settings.json
+# Merge hook registrations into settings.json
 if [ ! -f "$SETTINGS_FILE" ]; then
     echo '{"hooks":{}}' > "$SETTINGS_FILE"
 fi
 
-python3 - <<'PYEOF'
-import json, sys
+TRUDI_HOOKS_SRC="$HOOKS_SRC" python3 - <<'PYEOF'
+import json, os
 from pathlib import Path
 
 settings_path = Path.home() / ".claude/settings.json"
-hooks_dest    = Path.home() / ".claude/hooks"
+hooks_src     = os.environ["TRUDI_HOOKS_SRC"]
 
 settings = json.loads(settings_path.read_text())
 settings.setdefault("hooks", {})
 
-narration_hook = {
-    "hooks": [
-        {
-            "type": "command",
-            "command": f"python3 {hooks_dest}/log_narration.py"
-        }
-    ]
+# event -> hook script. All three ship in claude/hooks and run from the repo
+# path; each must be registered under its own event or the script sits inert
+# (forensic_audit = Stop trace flush; log_user_message = UserPromptSubmit,
+# which the operator_text_required approval gate depends on).
+HOOK_EVENTS = {
+    "PostToolUse":      "log_narration.py",
+    "Stop":             "forensic_audit.py",
+    "UserPromptSubmit": "log_user_message.py",
 }
 
-existing = settings["hooks"].get("PostToolUse", [])
-already  = any(
-    h.get("hooks", [{}])[0].get("command", "").endswith("log_narration.py")
-    for h in existing
-    if h.get("hooks")
-)
-if not already:
-    settings["hooks"].setdefault("PostToolUse", []).append(narration_hook)
+changed = False
+for event, script in HOOK_EVENTS.items():
+    desired = f"python3 {hooks_src}/{script}"
+    existing = settings["hooks"].setdefault(event, [])
+    # Self-heal: if a registration for this script exists but points anywhere
+    # other than the repo path (e.g. a stale ~/.claude/hooks copy), rewrite it.
+    matched = False
+    for h in existing:
+        for entry in h.get("hooks", []):
+            cmd = entry.get("command", "")
+            if cmd.endswith(script):
+                matched = True
+                if cmd != desired:
+                    entry["command"] = desired
+                    print(f"  {event} hook ({script}) re-pointed to repo path")
+                    changed = True
+                else:
+                    print(f"  {event} hook ({script}) already registered — skipping")
+    if not matched:
+        existing.append({"hooks": [{"type": "command", "command": desired}]})
+        print(f"  Registered {event} hook ({script})")
+        changed = True
+
+if changed:
     settings_path.write_text(json.dumps(settings, indent=2))
-    print("  Registered PostToolUse hook")
-else:
-    print("  PostToolUse hook already registered — skipping")
 PYEOF
 
-ok "Claude Code hooks configured"
+ok "Claude Code hooks configured (run from repo path)"
 
 # ── 6b. Claude Code slash commands ────────────────────────────────────────────
 
@@ -293,6 +307,34 @@ if [ -d "$COMMANDS_SRC" ] && compgen -G "$COMMANDS_SRC/*.md" > /dev/null; then
     ok "Installed $(ls "$COMMANDS_SRC"/*.md | wc -l) slash commands to $COMMANDS_DEST/ (/trudi-*)"
 else
     warn "No commands at $COMMANDS_SRC — skipping slash command install"
+fi
+
+# ── 6c. Claude Code skills ────────────────────────────────────────────────────
+
+step "Installing Claude Code skills"
+
+SKILLS_SRC="$TRUDI_DIR/claude/skills"
+SKILLS_DEST="$CLAUDE_DIR/skills"
+
+if [ -d "$SKILLS_SRC" ] && compgen -G "$SKILLS_SRC/*/SKILL.md" > /dev/null; then
+    mkdir -p "$SKILLS_DEST"
+    count=0
+    for skill_dir in "$SKILLS_SRC"/*/; do
+        [ -f "$skill_dir/SKILL.md" ] || continue
+        name="$(basename "$skill_dir")"
+        dest="$SKILLS_DEST/$name"
+        # Back up a pre-existing skill of the same name before overwriting,
+        # so a user's own customisations aren't silently clobbered.
+        if [ -d "$dest" ] && ! diff -rq "$skill_dir" "$dest" >/dev/null 2>&1; then
+            cp -r "$dest" "$dest.$(date -u +%Y%m%dT%H%M%S).bak"
+        fi
+        rm -rf "$dest"
+        cp -r "$skill_dir" "$dest"
+        count=$((count + 1))
+    done
+    ok "Installed $count skills to $SKILLS_DEST/"
+else
+    warn "No skills at $SKILLS_SRC — skipping skill install"
 fi
 
 # ── 7. MCP server registration ────────────────────────────────────────────────
