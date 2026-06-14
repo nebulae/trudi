@@ -258,3 +258,90 @@ is what holds when that happens:
   unrecordable, so the bypass produces no usable evidence.
 
 Both layers are independently verifiable in `tests/security/test_spoliation.py`.
+
+## G. Ground-truth comparison against published answer keys
+
+Several cases are published scenarios with authoritative instructor/NIST solutions,
+so they can be graded against a real key, not self-assessment. Each is scored on what
+TRUDI got right, where it went wrong, what it missed, and the techniques that found
+the answers.
+
+### VANKO-2016 — SANS FOR500 "Case of the Abducted Zebrafish"
+
+TRUDI's run is the committed demo bundle (`docs/demo/vanko/`). **Bottom line:** the
+central verdict and ~9 of 10 findings are correct; the one substantive error is an
+attribution blur between two principals.
+
+**What we got right**
+
+- **The central question — Vanko is a witting insider — yes.** TRUDI confirmed the
+  deliberate 2016-06-29/30 bulk copy of `\\192.168.1.5\StarkResearch` → PowerShell
+  rename → `vacation photos.7z` → VeraCrypt → USB `StarkResrch` (serial 5650959F) +
+  Dropbox, performed by Vanko while negotiating to sell research to Bulgakov / Titan
+  Biotech. This is the key's witting-insider thread (F6, F7, F9).
+- **BadUSB initial access.** `misc.device_install_inventory` surfaced the **ATMEL
+  `Ducky_Storage`** (a Hak5 USB Rubber Ducky) — the key's exact mechanism for
+  planting the covert account (F2, F3).
+- **Covert account + FTP server.** `defaultprinter` (RID 1006) added to
+  Administrators, smallftpd installed — matches the key (F1).
+- **First-exfil mechanics.** `temp.zip` pulled by external client **173.73.166.249**
+  (`JVMBA.local`) via the `defaultprinter` account, deleted ~20 s later, **recovered
+  from the `defaultprinter` Recycle Bin** with its classified contents confirmed —
+  matches the key's recovery method and file list (F4).
+- **Recipients, channels, cleanup.** Bulgakov (`vladimir.bulgakov@titan-biotech.com`)
+  and Nina (`nina_kwai@qq.com`, Telegram `@ninakwai`); the FTP/USB/Dropbox/email
+  channels; the SDelete anti-forensics; and Vanko's plan to steal a co-worker's
+  higher-privilege file-server password (TRUDI named the co-worker "Rogers") — all in
+  the key (F7–F10).
+
+**Where we went wrong**
+
+- **One attribution blur — the two principals.** The key is explicit that the
+  **06-18 `temp.zip` exfil was Nina's covert operation, and "Vanko is never aware of
+  Nina's activities."** TRUDI's headline answer instead folded that first exfil into
+  Vanko's witting scheme ("Vanko was a witting participant… twofold mechanism (a) an
+  initial covert exfiltration…"). The overall *witting-insider* verdict is correct (it
+  holds for the second exfil), but crediting Vanko with the **first** exfil is wrong —
+  that was Nina, using the account her BadUSB planted, over RDP from her own machine.
+  This is the single-actor lock-in the distinct-principal discipline exists to prevent.
+  Tellingly, TRUDI's *narrative* hedged correctly at the artifact level ("human
+  authorship by Vanko cannot be assumed for this step"), but the synthesis
+  over-committed — and the final `reason.synthesize` / `reason.pre_report_check` gates,
+  which force every contested principal to CONFIRMED/REFUTED before Report, **did not
+  run**: the reasoning backend hit a `credit balance is too low` billing error in the
+  Report phase. The gate most likely to catch this was offline when it mattered.
+
+**What we missed**
+
+- **Scope of the bulk copy.** The key's ShellBags show Level **5, 6, 7, and 8**
+  Classified were copied; TRUDI reported only **Level 7/8** (missed 5 and 6).
+- **The RDP fact.** The key's teaching point is the **Security 4624 Type 10 (RDP)**
+  logon by `defaultprinter` from 173.73.166.249. TRUDI cited the 4624 and the source
+  IP/account but framed it as a generic external logon, not the named RDP type-10
+  session.
+- **Minor:** one of the seven `temp.zip` files (`ic-enhanced-spec-sheet.pdf`) was not
+  listed; and TRUDI's "Ducky inserted ~23 min before account creation" used the device
+  *install* time — the key's tighter signal is the **last insertion at 20:40:53, ~1 s
+  before** the account was created at 20:40:54, which is even stronger evidence of
+  injection.
+
+**Clever techniques that found the answers**
+
+- **Structured BadUSB detection** via `device_install_inventory` over
+  `setupapi.dev.log` (enumerate, don't grep) — caught the Rubber Ducky as a
+  HID+storage device.
+- **Deleted-archive recovery + content inspection as a self-correction:** the exfil
+  finding was downgraded when `reason.evaluate_finding` CHALLENGED the "classified"
+  label, then TRUDI recovered `temp.zip` from the covert account's Recycle Bin,
+  inspected its contents, resolved a timezone discrepancy, and re-confirmed — the same
+  recovery path the instructor solution uses.
+- **Exfil-channel ranking by transfer artifact** (FTP strongest, then
+  USB/Dropbox/email) rather than treating staging as egress.
+- **Recipient-nationality restraint:** downgraded "foreign buyers" to "solicitors
+  (nationality self-reported)" after noticing Titan's SMTP is a US ARIN range — correct
+  forensic caution, even though the key's narrative does make them foreign.
+
+**Score (qualitative):** core verdict correct; ~9/10 findings correct; one
+principal-attribution blur (first exfil mis-credited to Vanko) and two scope/labeling
+misses (Level 5–6; RDP type-10). The one substantive error coincides with the
+Report-phase reasoning gates being knocked out by a backend billing outage.
