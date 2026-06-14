@@ -58,7 +58,8 @@ imply. The agent declined to attribute on the surface match.
 | Nitroba `#68` | An ngrep hit on `johnny`/`coach` | The string was "Johnny Chen" inside the XMP metadata of an eBay photo, unrelated to the suspect; the agent declined to attribute on it | False-positive rejection |
 | Nitroba `#107` | Amy Smith appears in the victim's buddy list and on the suspect device | Demoted to co-present **SUSPECTED** once her Yahoo session was shown to begin *after* the harassing sends — presence is not authorship | Near-FP / refuted |
 | SRL-2018 rd-04 `#262` | An RWX region in `SearchUI.exe` "looks like" rd-01's beacon | A host-local YARA scan with the bundled Cobalt Strike ruleset returned **0 matches**; the transitive "same family" claim was dropped (the host stayed CONFIRMED on its own malfind/netstat evidence) | Over-attribution rejection |
-| Vanko (demo) `#144` | DAIR surfaced a candidate principal **"BROWSED"** | Dispositioned as a false positive — the token came from the verb "browsed" in a tool-results summary, not a SID, username, login, or correspondent; no separate principal exists behind it. (The same parser-noise class produced `CRONTABS`/`ENUMERATION` candidates on other runs, each dispositioned the same way.) | Candidate-principal FP |
+
+(Phantom *entities* invented from parser/string noise — a host or a principal that does not exist — are catalogued with the hallucinations in section C, not here.)
 
 ## B. Missed artifacts (false negatives)
 
@@ -131,6 +132,48 @@ hardened agent did not reproduce it on the final pass.
   fabricated evidence — listed honestly so it is not miscounted as a hallucination.
   Fix: rebuild the MITRE cache while keeping the gate for genuinely unknown IDs.
 - **Trace:** CFReDS **development run** `#116` (2026-06-01T17:46:39), `gate_refusal`.
+
+### C4. Claimed coverage that had not been run (SRL-2018) — procedural hallucination
+
+- **The claim:** prior analysis reported "breadth YARA on rd-03/rd-05" as
+  completed coverage.
+- **The catch:** those scans had **not** actually been run. The agent caught the
+  gap, ran them, and then found that the bundled YARA TTP ruleset fires on
+  essentially *every* memory image (clean ones included) — so the hits are not a
+  compromise indicator. Both the false coverage claim and the invalid detector
+  reading were corrected.
+- **Why it counts:** asserting work that was never performed is a fabrication, even
+  though no on-disk artifact was invented.
+- **Trace:** SRL-2018 self_correction `#457` (`hypothesis_refuted`).
+
+### C5. Invented evidentiary meaning — a category error (Schardt)
+
+- **The claim:** the captured traffic was "proven third-party" because the
+  laptop's Xircom MAC was absent from the frames.
+- **The catch:** the Xircom is the laptop's **wired** NIC; its wireless adapter is
+  a Compaq WL110. Xircom-absence therefore says nothing about a wireless capture —
+  the artifact could not support the meaning assigned to it. The agent caught its
+  own reasoning, retracted the claim, and re-grounded the wireless determination on
+  the correct adapter.
+- **Why it counts:** the evidence existed, but the inference invented significance
+  it did not carry.
+- **Trace:** Schardt self_correction `#226` (`evaluate_challenged`).
+
+### C6. Phantom candidate principals from parser noise (Vanko, DEMO-LIVE)
+
+The distinct-principal machinery surfaces candidate identities from tool output;
+some candidates are tokens, not people. Each was dispositioned as a false positive
+rather than investigated as a real actor — the same failure mode as the phantom IP
+in C1, at the identity layer.
+
+- **Vanko `#144` (committed trace):** candidate **"BROWSED"** — from the verb
+  "browsed" in a tool-results summary; not a SID, username, login, or
+  correspondent. Dispositioned false positive.
+- **DEMO-LIVE `#129`/`#131`** (the live-monitoring case, *out of submission
+  scope*): **"CRONTABS."** (from the token `USER_CRONTABS`) and **"ENUMERATION"**
+  (from "user enumeration") — both excluded as parser false positives.
+- **Why it counts:** left undispositioned, each would have spun up an investigation
+  against a principal that does not exist.
 
 ## D. Over-attribution and confidence calibration
 
