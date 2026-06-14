@@ -265,7 +265,7 @@ The eight required submission components and where each one lives. Items marked 
 | 3 | Architecture Diagram | [docs/architecture.md](docs/architecture.md) · [Mermaid source](docs/architecture.mmd) |
 | 4 | Written Project Description | [docs/project-description.md](docs/project-description.md) (mirrors the **Devpost** story) |
 | 5 | Dataset Documentation | _TODO — no standalone doc yet_ |
-| 6 | Accuracy Report | _TODO — draft inputs in [docs/hallucination-catches.md](docs/hallucination-catches.md); generate with `accuracy.accuracy_export_report`_ |
+| 6 | Accuracy Report | [docs/accuracy-report.md](docs/accuracy-report.md) — false positives, missed artifacts, hallucinations caught in testing, confidence calibration, and an evidence-integrity / spoliation section |
 | 7 | Try-It-Out Instructions | [Setup](#setup) + [Starting a case](#starting-a-case) (this README) |
 | 8 | Agent Execution Logs | Committed demo-run trace + report + console at [docs/demo/vanko/](docs/demo/vanko/README.md); generated per case to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log` |
 
