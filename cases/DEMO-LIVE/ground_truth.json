@@ -1,0 +1,37 @@
+{
+  "case_id": "DEMO-LIVE",
+  "_comment": "Ground truth for the seeded live-monitoring intrusion on host 'victim' (Ubuntu 22.04, Velociraptor client C.b5eaaceb4a44683b). Five planted TTPs fire the four Custom.TRUDI.* detectors plus a LOLBin self-correction beat. Attacks staged via /attacks/run AFTER monitor.baseline_capture + monitor.start_watcher so each artifact is absent from the baseline allowlist. Scored by accuracy.accuracy_compare (token-overlap >= 0.30) against the per-alert trace findings; negative_assertions scored against UNCONFIRMED findings (negative_coverage).",
+  "expected_findings": [
+    {
+      "id": "GT-LOLBAS",
+      "description": "LOLBin masquerade T1036.005 — /bin/sleep copied to and executed from /tmp/sleep; the image name is allowlisted but the /tmp path is not, triggering Custom.TRUDI.NewProcess. Self-correction beat: initial benign-sleep hypothesis corrected once the unusual /tmp execution path is confirmed.",
+      "confidence_min": "LIKELY"
+    },
+    {
+      "id": "GT-NEWPROC",
+      "description": "Suspicious process execution T1059.004 — unix shell one-liner launched from /tmp on host victim, executable path not in the NewProcess baseline allowlist; fired Custom.TRUDI.NewProcess.",
+      "confidence_min": "CONFIRMED"
+    },
+    {
+      "id": "GT-CRON",
+      "description": "Cron persistence T1053.003 — new scheduled-task file written under a watched cron directory (/etc/cron.d or /var/spool/cron/crontabs) not present in the persistence baseline; fired Custom.TRUDI.NewPersistence.",
+      "confidence_min": "CONFIRMED"
+    },
+    {
+      "id": "GT-INJECT",
+      "description": "Process injection T1055.001 — in-memory marker string TRUDI_DEMO_INJECTED_MARKER_C0FFEE detected in process memory by YARA rule TRUDI_DEMO_ProcessInjection_T1055; fired Custom.TRUDI.YaraProcess.",
+      "confidence_min": "CONFIRMED"
+    },
+    {
+      "id": "GT-BEACON",
+      "description": "C2 beacon T1071.001 — long-lived ESTABLISHED outbound TCP connection from host victim to C2 sink 203.0.113.10 on port 8080, a non-RFC1918 destination absent from the network baseline; fired Custom.TRUDI.NewNetwork.",
+      "confidence_min": "CONFIRMED"
+    }
+  ],
+  "negative_assertions": [
+    "No kernel-mode rootkit or malicious loadable kernel module (LKM) was loaded on host victim.",
+    "No lateral movement to a second host or domain controller occurred; activity is confined to the victim container.",
+    "No credential dumping of /etc/shadow or /etc/passwd contents was observed.",
+    "No data was archived or staged for exfiltration (no rar/tar/zip collection of user data)."
+  ]
+}

@@ -1,29 +1,41 @@
 # TRUDI — Threat Response Unit for Digital Investigation
 
+## "We are all smarter than any of us."
+
+*— Mahyar Raissi, co-founder of Quo (formerly OpenPhone), and a former boss of mine. It stuck.*
+
 *Find Evil! Hackathon — Written Project Description (Devpost story)*
 
-> TRUDI is an autonomous DFIR agent that runs a full incident-response investigation on
-> the SANS SIFT Workstation: disk triage, memory forensics, Windows artifacts, network
-> and YARA hunting. It produces a court-defensible report where every conclusion has
-> survived an adversarial reviewer and links back to the exact tool execution that
-> produced it.
+## TL;DR
+
+Most AI agents are a single model grading their own work, which is how a confident hallucination ends up in a report. TRUDI splits the job across three. Claude runs the tools, a DAIR director decides what to examine next, and an adversarial reviewer challenges every conclusion before it's written. Each finding is tagged CONFIRMED, LIKELY, or SUSPECTED, and server-enforced gates make integrity structural: a CONFIRMED finding cannot be recorded without a link to the tool call that proves it. The goal isn't speed; it's a whole analyst team's worth of skepticism applied to every finding.
 
 ---
 
 ## Inspiration
 
-AI adversaries already move at machine speed. CrowdStrike clocked a 7-minute fastest
-breakout. Horizon3's autonomous agent went from foothold to full privilege escalation in
-60 seconds. MIT's 2024 work measured AI-driven attacks running about 47× faster than human
-operators. Incident response, meanwhile, is still paced by a human analyst typing `vol`,
-reading the output, deciding the next command, and writing notes by hand.
+The obvious pitch for an AI forensics agent is speed. AI adversaries already move at machine
+speed: CrowdStrike clocked a 7-minute fastest breakout, Horizon3's autonomous agent went from
+foothold to full privilege escalation in 60 seconds, and MIT's 2024 work measured AI-driven
+attacks running about 47× faster than human operators. Incident response, meanwhile, is still
+paced by a human analyst typing `vol`, reading the output, and writing notes by hand.
 
-TRUDI is my answer to that gap. It's an autonomous responder that keeps up with adversary
-speed without giving up the two things that make forensic work admissible: evidence
-integrity and analytical accuracy. The hard part was never running the tools fast. It was
-running them fast while guaranteeing the agent can't tamper with evidence, can't hallucinate
-a finding into a report, and can't make a claim that doesn't trace back to a specific
-command. 
+But speed was never what worried me about pointing a language model at forensic evidence. Trust
+was. An agent that runs a hundred tools an hour and confidently invents a single finding is worse
+than no agent at all, because in forensics a fabricated conclusion can put the wrong person in
+front of a judge. The hard problem isn't getting an LLM to *do* forensics. It's getting one you
+can rely on not to make things up, whose every claim traces back to a specific command, and that
+is honest about what it doesn't know.
+
+So I didn't model TRUDI on a faster analyst. I modeled it on a *team* of them. In a good IR shop no
+single person's conclusion ships unchallenged: someone plans the approach, someone does the work,
+someone plays skeptic and tries to break the finding before it reaches the report, and someone is
+curious enough to chase the thread nobody was assigned. That mix of skepticism and curiosity is
+where accuracy comes from; none of us is as sharp alone as all of us are together. TRUDI turns that
+team into roles a machine can hold open at once: a director that decides what to examine, an analyst
+that does the work, and an adversary that challenges every conclusion before it's allowed to stand,
+plus a bounded budget of curiosity so the agent can still follow a hunch the work order didn't name.
+Speed is a side effect. Trust is the point.
 
 ## What it does
 
@@ -60,7 +72,7 @@ traced through NTLM logon records.
 
 ## How I built it
 
-TRUDI is a two-model system sitting behind a typed MCP boundary.
+TRUDI is a three-model system sitting behind a typed MCP boundary.
 
 - **Claude (primary analyst)** orchestrates the investigation, selects tools, interprets
   output, and writes the report.
@@ -71,6 +83,50 @@ TRUDI is a two-model system sitting behind a typed MCP boundary.
 - **A DAIR phase director** keeps the investigation in a recursive state machine (Triage,
   Collect, Analyze, Scan, Report), prescribes the next tool batch, and pushes a new Triage
   loop whenever lateral movement points at a new host.
+
+### How a conclusion gets earned
+
+The reasoning isn't one "analyze" step. It's a loop with named checkpoints, and every checkpoint
+leaves a row in the trace.
+
+It starts with the **case question**. Before any tool runs, `reason.hypothesize` turns that
+question ("who sent the harassing email?", "what was exfiltrated?") into a set of competing,
+testable hypotheses, and it is *required* to produce at least one that isn't the obvious
+narrative: a genuinely different actor or mechanism. Each hypothesis gets an ID (`H0007`), and the
+call hands back the **discriminators**, the specific tool calls that would separate the top two
+explanations (a logon type and source address, USB serials across user profiles, a
+registry-to-account binding). Those become the work order. The goal is to attack the question from
+more than one direction at once instead of locking onto the first plausible story, which is the
+single most expensive failure mode in an investigation.
+
+`reason.plan` runs at the top of every triage phase and turns the current evidence picture into a
+prioritized, manifest-backed tool sequence, so the agent collects in a sensible order instead of
+flailing. As artifacts come in, hypotheses are confirmed, refuted, or split, and a contested actor
+can't just be left dangling: a competing principal rated medium-likelihood or higher has to be
+driven to CONFIRMED or REFUTED (or explicitly parked as evidence-unavailable) before the case can
+close.
+
+There's a deliberate tension built into that loop. DAIR hands down a strict work order and the
+agent runs exactly that, no improvising mid-batch, but a rigid agent misses the artifact nobody
+told it to look for. So once the prescribed batch is done, DAIR also grants a **curiosity budget**:
+a small, bounded number of read-only probes the agent may spend on its own hunches, a second user's
+Recycle Bin, an untouched mailbox, a `setupapi.dev.log` nobody asked about, a weaker exfil channel
+worth ruling out. Each probe is logged with the reason the agent looked
+(`misc.record_curiosity_probe`), and crucially a probe is *not* a finding: it carries no
+evidentiary weight until whatever it turns up is fed back through the same hypothesis-and-gate path
+as everything else. It widens coverage without loosening a single gate, and the budget is zero in
+the Report phase, so the agent can't go wandering when it should be writing up.
+
+Before any strong claim is written, a finding has to survive a per-finding review chain:
+`reason.evaluate_finding` (does the evidence actually support this, or is it CHALLENGED?),
+`reason.confidence_score` (an evidence-grounded tier and a 0–1 score; if it comes back lower than
+intended, the finding is downgraded), and `reason.cite_check` (does every concrete claim, every
+path, IP, hash, and technique ID, cite a real artifact?). At the end, `reason.synthesize` checks
+the whole finding set for cross-consistency and `reason.pre_report_check` refuses to let the report
+be written while any blocking issue remains: an unresolved second principal, an attribution with no
+logon/session evidence behind it, a case question left unanswered. Each finding carries the ID of
+the hypothesis it tested, so the trace reads as hypothesis → evidence → verdict, not a flat list of
+assertions.
 
 Everything the agent does crosses one boundary: the TRUDI MCP server, which mounts over 250
 typed tools across 24 namespaces. The agent never shells out to `vol` or `RECmd.dll`
@@ -83,14 +139,13 @@ retry, timeout, and a line cap. What the boundary exposes:
   network tooling (`net.*`), EWF and image mounting (`ewf.*`, `img.*`), hashing (`hash.*`),
   static analysis (`strings.*`), and a `misc.*` namespace covering email, registry,
   event-log, and macro tooling.
-- **Beyond static evidence.** TRUDI doesn't stop at dead-box images. `live.*` does read-only
-  live endpoint analysis over argv-only SSH (processes, connections, persistence, open files,
-  log tails). `velo.*` wraps the Velociraptor API surface (client enumeration, artifact
-  collection, event tables, VQL queries). `monitor.*` drives a live-monitoring lifecycle
-  (baseline capture, watchers, alert draining). TRUDI never runs containment or remediation
-  itself. Response steps are printed as copy-pasteable commands in the report for the analyst
-  to run, which keeps the agent strictly read-only and the human in the loop on anything that
-  changes a system.
+- **Read-only by construction.** This submission investigates static evidence (disk images,
+  memory captures, PCAPs). The agent has no write path to the system under analysis, and
+  response is advisory only: recommended actions are printed as copy-pasteable commands in the
+  report for the analyst to run, keeping the human in the loop on anything that changes a system.
+  (An experimental live-endpoint layer, `live.*` / `velo.*` / `monitor.*`, extends the same
+  read-only boundary to running hosts. It runs today but is still in progress and is **not part
+  of this submission**, see *What's next*.)
 - **Added analysis tooling.** `enrich.*` (threat-intel lookups), `correlate.*` (cross-tool
   joins and ATT&CK mapping), `af.*` (anti-forensics detection), `attribution.*`,
   `accuracy.*`, and `coverage.*` for scoring and ground-truth comparison.
@@ -113,9 +168,51 @@ The point of all of this is that the guardrails are architectural, not just prom
 | Confirmed claims require review | confidence-score, citation-check, hypothesis, lineage, and adversarial-evaluate gates hard-block unsupported CONFIRMED/LIKELY findings |
 | Response stays advisory | TRUDI runs no containment or remediation; recommended actions are printed as commands in the report for the analyst to run, keeping the human in the loop on every system-changing action |
 
+### Gates that can refuse a finding
+
+The checkpoints above are advice until something enforces them. What makes them real is that
+`record_finding` (and the final report export) run through a set of **server-side gates** that
+return a hard refusal, not a warning, when a finding doesn't clear the bar. The agent can't talk
+its way past them, because they're computed from the trace and the finding's own metadata, not from
+the prose of the request. A representative few:
+
+- **`confirmed_requires_linked_call_id` / `linked_call_id_must_exist`** — a CONFIRMED finding must
+  point at the real `_trudi_call_id` of the tool execution that produced it. No link, or a
+  made-up one, no finding.
+- **`confirmed_requires_supported_evaluate`** — if the most recent `reason.evaluate_finding` came
+  back CHALLENGED or UNCERTAIN, the CONFIRMED claim is refused until it is supported or downgraded.
+- **`confidence_and_citation`** — a CONFIRMED/LIKELY finding needs a fresh confidence score and
+  citation check tied to *its own* text; one review can't be reused to wave a second finding
+  through.
+- **`hypothesize_required`** — a finding about a process, service, persistence, C2, or lateral
+  movement has to trace back to a hypothesis, so conclusions stay tied to a question that was
+  actually asked.
+- **`principal_attribution_grounding` / `named_actor_attribution_grounding`** — binding an account
+  or a named person to an action ("X exfiltrated…", "account Y is operated by Z") is refused
+  unless the evidence includes an authentication/session artifact (a 4624/4625 logon by type and
+  source, an RDP session, an SSH login). An account name is not a person.
+- **`exfil_channel_grounding`** — claiming data left the host over a channel needs a transfer
+  artifact (bytes moved, an FTP log, a USN write, a mail attachment), not just "the tool was
+  installed" or "a file sat in a sync folder." Staging is not egress.
+- **`mcp_routing`** — a finding that cites a raw shelled-out binary instead of the typed MCP
+  wrapper is refused, which keeps the audit trail inside the boundary.
+- **`negative_completeness` / `negative_from_truncated`** — an absence claim ("no RDP logons", "no
+  persistence") is refused unless the trace searched the complete source set for that claim, and
+  refused outright if its evidence was a truncated scan.
+- **`mitre_technique_validation`** — any ATT&CK technique ID in a finding is validated against the
+  real ATT&CK catalog; an invented `T####` is rejected with the offending string.
+- **`reformulation_depth_limit`** — re-evaluating the same finding repeatedly with no new evidence
+  in between is blocked, so the agent can't grind a weak finding through review by rewording it.
+
+This is why "autonomous" doesn't mean "unaccountable." Most of the hardening work was finding a new
+way to be wrong on a real case (below) and then turning the fix into a gate, so the same mistake
+can't recur on the next case, or the next user's.
+
 Every tool call, reasoning call, DAIR transition, self-correction, curiosity probe, and finding
 is written to a live JSON/Markdown trace, rendered in a dashboard, and scored by an accuracy
-framework against ground truth (precision, recall, F1, and negative-coverage).
+framework against ground truth: precision, recall, $F_1 = 2 \cdot \frac{P \cdot R}{P + R}$, and a
+negative-coverage metric that rewards the "we looked for X and found nothing" findings instead of
+ignoring them.
 
 ## Challenges I ran into
 
@@ -219,21 +316,13 @@ negative-coverage metric.
 
 **The same agent and the same guardrails across very different cases.** TRUDI has run an 8-host
 enterprise APT (memory, disk, event logs), a multi-channel insider data theft (five exfil
-channels across email, two USBs, a CD-R, and cloud, with per-device anti-forensics), and a
-network-only harassment attribution from a single PCAP, plus M57, Schardt, and ROCBA. It's
-depth, not just coverage: individual runs produced 16–28 tiered findings over traces of 100 to
-350-plus fully linked entries.
-
-**The system worked well enough that I extended it past dead-box forensics.** TRUDI started as a
-post-incident, read-only investigator of static evidence: disk images, memory, PCAPs. Once it
-had proven itself case after case, I extended the same architecture to live endpoints. There's
-now a Velociraptor-backed live-monitoring loop that baselines a host, watches for drift, and
-opens a focused, per-alert investigation when something fires, running the identical
-`hypothesize → dair_assess → record_finding` chain it runs against a disk image, into the same
-trace under the same gates. The read-only stance carries over without changes: monitoring
-observes and recommends, and the analyst runs the printed remediation. The fact that the
-guardrail architecture dropped cleanly onto a live host without loosening any of it is the best
-evidence I have that the design generalizes beyond the cases it was built on.
+channels across email, two USBs, a CD-R, and cloud, with per-device anti-forensics), the Vanko
+"Abducted Zebrafish" insider case shown in the **[demo video](https://youtu.be/Dbx5DcH6V5E)**
+(a full 42 GB Surface physical image: BadUSB initial access, FTP/USB/Dropbox exfil, and a covert
+admin account — the complete run is committed at `cases/vanko/`), and a network-only
+harassment attribution from a single PCAP, plus M57, Schardt, and ROCBA. It's depth, not just
+coverage: individual runs produced 16–28 tiered findings over traces of 100 to 350-plus fully
+linked entries.
 
 **The constraint layer is architectural, not prose.** TRUDI physically can't write to an
 evidence file or submit an unlinked finding, because the MCP boundary, the read-only path guard,
@@ -249,10 +338,17 @@ findings through, and a trace where every claim has a foreign key back to the co
 produced it. Once that structure exists, the speed comes for free. The slow part of IR was never
 the tools.
 
+But structure alone makes a rigid agent, and rigid agents miss things. The harder lesson was that
+the two have to coexist: the same framework that refuses an ungrounded finding also has to give the
+agent room to chase a hunch, as long as that exploration is logged and carries no weight until it
+survives the gates. That's what the curiosity budget is for. Curiosity you can audit is the part
+that turns a checklist-runner into an investigator.
+
 ## What's next
 
-- Broaden the live-monitoring loop (Velociraptor-backed) from demo to a standing deployment,
-  with richer printed-remediation playbooks for the analyst.
+- Promote the experimental live-monitoring layer (Velociraptor-backed) from in-progress
+  scaffolding to a supported, standing deployment. It already runs today (baselining a host and
+  opening a per-alert investigation under the same gates) but is out of scope for this submission.
 - Expand the ground-truth corpus so the accuracy framework reports FP/FN and negative-coverage
   across all bundled cases, not just the demo.
 - Package additional reference datasets so any practitioner can reproduce a full investigation

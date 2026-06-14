@@ -158,6 +158,28 @@ else
 fi
 
 
+# ── 1e. Bundled case studies (traces + reports for the dashboard) ─────────────
+
+step "Installing bundled case studies"
+
+# Copy each bundled case (trace + reports + brief, NO evidence) into ~/cases so the
+# trace dashboard can render them. A case already present in ~/cases is left alone —
+# we never clobber a user's live investigation.
+CASE_COUNT=0
+for case_src in "$TRUDI_DIR"/cases/*/; do
+    case_name="$(basename "$case_src")"
+    [ "$case_name" = ".common" ] && continue
+    case_dest="$HOME/cases/$case_name"
+    if [ -e "$case_dest" ]; then
+        warn "~/cases/$case_name already exists — leaving it untouched"
+        continue
+    fi
+    cp -r "$case_src" "$case_dest"
+    CASE_COUNT=$((CASE_COUNT + 1))
+done
+ok "Installed $CASE_COUNT bundled case studies to ~/cases/ (browse with: ./dashboard.sh)"
+
+
 # ── 2. Passwordless sudo for forensic tools ───────────────────────────────────
 
 step "Configuring passwordless sudo for forensic tools"
@@ -368,15 +390,24 @@ echo ""
 echo -e "${GREEN}  TRUDI is ready.${NC}"
 echo ""
 echo "  Next steps:"
-echo "    1. Edit $TRUDI_DIR/.env — add API keys if you have them (optional)"
+echo "    1. Edit $TRUDI_DIR/.env and set ANTHROPIC_API_KEY — REQUIRED for a full-quality run."
+echo "       It powers the analyst, the reason.* reviewer, and the dair.* director."
+echo "       Without it TRUDI degrades: reason.* / dair.* calls are skipped, so findings"
+echo "       are never adversarially challenged. (VirusTotal / AbuseIPDB keys are optional.)"
+echo "       Submission default: REASON_MODEL=claude-opus-4-8, DAIR_MODEL=claude-opus-4-8"
 echo ""
-echo "  Foundation-Sec-8B (adversarial reasoning):"
-echo "    Local:  vllm serve \"fdtn-ai/Foundation-Sec-8B-Reasoning\" --reasoning-parser minimax_m2"
-echo "    Set FOUNDATION_SEC_URL=http://localhost:8000 in .env"
+echo "  Browse a finished investigation now (no key, no evidence needed):"
+echo "    ./dashboard.sh                 # serves ~/cases on http://127.0.0.1:8765"
 echo ""
 echo "  Start a new case:"
 echo "    cp -r $TRUDI_DIR/case-template ~/cases/<CASE_ID>"
 echo "    # Edit ~/cases/<CASE_ID>/CLAUDE.md with evidence paths"
 echo "    cd ~/cases/<CASE_ID>"
 echo "    claude"
+echo ""
+echo "  Alternative reasoning backend — Foundation-Sec-8B (local vLLM, optional):"
+echo "    vllm serve \"fdtn-ai/Foundation-Sec-8B-Reasoning\" --reasoning-parser minimax_m2"
+echo "    then set REASON_BACKEND=openai-compat, REASON_URL=http://localhost:8000 in .env"
+echo ""
+echo "  Full walkthrough: docs/try-it-out.md"
 echo ""
