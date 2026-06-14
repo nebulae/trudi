@@ -138,7 +138,33 @@ These also demonstrate the tier discipline the report cares about: TRUDI says
 LIKELY or SUSPECTED when the evidence only supports that, rather than defaulting
 to CONFIRMED.
 
-## E. Evidence integrity: spoliation and bypass test (M57-Jean)
+## E. Self-correction across the case set
+
+Self-correction is not a one-off demo moment; it is recorded structurally on every
+case. Across the seven in-scope investigations the traces hold **38 explicit
+`self_correction` entries**, each with a `trigger`, the `prior_belief`, the
+`new_belief`, and the evidence that forced the change. The most common trigger is
+`evaluate_challenged` — the adversarial reviewer refusing an overclaim before it is
+recorded — which is the accuracy mechanism working as designed.
+
+| Case | Self-corrections | A representative one (current trace `call_id`) |
+|------|:---:|------|
+| srl-2018-enterprise | 12 | `#54` refuted the briefing's `STUN.exe`/PIDs against memory (empty `vol.cmdline`/`pstree`); `#457` realized the bundled YARA TTP ruleset fires on *every* memory image — so it is not a compromise indicator — and corrected a "breadth YARA on rd-03/rd-05" claim that had not actually been run |
+| vanko (demo) | 7 | `#46` held the exfil verdict below CONFIRMED because `temp.zip` contents were never inspected ("classified" was unsupported), then recovered and inspected it; `#99` downgraded "foreign buyers" → "solicitors (nationality self-reported)" |
+| schardt | 6 | `#226` caught its **own** category error — it had argued the capture was third-party because the laptop's Xircom MAC was absent, but the Xircom is the *wired* NIC, so its absence says nothing about a wireless capture; `#114` separated account-binding (`irunin.ini` binds the Mr. Evil admin account to "Greg Schardt") from the unproven claim that the *human* operated the keyboard |
+| rocba | 6 | `#104` corrected "RDP brute-force" to an **NTLM network brute-force** — of 548,244 Security 4625 events, essentially all are LogonType 3 from external IPs, not LogonType 10 RDP |
+| nitroba | 3 | `#74`/`#88` held the email-attribution chain below CONFIRMED until the session/account binding was corroborated |
+| cfreds-leak | 2 | `#64` dropped a misapplied ATT&CK technique (T1114 is adversary email-collection, not "email was the channel") and required Drive-side corroboration before asserting cloud exfil |
+| m57-jean | 2 | `#170` re-tiered a HELO/hostname match SUSPECTED → UNCONFIRMED because the evidence is genuinely bidirectional (HELO spoofing *or* local-name origination) with nothing to break the tie |
+
+Two patterns are worth naming. First, several corrections are the agent catching
+its *own* faulty reasoning (Schardt `#226`'s category error, SRL `#457`'s invalid
+detector and an over-stated coverage claim), not merely reacting to a tool failure.
+Second, the corrections cluster at the moment of recording — the gates and the
+reviewer stop the overclaim *before* it reaches the report, which is exactly where
+accuracy has to be enforced.
+
+## F. Evidence integrity: spoliation and bypass test (M57-Jean)
 
 A manual red-team pass run directly against a mounted evidence image
 (`nps-2008-jean.E01`, the M57.biz Windows XP workstation, mounted
