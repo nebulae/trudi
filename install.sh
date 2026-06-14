@@ -45,9 +45,11 @@ ok "Claude Code at $CLAUDE_BIN"
 
 # ── 1b. System packages (apt) ─────────────────────────────────────────────────
 
-step "Installing system forensic packages"
+step "Installing system packages (Python base + forensic tools)"
 
 APT_PACKAGES=(
+    python3-venv       # ensurepip — required by `python3 -m venv` (NOT preinstalled on the SIFT base)
+    python3-pip        # pip bootstrap for the venv
     pff-tools          # pffexport — PST/OST email extraction
     pst-utils          # readpst — PST→mbox conversion
     binwalk            # firmware / embedded carving
@@ -218,8 +220,14 @@ fi
 
 step "Setting up Python environment"
 
-if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
+# A partial venv from a previous failed run (e.g. one that died at ensurepip)
+# leaves the directory but no working pip — treat that as needing recreation,
+# otherwise the pip steps below fail with a confusing error.
+if [ ! -x "$VENV_DIR/bin/pip" ]; then
+    [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"
+    if ! python3 -m venv "$VENV_DIR"; then
+        fail "Failed to create venv — 'python3 -m venv' needs ensurepip (package python3-venv). Install it and re-run: sudo apt-get install -y python3-venv python3-pip"
+    fi
     ok "Created venv at $VENV_DIR"
 else
     ok "Venv already exists at $VENV_DIR"

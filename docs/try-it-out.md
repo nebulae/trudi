@@ -211,6 +211,7 @@ cd ~/trudi && source ~/.venv/bin/activate && pytest -q
 | `claude: command not found` | Install Protocol SIFT first (it installs Claude Code). |
 | `Unable to locate package <pst-utils/pff-tools/tcpxtract>` | `universe` apt component not enabled, or apt index stale on a fresh image. `sudo add-apt-repository -y universe && sudo apt-get update`, then re-run `./install.sh`. (The package is `pst-utils`, never `libpst-utils`.) |
 | `misc.readpst_extract` / `misc.pff_export` fail with "not installed" | `pst-utils` / `pff-tools` missing — see [System forensic packages](#system-forensic-packages). |
+| venv step fails: `ensurepip is not available` | `python3-venv` not installed — **the SIFT base does not ship it** for its default `python3`. `sudo apt-get install -y python3-venv python3-pip`, then `rm -rf ~/.venv` and re-run `./install.sh`. |
 | Hooks not firing | Open `/hooks` in Claude Code once to reload, or restart the session. |
 
 ---
