@@ -245,8 +245,12 @@ else
 fi
 
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements.txt"
-"$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements-dev.txt"
+# Do NOT use --quiet here: flare-capa/flare-floss (and yara-python, which compiles
+# C) are large and can take several minutes. With --quiet the step produces zero
+# output and looks hung; show pip's normal progress instead.
+warn "Installing Python dependencies — this can take several minutes (flare-capa / flare-floss / yara-python are large). Progress shown below."
+"$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements.txt"
+"$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements-dev.txt"
 ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, pytest)"
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
