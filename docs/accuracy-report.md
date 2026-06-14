@@ -345,3 +345,99 @@ attribution blur between two principals.
 principal-attribution blur (first exfil mis-credited to Vanko) and two scope/labeling
 misses (Level 5–6; RDP type-10). The one substantive error coincides with the
 Report-phase reasoning gates being knocked out by a backend billing outage.
+
+### SCHARDT-2002 — NIST "Hacking Case" (Greg Schardt / "Mr. Evil")
+
+A 31-question artifact-identification case with a published NIST answer key. TRUDI
+answered all 31; the large majority are correct, with four real misses worth naming.
+
+**What we got right (most of the 31):** image hash + match (Q1), OS (Q2), install
+date (Q3), registered owner *Greg Schardt* (Q5), computer name `N-1A9ODN6ZXK4LQ`
+(Q6), last shutdown (Q8), 5 accounts (Q9), main/last user *Mr. Evil* (Q10–11), the
+`irunin.ini` / Look@LAN identity file (Q12), both NICs (Q13), IP `192.168.1.111` /
+MAC `0010a4933e09` (Q14), Xircom OUI (Q15), six hacking tools (Q16), SMTP/NNTP/news
+identity (Q17–20), the mIRC user settings (Q21), the `interception` capture, the
+Windows-CE victim and the MSN/Hotmail sites (Q23–25), Yahoo `ShowLetter[N].htm`
+(Q27), and the recycle-bin trio (Q28–30).
+
+**Where we went wrong:**
+- **Q7 primary domain.** Key = **`Evil`**; TRUDI answered "none — workgroup, TCP/IP
+  Domain blank." It checked the TCP/IP domain but not the LSA Primary Domain
+  (`SECURITY\Policy\PolPrDmN`), which holds `Evil`. Wrong answer.
+- **Q26 main web-mail.** Key = **`mrevilrulez@yahoo.com`**; TRUDI answered
+  `mrevil2000` (the Yahoo id it found in the `edit.yahoo.com/config/id_check` self-
+  registration). It surfaced a real Yahoo persona — and used it well for attribution
+  — but reported the wrong address for the actual mailbox.
+- **Q31 anti-virus.** Key = **Yes (viruses present)**; TRUDI ran ClamAV over
+  `Program Files` only, found nothing, and concluded "no conventional viruses." A
+  2026 ClamAV pass over a subset missed the period malware the question expects.
+- **Q4 timezone (label).** Offset correct (ActiveTimeBias 300 / UTC-5) but labeled
+  "Central Standard Time" vs the key's "Central Daylight Time (-05)" — a
+  zone-name-vs-active-state nuance.
+
+**What we missed (partial):** Q22 listed *joined* channels (`#Chataholics`,
+`#CyberCafe`, `#AllNiteCafe`) from the mIRC chanfolder rather than the *logged*
+session channels the key lists — 2 of 3 overlap, but the source was wrong. Q16
+named six valid tools but omitted CuteFTP (a seventh the key counts).
+
+**Clever techniques:** verified the image by **full SHA-256** when the vendor hash
+file truncated MD5 to 31 characters (avoided a false mismatch); a **dual-artifact
+identity binding** (`irunin.ini` RegisteredOwner *plus* the IE
+`id_check?.fn=Greg&.ln=Schardt` URL) with explicit person-vs-account discipline,
+including the self-corrected **Xircom-is-the-wired-NIC** category error (§E `#226`);
+and a **knowns-driven roster sweep** proving every captured identity belongs to the
+victim, not the suspect.
+
+**Score (qualitative):** ~26 of 31 correct; 3 wrong answers (Q7, Q26, Q31), one
+label nuance (Q4), one source/scope slip (Q22), one omission (CuteFTP).
+
+### CFREDS-LEAK — NIST Data Leakage Case (Iaman Informant / Spy Conspirator)
+
+The one case with a **machine-readable** ground truth (`analysis/ground_truth.json`)
+— TRUDI even auto-generated its own `accuracy.accuracy_export_report`. Against the
+NIST narrative key, the case-question answer is essentially fully correct; the gaps
+are depth artifacts.
+
+**What we got right:** the **sole operator** (`informant`) and the **correct
+refutation of a second principal** — `admin11` / `ITechTeam` / `temporary` were
+created *by informant himself* and mounted none of the exfil media (this is the
+distinct-principal discipline working — the very thing it blurred on Vanko); **all
+five channels** (email, Google Drive, RM#1, RM#2, RM#3); the email conspiracy thread
+including the exact lines *"USB device may be easily detected. So, try another
+method."* and *"It's done. See you tomorrow."* (recovered from Deleted Items); the
+**decoy-rename mapping by exact byte size**, matching the key precisely —
+`happy_holiday.jpg` (440,517 B) = `pricing_decision.xlsx`,
+`do_u_wanna_build_a_snow_man.mp3` (6,844,294 B) = `final_meeting.pptx`; the
+`winter_whether_advisory.zip` = `detailed_design.pptx` decoy on RM#2/RM#3;
+**per-device anti-forensics** (PC: Eraser + CCleaner + emptied Recycle Bin; RM#2:
+rename + FAT deletion; RM#3: hidden behind decoy images) and the correct *"no
+event-log clearing"*; and the **roster-matched recipient** without legal process.
+
+**Where we went wrong / missed:**
+- **The two signature AF-defeat artifacts went unused.** The case is built around
+  recovering deleted activity from the **Volume Shadow Copy** (the VSS copy of
+  `snapshot.db`, whose `cloud_entry` records and checksums recover the deleted
+  Google Drive files — key Q47–49) and the **Windows Search ESE database**
+  (`Windows.edb`, which retains deleted emails and IE history — key Q44–46). TRUDI
+  proved the Drive channel from `sync_log.log` (correct) but never touched VSS or
+  `Windows.edb`, which would have corroborated it and recovered more.
+- **Decoy-rename tier.** Held at LIKELY on byte-size ("hashes not compared"); a
+  hash comparison against the RM#1/seed originals would have raised it to CONFIRMED.
+- **Depth artifacts not surfaced:** the resignation letter (Q35–37), the sticky note
+  *"Tomorrow… Everything will be OK…"* (Q40–41), the thumbcache PPT thumbnails
+  (Q37–39), the full ~17-file original→renamed mapping, and the multi-session CD
+  burns (Q32–33). These are 60-question depth, not the case-question core.
+- Did not name the Google Drive account `iaman.informant.personal@gmail.com` (Q31).
+
+**Clever techniques:** `device_install_inventory` **ruled out BadUSB** (175 devices,
+no keystroke-injector) — the same structured tool that *found* the Ducky on Vanko,
+here correctly returning the clean, opposite result; the distinct-principal
+discipline **correctly refuting** a second principal; the byte-size decoy mapping;
+and an honest **SUSPECTED** on Google Drive adversary-receipt (on-host artifacts
+genuinely cannot prove the download). Self-corrections: T1114 → T1567.002 technique
+fix, the recipient hedge, and the decoy down-tier to LIKELY.
+
+**Score (qualitative):** case-question core ~fully correct (suspect, sole-operator,
+all channels, decoy mapping, per-device AF, timeline); misses are secondary/depth
+artifacts (VSS, `Windows.edb`, full file mapping) and one tier that a hash compare
+would raise.
