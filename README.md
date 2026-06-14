@@ -87,8 +87,8 @@ Every tool call, DAIR call, reason call, and confirmed finding is written to a l
 
 3. **Python 3.10+** and **dotnet** — both included in SIFT Workstation
 
-4. **Reasoning backends** *(optional but recommended)*
-   TRUDI uses two independently-configured reasoning models — the adversarial reviewer (`REASON_BACKEND`) and the DAIR phase director (`DAIR_BACKEND`). Each takes the same options and may point at the same or different models:
+4. **Reasoning backends** — **required**
+   TRUDI uses two independently-configured reasoning models — the adversarial reviewer (`REASON_BACKEND`) and the DAIR phase director (`DAIR_BACKEND`). These are core to how TRUDI works, not add-ons: without them the agent runs unsupervised, findings are never challenged or confidence-scored, and phase direction falls back to a static path. Configure both before running. Each takes the same options and may point at the same or different models:
 
    | Backend | Config |
    |---------|--------|
@@ -97,7 +97,7 @@ Every tool call, DAIR call, reason call, and confirmed finding is written to a l
    | Foundation-Sec (local) | `…_BACKEND=openai-compat` + `…_URL=http://localhost:8000` |
    | Foundation-Sec (HF) | `…_BACKEND=openai-compat` + `…_URL=<hf-endpoint>` + `…_API_KEY=hf_...` |
 
-   The submission runs both on `claude` with Opus (see [How it works](#how-it-works)). TRUDI degrades gracefully if a backend is unconfigured — reason and DAIR calls are logged as skipped.
+   The submission runs both on `claude` with Opus (see [How it works](#how-it-works)) — the simplest setup is to add an `ANTHROPIC_API_KEY` and you're done. TRUDI will start without a backend configured, but that is **not a supported way to evaluate it**: reason and DAIR calls are skipped and you're seeing a hollowed-out agent, not TRUDI.
 
 ---
 

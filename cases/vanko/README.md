@@ -16,7 +16,7 @@ copies this whole `cases/` tree into `~/cases/`, so it shows up in the trace das
 | [`analysis/VANKO-2016_trace.json`](analysis/VANKO-2016_trace.json) | Full execution trace — every tool / DAIR / reason call, curiosity probe, and finding, each with a `_trudi_call_id`, UTC timestamp, and lineage. The dashboard's input and the Agent Execution Log (submission #8). |
 | [`reports/VANKO-2016_final_report.md`](reports/VANKO-2016_final_report.md) | Structured report: case-question answers, attack narrative, tiered findings F1–F10, ATT&CK, indicators. |
 | [`analysis/device_install_inventory.csv`](analysis/device_install_inventory.csv) | The USB device-install table from `setupapi.dev.log` that surfaced the BadUSB (`ATMEL Ducky_Storage`). |
-| [`console.log`](console.log) | Full ~7,850-line terminal transcript of the run — agent narration, every tool call, the DAIR/reason exchanges, and the adversarial-review CHALLENGES. |
+| [`console.log`](console.log) | Terminal transcript — agent narration, tool calls, the DAIR/reason exchanges, and the adversarial-review CHALLENGES. ~7,850 lines, but **partial**: console capture began mid-run (around call #90), so earlier calls aren't in this file. For the complete call-by-call record from #1, use the trace above. |
 | [`CLAUDE.md`](CLAUDE.md) | The case brief TRUDI was given. |
 
 ## View it in the dashboard
