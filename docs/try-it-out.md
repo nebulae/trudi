@@ -13,9 +13,11 @@ Two ways to evaluate TRUDI, shortest first:
 
 ## Prerequisites
 
+> **Reference platform.** This walkthrough was run on the **SANS SIFT Workstation VMware image, release 2026-04-22 (Ubuntu 24.04.4 LTS, x86-64, `python3` 3.12)**. Other SIFT releases work, but package versions (notably the `pythonX.Y-venv` the installer needs) track the base Ubuntu — see [Troubleshooting](#troubleshooting).
+
 | Need | For | Notes |
 |------|-----|-------|
-| **SANS SIFT Workstation** (Ubuntu 22.04 x86-64) | Path B (the forensic tools) | Path A only needs Python 3.10+ and a browser. [Download](https://www.sans.org/tools/sift-workstation/) |
+| **SANS SIFT Workstation** (Ubuntu 24.04 x86-64) | Path B (the forensic tools) | Path A only needs Python 3.10+ and a browser. [Download](https://www.sans.org/tools/sift-workstation/) |
 | **Protocol SIFT** (Claude Code + skill playbooks) | Both | [github.com/teamdfir/protocol-sift](https://github.com/teamdfir/protocol-sift) |
 | **Python 3.10+** and **dotnet** | Both | Included in SIFT |
 | **`ANTHROPIC_API_KEY`** | Path B (full-quality) | Powers the analyst + `reason.*` + `dair.*`. See the degradation note above. |
@@ -211,7 +213,7 @@ cd ~/trudi && source ~/.venv/bin/activate && pytest -q
 | `claude: command not found` | Install Protocol SIFT first (it installs Claude Code). |
 | `Unable to locate package <pst-utils/pff-tools/tcpxtract>` | `universe` apt component not enabled, or apt index stale on a fresh image. `sudo add-apt-repository -y universe && sudo apt-get update`, then re-run `./install.sh`. (The package is `pst-utils`, never `libpst-utils`.) |
 | `misc.readpst_extract` / `misc.pff_export` fail with "not installed" | `pst-utils` / `pff-tools` missing — see [System forensic packages](#system-forensic-packages). |
-| venv step fails: `ensurepip is not available` | `python3-venv` not installed — **the SIFT base does not ship it** for its default `python3`. `sudo apt-get install -y python3-venv python3-pip`, then `rm -rf ~/.venv` and re-run `./install.sh`. |
+| venv step fails: `ensurepip is not available` | The venv package matching your `python3` isn't installed — **the SIFT base does not ship it** (SIFT's `python3` is 3.12). Install the **version-matched** package, not just the metapackage: `sudo apt-get install -y python3.12-venv python3-pip` (replace `3.12` with `python3 --version`), then `rm -rf ~/.venv` and re-run `./install.sh`. (`install.sh` now auto-installs the matching `pythonX.Y-venv` and retries.) |
 | Hooks not firing | Open `/hooks` in Claude Code once to reload, or restart the session. |
 
 ---
