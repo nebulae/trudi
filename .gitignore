@@ -26,5 +26,7 @@ mft*.json
 # OS
 .DS_Store
 
-# Keep the committed demo-run bundle for judges (overrides *_trace.json / *.log / *.csv above)
-!docs/demo/**
+# Keep the committed case-study bundle for judges + the installer (overrides the
+# *_trace.json / *.log / *.csv ignores above). Evidence is never committed.
+!cases/**
+cases/**/evidence/

@@ -45,7 +45,7 @@ trace where it occurred* — and because TRUDI was hardened by re-running cases,
 given call-ID indexes that specific run. Some examples are explicitly from earlier
 development runs (marked *development run*) on the same engine and gates rather
 than the final pass; they are real and were the reason a given gate exists. The
-**Vanko demo run is committed in full** at `docs/demo/vanko/` for independent
+**Vanko demo run is committed in full** at `cases/vanko/` for independent
 spot-checking; the other case traces are available on request.
 
 ## A. False positives
@@ -268,7 +268,7 @@ the answers.
 
 ### VANKO-2016 — SANS FOR500 "Case of the Abducted Zebrafish"
 
-TRUDI's run is the committed demo bundle (`docs/demo/vanko/`). **Bottom line:** the
+TRUDI's run is the committed demo bundle (`cases/vanko/`). **Bottom line:** the
 central verdict and ~9 of 10 findings are correct; the one substantive error is an
 attribution blur between two principals.
 

@@ -158,6 +158,28 @@ else
 fi
 
 
+# ── 1e. Bundled case studies (traces + reports for the dashboard) ─────────────
+
+step "Installing bundled case studies"
+
+# Copy each bundled case (trace + reports + brief, NO evidence) into ~/cases so the
+# trace dashboard can render them. A case already present in ~/cases is left alone —
+# we never clobber a user's live investigation.
+CASE_COUNT=0
+for case_src in "$TRUDI_DIR"/cases/*/; do
+    case_name="$(basename "$case_src")"
+    [ "$case_name" = ".common" ] && continue
+    case_dest="$HOME/cases/$case_name"
+    if [ -e "$case_dest" ]; then
+        warn "~/cases/$case_name already exists — leaving it untouched"
+        continue
+    fi
+    cp -r "$case_src" "$case_dest"
+    CASE_COUNT=$((CASE_COUNT + 1))
+done
+ok "Installed $CASE_COUNT bundled case studies to ~/cases/ (browse with: ./dashboard.sh)"
+
+
 # ── 2. Passwordless sudo for forensic tools ───────────────────────────────────
 
 step "Configuring passwordless sudo for forensic tools"

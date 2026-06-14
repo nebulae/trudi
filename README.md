@@ -250,7 +250,7 @@ Every investigation writes a live JSON trace; the bundled dashboard renders it i
 -->
 
 > 📹 **Demo video:** [Find Evil! — TRUDI walkthrough](https://youtu.be/Dbx5DcH6V5E)
-> · 📦 **Demo run bundle** (trace, report, console): [docs/demo/vanko/](docs/demo/vanko/README.md)
+> · 📦 **Demo run bundle** (trace, report, console): [cases/vanko/](cases/vanko/README.md)
 
 ---
 
@@ -264,10 +264,10 @@ The eight required submission components and where each one lives. Items marked 
 | 2 | Demo Video | [YouTube](https://youtu.be/Dbx5DcH6V5E) (also on **Devpost**) |
 | 3 | Architecture Diagram | [docs/architecture.md](docs/architecture.md) · [Mermaid source](docs/architecture.mmd) |
 | 4 | Written Project Description | [docs/project-description.md](docs/project-description.md) (mirrors the **Devpost** story) |
-| 5 | Dataset Documentation | _TODO — no standalone doc yet_ |
+| 5 | Dataset Documentation | [docs/datasets.md](docs/datasets.md) — every case's source, evidence pointer, and findings; runs bundled under [cases/](cases/) and installed to `~/cases/` for the dashboard |
 | 6 | Accuracy Report | [docs/accuracy-report.md](docs/accuracy-report.md) — false positives, missed artifacts, hallucinations caught in testing, confidence calibration, and an evidence-integrity / spoliation section |
 | 7 | Try-It-Out Instructions | [Setup](#setup) + [Starting a case](#starting-a-case) (this README) |
-| 8 | Agent Execution Logs | Committed demo-run trace + report + console at [docs/demo/vanko/](docs/demo/vanko/README.md); generated per case to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log` |
+| 8 | Agent Execution Logs | Committed run trace + report + console at [cases/vanko/](cases/vanko/README.md); every bundled case under [cases/](cases/) ships its full trace, and runs export to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log` |
 
 Supporting material: [docs/live-endpoint-testing.md](docs/live-endpoint-testing.md) (live-monitoring walkthrough), [docs/media/](docs/media/README.md) (dashboard screenshots + demo video notes).
 

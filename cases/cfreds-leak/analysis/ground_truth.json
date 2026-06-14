@@ -1,0 +1,39 @@
+{
+  "case_id": "CFREDS-LEAK",
+  "_provenance": "Expected findings reconstructed from the canonical NIST CFReDS Data Leakage Case answer set (62-question roadmap). Built independently of this run's findings so that false-negatives (uncovered artifact categories) surface honestly. Not a verbatim copy of the NIST answer PDF (not fetched).",
+  "expected_findings": [
+    {"id": "GT01", "description": "Operating system is Windows 7 Ultimate Service Pack 1, NTFS", "confidence_min": "SUSPECTED", "category": "system"},
+    {"id": "GT02", "description": "PC timezone is Eastern (UTC-5 standard, UTC-4 EDT during incident)", "confidence_min": "SUSPECTED", "category": "system"},
+    {"id": "GT03", "description": "Local user accounts informant, admin11, ITechTeam, temporary; informant is the subject RID 1000", "confidence_min": "SUSPECTED", "category": "system"},
+    {"id": "GT04", "description": "Subject Outlook account is iaman.informant@nist.gov; mail client Outlook with OST", "confidence_min": "LIKELY", "category": "email"},
+    {"id": "GT05", "description": "Spy Conspirator email address is spy.conspirator@nist.gov", "confidence_min": "LIKELY", "category": "email"},
+    {"id": "GT06", "description": "Outlook email thread including deleted items discusses the leak plan, USB risk, and completion between informant and spy", "confidence_min": "LIKELY", "category": "email"},
+    {"id": "GT07", "description": "Two files shared via Google Drive to Spy: pricing_decision.xlsx renamed happy_holiday.jpg and final_meeting.pptx renamed do_u_wanna_build_a_snow_man.mp3", "confidence_min": "SUSPECTED", "category": "cloud"},
+    {"id": "GT08", "description": "Google Drive used for cloud exfiltration; snapshot.db / sync log cloud_entry records, files later removed locally", "confidence_min": "SUSPECTED", "category": "cloud"},
+    {"id": "GT09", "description": "Network share source is \\\\10.11.11.128\\secured_drive Secret Project Data", "confidence_min": "LIKELY", "category": "exfil"},
+    {"id": "GT10", "description": "Confidential Secret Project Data documents: pricing decision, final meeting, design concept, proposal", "confidence_min": "LIKELY", "category": "exfil"},
+    {"id": "GT11", "description": "USB device RM#1 authorized SanDisk Cruzer Fit serial 4C530012450531101593 attached; carried Secret Project Data", "confidence_min": "LIKELY", "category": "usb"},
+    {"id": "GT12", "description": "USB device RM#2 unauthorized SanDisk Cruzer Fit serial 4C530012550531106501 attached", "confidence_min": "LIKELY", "category": "usb"},
+    {"id": "GT13", "description": "RM#2 anti-forensics: confidential files renamed to innocuous names and deleted from FAT, recoverable", "confidence_min": "LIKELY", "category": "antiforensics"},
+    {"id": "GT14", "description": "RM#3 CD-R burned labeled IAMAN CD; anti-forensics: confidential files hidden and renamed behind decoy images", "confidence_min": "LIKELY", "category": "antiforensics"},
+    {"id": "GT15", "description": "CD-R burning performed on PC (Windows IMAPI / live file system) on 2015-03-24", "confidence_min": "SUSPECTED", "category": "exfil"},
+    {"id": "GT16", "description": "PC anti-forensics on 2015-03-25: Eraser and CCleaner executed; Recycle Bin emptied", "confidence_min": "LIKELY", "category": "antiforensics"},
+    {"id": "GT17", "description": "File renaming traces on Desktop 2015-03-23 to 24 with MFT entries overwritten", "confidence_min": "SUSPECTED", "category": "antiforensics"},
+    {"id": "GT18", "description": "Resignation letter DOCX on informant Desktop, printed (XPS) ", "confidence_min": "SUSPECTED", "category": "user_activity"},
+    {"id": "GT19", "description": "Thumbcache (thumbcache_256) contains traces of confidential files", "confidence_min": "SUSPECTED", "category": "cache"},
+    {"id": "GT20", "description": "Sticky Notes content recovered from informant profile", "confidence_min": "SUSPECTED", "category": "cache"},
+    {"id": "GT21", "description": "Windows Search index Windows.edb retains IE history, email and Desktop file content", "confidence_min": "SUSPECTED", "category": "cache"},
+    {"id": "GT22", "description": "Volume Shadow Copies preserve pre-wipe state including Google Drive snapshot.db cloud_entry deletions", "confidence_min": "SUSPECTED", "category": "vss"},
+    {"id": "GT23", "description": "Web browser history and search keywords related to data leakage / anti-forensics tools", "confidence_min": "SUSPECTED", "category": "browser"},
+    {"id": "GT24", "description": "Recycle Bin was emptied as anti-forensics", "confidence_min": "SUSPECTED", "category": "antiforensics"},
+    {"id": "GT25", "description": "RM#2 deleted files recovered: confidential corpus mirroring the share directory structure", "confidence_min": "LIKELY", "category": "recovery"},
+    {"id": "GT26", "description": "RM#3 hidden files recovered and original filenames determined (winter_whether_advisory.zip)", "confidence_min": "LIKELY", "category": "recovery"},
+    {"id": "GT27", "description": "Subject informant is the sole actor; physically present (interactive logon) during the leakage", "confidence_min": "LIKELY", "category": "attribution"},
+    {"id": "GT28", "description": "Full leakage timeline 2015-03-22 to 2015-03-25: planning, staging, exfiltration, cover-up", "confidence_min": "LIKELY", "category": "timeline"}
+  ],
+  "negative_assertions": [
+    "No Windows event log clearing (no EID 1102) occurred",
+    "No remote access / RDP logon by an external actor",
+    "No BadUSB keystroke-injection device present"
+  ]
+}

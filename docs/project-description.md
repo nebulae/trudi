@@ -319,7 +319,7 @@ enterprise APT (memory, disk, event logs), a multi-channel insider data theft (f
 channels across email, two USBs, a CD-R, and cloud, with per-device anti-forensics), the Vanko
 "Abducted Zebrafish" insider case shown in the **[demo video](https://youtu.be/Dbx5DcH6V5E)**
 (a full 42 GB Surface physical image: BadUSB initial access, FTP/USB/Dropbox exfil, and a covert
-admin account — the complete run is committed at `docs/demo/vanko/`), and a network-only
+admin account — the complete run is committed at `cases/vanko/`), and a network-only
 harassment attribution from a single PCAP, plus M57, Schardt, and ROCBA. It's depth, not just
 coverage: individual runs produced 16–28 tiered findings over traces of 100 to 350-plus fully
 linked entries.
