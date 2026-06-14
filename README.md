@@ -10,6 +10,25 @@ Built for the [Find Evil! hackathon](https://findevil.devpost.com/) — SANS Ins
 
 ---
 
+## Contents
+
+**This README:** [How it works](#how-it-works) · [Prerequisites](#prerequisites) · [Setup](#setup) · [API keys](#api-keys) · [Starting a case](#starting-a-case) · [Live monitoring (experimental)](#live-monitoring--autonomous-response-experimental) · [What gets produced](#what-gets-produced) · [Trace dashboard](#trace-dashboard) · [Submission components](#find-evil-submission-components) · [Tool namespaces](#tool-namespaces) · [YARA rules](#bundled-yara-rules) · [Evidence constraints](#evidence-constraints) · [Test suite](#running-the-test-suite) · [Repository layout](#repository-layout) · [License](#license)
+
+**Documentation:**
+
+| Doc | What's in it |
+|-----|--------------|
+| [Try It Out](docs/try-it-out.md) | Step-by-step: browse a finished run (no key) or drive a fresh investigation end-to-end |
+| [Architecture](docs/architecture.md) | Components, MCP boundary, guardrail tiers, security boundaries ([Mermaid source](docs/architecture.mmd) · [diagram PNG](docs/media/architecture.png)) |
+| [Project Description](docs/project-description.md) | The Devpost story — design rationale, reasoning loop, gates, curiosity budget |
+| [Dataset Documentation](docs/datasets.md) | Every case's provenance, evidence source, findings, and answer key |
+| [Accuracy Report](docs/accuracy-report.md) | False positives, missed artifacts, hallucinations caught, confidence calibration, spoliation |
+| [Live-monitoring demo](demo/live-monitoring/README.md) | *(experimental)* Velociraptor + victim Docker stack and the auto-protect loop walkthrough |
+| [Live-endpoint testing](docs/live-endpoint-testing.md) | *(experimental)* Read-only `live.*` SSH triage against a running host |
+| [Media](docs/media/README.md) | Dashboard screenshots + demo video notes |
+
+---
+
 ## How it works
 
 TRUDI is a **three-model system** — one analyst and two independently-configured reasoning models that direct and challenge it:
