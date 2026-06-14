@@ -1038,7 +1038,7 @@ def clear_case_run(case_dir: str) -> dict:
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
-    case_dir: absolute path to the case directory e.g. /home/trin/cases/example-case
+    case_dir: absolute path to the case directory e.g. ~/cases/example-case
     """
     import shutil
     import glob
@@ -1418,7 +1418,7 @@ def serve_dashboard(case_dir: str, port: int = 8765) -> dict:
     one via ~/.cache/trudi/dashboard.url and returns a URL with the case's
     trace pre-selected in the dropdown.
 
-    case_dir: absolute path of the case (e.g. /home/trin/cases/example-case).
+    case_dir: absolute path of the case (e.g. ~/cases/example-case).
               Must live under the dashboard's --cases-root.
     port: accepted for back-compat; the standalone owns its own port.
     """
