@@ -30,7 +30,7 @@ def _build_context(tool_name: str, args: dict | None = None):
 
 
 def _run_async(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def _configured_log(tmp_path, case_id="ERR-CASE"):
