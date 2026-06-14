@@ -49,7 +49,7 @@ step "Installing system forensic packages"
 
 APT_PACKAGES=(
     pff-tools          # pffexport — PST/OST email extraction
-    libpst-utils       # readpst — PST→mbox conversion
+    pst-utils          # readpst — PST→mbox conversion (NOT libpst-utils; that pkg name does not exist)
     binwalk            # firmware / embedded carving
     tcpxtract          # network stream carving (already covered)
     sleuthkit          # TSK tools
@@ -63,9 +63,25 @@ for pkg in "${APT_PACKAGES[@]}"; do
     fi
 done
 if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    # pst-utils, pff-tools, and tcpxtract live in the 'universe' component.
+    # SIFT normally enables it, but a bare Ubuntu base may not — make it explicit
+    # so a fresh image doesn't fail with "unable to locate package".
+    if ! grep -rq "^deb .* universe" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        if command -v add-apt-repository &>/dev/null; then
+            sudo add-apt-repository -y universe || warn "Could not enable 'universe' repo automatically"
+        else
+            warn "'universe' repo not enabled and add-apt-repository missing — pst-utils/pff-tools may not install"
+        fi
+    fi
     sudo apt-get update -qq
     sudo apt-get install -y "${MISSING_PKGS[@]}" || \
         warn "Some apt packages failed to install — see output above"
+
+    # Verify the critical binaries actually landed — dpkg state alone hid the old
+    # libpst-utils typo (apt failed, '|| warn' swallowed it, readpst was never present).
+    for bin in readpst pffexport; do
+        command -v "$bin" &>/dev/null || warn "Expected binary '$bin' not found after install — email extraction (misc.readpst_extract / misc.pff_export) will fail"
+    done
     ok "Installed: ${MISSING_PKGS[*]}"
 else
     ok "All apt forensic packages already present"

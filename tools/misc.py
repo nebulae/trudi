@@ -1113,7 +1113,7 @@ def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) ->
     """
     binary = _bin_or_warn("readpst")
     if not binary:
-        return {"success": False, "error": "readpst not installed — apt install libpst-utils"}
+        return {"success": False, "error": "readpst not installed — sudo apt install pst-utils"}
     os.makedirs(output_dir, exist_ok=True)
     cmd = [binary, "-o", output_dir]
     if not format_mbox:

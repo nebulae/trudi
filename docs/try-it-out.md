@@ -33,7 +33,7 @@ cd ~/trudi
 `install.sh` is idempotent — safe to re-run. It will:
 
 - Verify `python3`, `dotnet`, and the `claude` CLI
-- Install missing apt forensic packages (pff-tools, libpst-utils, sleuthkit, ewf-tools, …) and chainsaw
+- Install missing apt forensic packages (pff-tools, pst-utils, sleuthkit, ewf-tools, …) and chainsaw
 - Create a venv at `~/.venv` and install all Python dependencies
 - Install the dashboard launcher (`trudi-dashboard` → `/usr/local/bin`)
 - Copy the MITRE ATT&CK table and the **bundled case studies** into `~/cases/` (existing cases are never overwritten)
