@@ -38,6 +38,16 @@ Three independent methods:
 3. **A spoliation red-team** (section E) that tries to make the agent modify
    evidence or bypass the boundary.
 
+**On citations.** Examples are drawn from real investigation traces across the
+case set, spanning both **development runs** (during the diagnose-and-harden
+cycle) and the **final runs**. Each is cited by case and `_trudi_call_id` *in the
+trace where it occurred* — and because TRUDI was hardened by re-running cases, a
+given call-ID indexes that specific run. Some examples are explicitly from earlier
+development runs (marked *development run*) on the same engine and gates rather
+than the final pass; they are real and were the reason a given gate exists. The
+**Vanko demo run is committed in full** at `docs/demo/vanko/` for independent
+spot-checking; the other case traces are available on request.
+
 ## A. False positives
 
 Real strings/artifacts that matched but did not mean what a naive match would
@@ -86,14 +96,18 @@ ground truth.
 
 Claims with no basis in the evidence, stopped before they reached a report.
 
-### C1. A phantom IP host invented from a substring (Nitroba)
+### C1. A phantom IP host invented from a substring (Nitroba) — *development run*
+
+This is the cleanest fabrication example, caught during a development run; the
+hardened agent did not reproduce it on the final pass.
 
 - **The fabrication:** `2.0.0.16` was treated as an internal host needing a pivot.
 - **The catch:** `net.tcpdump_extract_ips` enumerated every IP in the capture;
   `2.0.0.16` is not among them — it is a substring of the User-Agent
   `Firefox/2.0.0.16`. Marked REFUTED; no pivot opened.
-- **Trace:** Nitroba-rerun, Scope-phase verification challenge, REFUTED against
-  the full IP enumeration (call 23).
+- **Trace:** Nitroba **development run**, Scope-phase verification challenge,
+  REFUTED against the full IP enumeration (not present in the final committed-set
+  trace — the final run avoided the mistake).
 
 ### C2. Briefed artifacts that do not exist on the host (SRL-2018)
 
@@ -104,9 +118,10 @@ Claims with no basis in the evidence, stopped before they reached a report.
   SOFTWARE hive held only a default RunOnce entry; `Tasks` held only legitimate
   Adobe/Google/OneDrive tasks; no `pssdnsvc` existed. Recorded as an explicit
   UNCONFIRMED negative: the briefed IOCs are not present on rd-01.
-- **Trace:** SRL-2018 `#130` (2026-06-04T23:35:12), UNCONFIRMED, tool call #14.
+- **Trace:** SRL-2018 self_correction `#54` (`verification_challenge_refuted`) —
+  the briefed PIDs returned empty `vol.cmdline`/`vol.pstree`.
 
-### C3. Real ATT&CK IDs vs. a stale local cache (CFReDS) — a gate catch, not a hallucination
+### C3. Real ATT&CK IDs vs. a stale local cache (CFReDS) — a gate catch, not a hallucination *(development run)*
 
 - **The attempted citation:** `record_finding` cited `T1036.008` and `T1070.004`,
   both real technique IDs.
@@ -115,7 +130,7 @@ Claims with no basis in the evidence, stopped before they reached a report.
   `T1052.001`, `T1074.001`, `T1485` passed). This is a table-gap/false-refusal, not
   fabricated evidence — listed honestly so it is not miscounted as a hallucination.
   Fix: rebuild the MITRE cache while keeping the gate for genuinely unknown IDs.
-- **Trace:** CFReDS `#116` (2026-06-01T17:46:39), `gate_refusal` (from `#93`).
+- **Trace:** CFReDS **development run** `#116` (2026-06-01T17:46:39), `gate_refusal`.
 
 ## D. Over-attribution and confidence calibration
 
@@ -123,17 +138,18 @@ Adjacent to hallucination: the entity is real, but the strength or specificity o
 the claim outran the evidence. The adversarial reviewer caught these before they
 were recorded high-confidence.
 
-- **Cobalt Strike on a single YARA hit (SRL-2018 `#88`).** `reason.evaluate_finding`
+- **Cobalt Strike on a single YARA hit (SRL-2018 `#94`).** `reason.evaluate_finding`
   returned CHALLENGED on a YARA-only CONFIRMED. The technique was corrected
   `T1055` → `T1620` (the code is in `p.exe`'s own address space, not cross-process),
   and CONFIRMED attribution was only allowed after multi-source corroboration
   (`vt_lookup_hash` 60/76 malicious + malfind + netscan/netstat agreement, final
   score 0.93).
-- **Input correction (SRL-2018 `#31`).** The briefing's external C2 `172.15.1.20`
+- **Input correction (SRL-2018 `#54`).** The briefing's external C2 `172.15.1.20`
   and 2023 date were refuted against raw memory — the real C2 is internal
   `172.16.4.10:8080`, dates Aug–Sep 2018.
-- **"Opened from USB" (M57-rerun `#192`).** Downgraded LIKELY → SUSPECTED when the
-  Excel MRU showed only the Desktop path.
+- **"Opened from USB" (M57 `#170` area, re-tiering pass).** A USB-origin claim was
+  downgraded toward SUSPECTED/UNCONFIRMED when the Excel MRU showed only the
+  Desktop path and the supporting evidence proved bidirectional.
 
 These also demonstrate the tier discipline the report cares about: TRUDI says
 LIKELY or SUSPECTED when the evidence only supports that, rather than defaulting
