@@ -45,9 +45,10 @@ imply. The agent declined to attribute on the surface match.
 
 | Case | The match | Why it was rejected | Type |
 |------|-----------|---------------------|------|
-| Nitroba `#55` | An ngrep hit on `johnny`/`coach` | The string was "Johnny Chen" inside the XMP metadata of an eBay photo, unrelated to the suspect; the agent declined to attribute on it | False-positive rejection |
-| Nitroba `#136` | Amy Smith appears in the victim's buddy list and on the suspect device | Demoted to co-present **SUSPECTED** once her Yahoo session was shown to begin *after* the harassing sends — presence is not authorship | Near-FP / refuted |
-| SRL-2018 rd-04 `#1687` | An RWX region in `SearchUI.exe` "looks like" rd-01's beacon | A host-local YARA scan with the bundled Cobalt Strike ruleset returned **0 matches**; the transitive "same family" claim was dropped (the host stayed CONFIRMED on its own malfind/netstat evidence) | Over-attribution rejection |
+| Nitroba `#68` | An ngrep hit on `johnny`/`coach` | The string was "Johnny Chen" inside the XMP metadata of an eBay photo, unrelated to the suspect; the agent declined to attribute on it | False-positive rejection |
+| Nitroba `#107` | Amy Smith appears in the victim's buddy list and on the suspect device | Demoted to co-present **SUSPECTED** once her Yahoo session was shown to begin *after* the harassing sends — presence is not authorship | Near-FP / refuted |
+| SRL-2018 rd-04 `#262` | An RWX region in `SearchUI.exe` "looks like" rd-01's beacon | A host-local YARA scan with the bundled Cobalt Strike ruleset returned **0 matches**; the transitive "same family" claim was dropped (the host stayed CONFIRMED on its own malfind/netstat evidence) | Over-attribution rejection |
+| Vanko (demo) `#144` | DAIR surfaced a candidate principal **"BROWSED"** | Dispositioned as a false positive — the token came from the verb "browsed" in a tool-results summary, not a SID, username, login, or correspondent; no separate principal exists behind it. (The same parser-noise class produced `CRONTABS`/`ENUMERATION` candidates on other runs, each dispositioned the same way.) | Candidate-principal FP |
 
 ## B. Missed artifacts (false negatives)
 
