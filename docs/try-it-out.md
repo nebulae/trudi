@@ -13,9 +13,11 @@ Two ways to evaluate TRUDI, shortest first:
 
 ## Prerequisites
 
+> **Reference platform.** This walkthrough was run on the **SANS SIFT Workstation VMware image, release 2026-04-22 (Ubuntu 24.04.4 LTS, x86-64, `python3` 3.12)**. Other SIFT releases work, but package versions (notably the `pythonX.Y-venv` the installer needs) track the base Ubuntu — see [Troubleshooting](#troubleshooting).
+
 | Need | For | Notes |
 |------|-----|-------|
-| **SANS SIFT Workstation** (Ubuntu 22.04 x86-64) | Path B (the forensic tools) | Path A only needs Python 3.10+ and a browser. [Download](https://www.sans.org/tools/sift-workstation/) |
+| **SANS SIFT Workstation** (Ubuntu 24.04 x86-64) | Path B (the forensic tools) | Path A only needs Python 3.10+ and a browser. [Download](https://www.sans.org/tools/sift-workstation/) |
 | **Protocol SIFT** (Claude Code + skill playbooks) | Both | [github.com/teamdfir/protocol-sift](https://github.com/teamdfir/protocol-sift) |
 | **Python 3.10+** and **dotnet** | Both | Included in SIFT |
 | **`ANTHROPIC_API_KEY`** | Path B (full-quality) | Powers the analyst + `reason.*` + `dair.*`. See the degradation note above. |
