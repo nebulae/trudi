@@ -60,10 +60,12 @@ Two real investigations show the range.
 
 **NIST CFReDS "Data Leakage Case."** TRUDI reconstructed an insider conspiracy across five
 exfil channels (email, two USBs, a CD-R, and Google Drive) and produced the smoking gun on
-its own. A decoy-named file, `winter_whether_advisory.zip`, recovered from the deleted area
-of an unauthorized USB, turned out to be byte-for-byte identical (SHA-256 match, 16,381,123
-bytes) to a confidential design deck on the authorized device. The decoy *was* the stolen
-presentation.
+its own. A decoy-named file, `winter_whether_advisory.zip`, recovered from the deleted area of
+an unauthorized USB, matched a confidential design deck (`detailed_design.pptx`) on the
+authorized device by **exact byte size** (16,381,123 bytes) — the decoy was the renamed stolen
+presentation. Tellingly, TRUDI tiered that mapping **LIKELY rather than CONFIRMED**, flagging on
+its own that it had not compared file hashes; a hash check against the originals would have
+clinched it. The restraint is the point: it claimed exactly what the evidence supported.
 
 **SRL-2018 enterprise APT (CRIMSON OSPREY).** Across 8 hosts, TRUDI confirmed a Cobalt Strike
 beacon (`p.exe`, PID 8260) running under a stolen Domain Admin token and beaconing to an
@@ -304,9 +306,11 @@ specific pair of hands on the keyboard." On the CFReDS insider case it tiered wi
 discipline. The email thread was LIKELY (single-sided OST, and `X-Originating-IP` is a
 client-inserted header rather than an authenticated `Received:` chain). The Google Drive channel
 was only SUSPECTED (the sync databases were deleted and the evidence was genuinely exhausted).
-The byte-for-byte SHA-256 match between a decoy-renamed deleted file and the stolen design deck
-was CONFIRMED. An agent that says LIKELY when the evidence only supports likely is worth more
-than one that always says CONFIRMED.
+And the decoy-renamed deleted file it mapped to the stolen design deck by exact byte size was
+held at LIKELY, not CONFIRMED, because it had not compared file hashes — the agent flagging the
+one step that would have clinched the match rather than overstating what it had. An agent that
+says LIKELY when the evidence only supports likely is worth more than one that always says
+CONFIRMED.
 
 **Negative findings are scored, not skipped.** "We looked for X and found nothing" is real
 forensic work, so TRUDI records it as evidence. On CFReDS it confirmed no timestomping (0 drift
@@ -321,8 +325,8 @@ channels across email, two USBs, a CD-R, and cloud, with per-device anti-forensi
 (a full 42 GB Surface physical image: BadUSB initial access, FTP/USB/Dropbox exfil, and a covert
 admin account — the complete run is committed at `cases/vanko/`), and a network-only
 harassment attribution from a single PCAP, plus M57, Schardt, and ROCBA. It's depth, not just
-coverage: individual runs produced 16–28 tiered findings over traces of 100 to 350-plus fully
-linked entries.
+coverage: individual runs recorded from ~7 tiered findings on the smaller single-artifact cases
+up to 51 on the 8-host SRL APT, over traces ranging from ~110 to ~870 fully linked entries.
 
 **The constraint layer is architectural, not prose.** TRUDI physically can't write to an
 evidence file or submit an unlinked finding, because the MCP boundary, the read-only path guard,
@@ -353,6 +357,25 @@ that turns a checklist-runner into an investigator.
   across all bundled cases, not just the demo.
 - Package additional reference datasets so any practitioner can reproduce a full investigation
   end-to-end on a fresh SIFT Workstation.
+- **Expand the local ATT&CK catalog.** TRUDI validates every technique ID against a local MITRE
+  table (the `mitre_technique_validation` gate), so the catalog's coverage is the ceiling on what
+  the agent can cite. Grow it toward full ATT&CK so a valid technique is never rejected merely for
+  being absent from the local copy.
+- **Autonomous cross-host pivoting.** DAIR already surfaces candidate pivot hosts when lateral
+  movement points at a new machine — but today it lists them and waits for direction. Close the
+  loop so a high-confidence pivot opens a fresh Triage on the next host on its own, under the same
+  gates, instead of pausing for a human.
+- **Move the trace from a flat file to a real datastore.** The execution log is currently a single
+  growing JSON/Markdown file. Backing it with a database (Elasticsearch is the front-runner) —
+  plus the MCP tooling to query it — would speed up processing, let synthesis and the accuracy
+  framework traverse the lineage graph by foreign key at scale, and make longer, more thorough
+  investigations practical.
+- **Event-driven dispatch for live investigation.** Replace the polling alert loop with a proper
+  event-dispatch system so a live-monitoring alert wakes an investigation the instant it fires,
+  rather than on a poll interval.
+- **Richer, replayable dashboards.** Drive the views — especially the investigation (blueprint)
+  chain view — from a timeline histogram, and add full investigation replay so you can scrub
+  through a run exactly as it unfolded.
 
 ---
 
