@@ -99,6 +99,28 @@ Every tool call, DAIR call, reason call, and confirmed finding is written to a l
 
    The submission runs both on `claude` with Opus (see [How it works](#how-it-works)) — the simplest setup is to add an `ANTHROPIC_API_KEY` and you're done. TRUDI will start without a backend configured, but that is **not a supported way to evaluate it**: reason and DAIR calls are skipped and you're seeing a hollowed-out agent, not TRUDI.
 
+### System forensic packages
+
+`install.sh` installs these automatically (and enables the `universe` apt component if needed). On a full SIFT Workstation most are already present; on a leaner base, or if the installer logs a `!` warning about one, install them by hand:
+
+```bash
+sudo add-apt-repository -y universe        # pst-utils / pff-tools / tcpxtract live here
+sudo apt-get update
+sudo apt-get install -y pff-tools pst-utils binwalk tcpxtract sleuthkit ewf-tools
+```
+
+| apt package | Binaries | TRUDI tools that need it |
+|-------------|----------|--------------------------|
+| `pff-tools` | `pffexport`, `pffinfo` | `misc.pff_export` (PST/OST email extraction) |
+| `pst-utils` | `readpst`, `lspst` | `misc.readpst_extract` (PST→mbox) — **not** `libpst-utils`; that package does not exist |
+| `sleuthkit` | `fls`, `icat`, `istat`, `mmls`, `blkls`, `mactime`, `tsk_recover` | `tsk.*` |
+| `ewf-tools` | `ewfmount`, `ewfinfo`, `ewfverify` | `ewf.*`, `img.*` E01 mounting |
+| `tcpxtract` | `tcpxtract` | `net.tcpxtract_streams` |
+| `binwalk` | `binwalk` | firmware / embedded carving |
+| **chainsaw** (GitHub release `v2.10.2` → `/usr/local/bin`, not apt) | `chainsaw` | `misc.chainsaw_hunt` (Sigma over EVTX) — optional; TRUDI runs without it |
+
+Verify after install: `for b in pffexport readpst fls ewfmount tcpxtract; do command -v "$b" || echo "MISSING: $b"; done`
+
 ---
 
 ## Setup

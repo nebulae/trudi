@@ -33,7 +33,7 @@ cd ~/trudi
 `install.sh` is idempotent — safe to re-run. It will:
 
 - Verify `python3`, `dotnet`, and the `claude` CLI
-- Install missing apt forensic packages (pff-tools, pst-utils, sleuthkit, ewf-tools, …) and chainsaw
+- Enable the `universe` apt component if missing, then install the forensic packages below and chainsaw
 - Create a venv at `~/.venv` and install all Python dependencies
 - Install the dashboard launcher (`trudi-dashboard` → `/usr/local/bin`)
 - Copy the MITRE ATT&CK table and the **bundled case studies** into `~/cases/` (existing cases are never overwritten)
@@ -43,6 +43,31 @@ cd ~/trudi
 - Run the test suite (1,100+ tests) as a smoke check
 
 When it finishes you have a working install and eight bundled runs to browse.
+
+### System forensic packages
+
+`install.sh` installs these from apt automatically. On a full SIFT Workstation most are already present; on a leaner base — or if the installer prints a `!` warning about one — install them by hand. The `universe` component must be enabled first (these packages live there):
+
+```bash
+sudo add-apt-repository -y universe
+sudo apt-get update
+sudo apt-get install -y pff-tools pst-utils binwalk tcpxtract sleuthkit ewf-tools
+```
+
+| apt package | Binary | TRUDI tools |
+|-------------|--------|-------------|
+| `pff-tools` | `pffexport` | `misc.pff_export` (PST/OST email) |
+| `pst-utils` | `readpst` | `misc.readpst_extract` (PST→mbox) — **not** `libpst-utils` |
+| `sleuthkit` | `fls`, `icat`, `mmls`, … | `tsk.*` |
+| `ewf-tools` | `ewfmount`, `ewfverify` | `ewf.*`, `img.*` (E01) |
+| `tcpxtract` | `tcpxtract` | `net.tcpxtract_streams` |
+| `binwalk` | `binwalk` | embedded carving |
+
+chainsaw (Sigma over EVTX, `misc.chainsaw_hunt`) is fetched from its GitHub release into `/usr/local/bin` and is optional — TRUDI runs without it. Verify the apt set landed:
+
+```bash
+for b in pffexport readpst fls ewfmount tcpxtract; do command -v "$b" || echo "MISSING: $b"; done
+```
 
 ---
 
@@ -184,6 +209,8 @@ cd ~/trudi && source ~/.venv/bin/activate && pytest -q
 | Volatility plugin times out / `-1` exit | Symbols not cached — run `vol.symbol_check` on the image first; raise `TRUDI_VOL_TIMEOUT` in `.env` on slow hardware. |
 | EZ Tools fail | `dotnet` missing — install the SIFT Workstation, which bundles the .NET runtime. |
 | `claude: command not found` | Install Protocol SIFT first (it installs Claude Code). |
+| `Unable to locate package <pst-utils/pff-tools/tcpxtract>` | `universe` apt component not enabled, or apt index stale on a fresh image. `sudo add-apt-repository -y universe && sudo apt-get update`, then re-run `./install.sh`. (The package is `pst-utils`, never `libpst-utils`.) |
+| `misc.readpst_extract` / `misc.pff_export` fail with "not installed" | `pst-utils` / `pff-tools` missing — see [System forensic packages](#system-forensic-packages). |
 | Hooks not firing | Open `/hooks` in Claude Code once to reload, or restart the session. |
 
 ---
