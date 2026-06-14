@@ -82,12 +82,20 @@ class TestVolSymbolCheck:
         assert r["success"] is True
         assert r["image"] == str(img)
 
-    def test_existing_image_with_tilde_returns_expanded_path(self, mock_run):
+    def test_existing_image_with_tilde_returns_expanded_path(self, mock_run, tmp_path, monkeypatch):
         from unittest.mock import patch
         from tools.volatility import vol_symbol_check
-        expanded = "/home/trin/cases/memory.img"
-        with patch("tools.volatility.os.path.expanduser", return_value=expanded), \
-             patch("tools.volatility.os.path.exists", return_value=True):
+        # Use a real temp file as the expansion target so the path is portable
+        # (no hardcoded home) and any real filesystem access in the tool succeeds.
+        img = tmp_path / "memory.img"
+        img.write_bytes(b"\x00" * 1024)
+        expanded = str(img)
+        # Patching os.path.expanduser is global (posixpath is shared), so it also
+        # reaches vol3_symbols()'s own expanduser for the symbol-cache dir. Pin that
+        # dir via VOLATILITY_SYMBOLS so the patch can't redirect makedirs onto the
+        # image path.
+        monkeypatch.setenv("VOLATILITY_SYMBOLS", str(tmp_path / "symbols"))
+        with patch("tools.volatility.os.path.expanduser", return_value=expanded):
             r = vol_symbol_check("~/cases/memory.img")
         assert r["success"] is True
         assert r["image"] == expanded  # resolved path, not tilde path
