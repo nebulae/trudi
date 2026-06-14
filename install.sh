@@ -49,7 +49,7 @@ step "Installing system forensic packages"
 
 APT_PACKAGES=(
     pff-tools          # pffexport — PST/OST email extraction
-    pst-utils          # readpst — PST→mbox conversion (NOT libpst-utils; that pkg name does not exist)
+    pst-utils          # readpst — PST→mbox conversion
     binwalk            # firmware / embedded carving
     tcpxtract          # network stream carving (already covered)
     sleuthkit          # TSK tools
@@ -77,8 +77,8 @@ if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
     sudo apt-get install -y "${MISSING_PKGS[@]}" || \
         warn "Some apt packages failed to install — see output above"
 
-    # Verify the critical binaries actually landed — dpkg state alone hid the old
-    # libpst-utils typo (apt failed, '|| warn' swallowed it, readpst was never present).
+    # Verify the critical binaries actually landed — dpkg state alone can report
+    # success while an apt failure (swallowed by '|| warn' above) left a tool absent.
     for bin in readpst pffexport; do
         command -v "$bin" &>/dev/null || warn "Expected binary '$bin' not found after install — email extraction (misc.readpst_extract / misc.pff_export) will fail"
     done
@@ -101,9 +101,12 @@ else
     CHAINSAW_URL="https://github.com/WithSecureLabs/chainsaw/releases/download/v${CHAINSAW_VERSION}/chainsaw_x86_64-unknown-linux-gnu.tar.gz"
     TMPDIR=$(mktemp -d)
     if curl -fsSL "$CHAINSAW_URL" -o "$TMPDIR/chainsaw.tgz" 2>/dev/null; then
-        tar -xzf "$TMPDIR/chainsaw.tgz" -C "$TMPDIR"
+        # Guard extraction: a corrupt download must degrade to the optional-skip
+        # path, not abort the whole install under `set -e`.
         # Release ships as chainsaw/chainsaw + sigma rules
-        if [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
+        if ! tar -xzf "$TMPDIR/chainsaw.tgz" -C "$TMPDIR" 2>/dev/null; then
+            warn "chainsaw archive corrupt — skipping (TRUDI works without it)"
+        elif [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
             sudo install -m 0755 "$TMPDIR/chainsaw/chainsaw" "$CHAINSAW_BIN"
             if [ -d "$TMPDIR/chainsaw/sigma" ]; then
                 sudo mkdir -p /usr/local/share/chainsaw
@@ -166,9 +169,6 @@ if [ -f "$MITRE_DEST" ]; then
 elif [ -f "$MITRE_SRC" ]; then
     cp "$MITRE_SRC" "$MITRE_DEST"
     ok "Installed MITRE reference table → $MITRE_DEST"
-elif [ -f "/home/trin/cases/.common/mitre_techniques.json" ]; then
-    cp "/home/trin/cases/.common/mitre_techniques.json" "$MITRE_DEST"
-    ok "Copied MITRE reference table → $MITRE_DEST"
 else
     warn "MITRE reference table not found in repo; mitre_map will be a no-op"
 fi
@@ -388,17 +388,36 @@ if "$CLAUDE_BIN" mcp list 2>/dev/null | grep -q "trudi-sift"; then
     "$CLAUDE_BIN" mcp remove trudi-sift 2>/dev/null || true
 fi
 
-"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope user 2>/dev/null || \
-"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global 2>/dev/null || true
-ok "Registered trudi-sift MCP server (global scope)"
+# Register at user scope, falling back to global. Do NOT hide stderr or '|| true'
+# the failure: the MCP server IS the product, so a silent registration failure
+# would leave a hollow Claude with a misleading "ready" banner. Verify after.
+if "$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope user; then
+    REG_SCOPE="user"
+elif "$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global; then
+    REG_SCOPE="global"
+else
+    REG_SCOPE=""
+fi
+
+if [ -n "$REG_SCOPE" ] && "$CLAUDE_BIN" mcp list 2>/dev/null | grep -q "trudi-sift"; then
+    ok "Registered trudi-sift MCP server ($REG_SCOPE scope)"
+else
+    fail "Failed to register trudi-sift MCP server — TRUDI has no tools without it. Reproduce: $CLAUDE_BIN mcp add trudi-sift $PYTHON_BIN $SERVER_PATH --scope user"
+fi
 
 # ── 7. Verify ─────────────────────────────────────────────────────────────────
 
 step "Running smoke test"
 
 cd "$TRUDI_DIR"
-"$VENV_DIR/bin/python3" -m pytest tests/ -q --tb=short 2>&1 | tail -5
-ok "Tests passed"
+# The install is already complete by this point — a failing test should not abort
+# the script under `set -e` and hide the "TRUDI is ready" banner. Warn instead.
+if "$VENV_DIR/bin/python3" -m pytest tests/ -q --tb=short; then
+    ok "Tests passed"
+else
+    rc=$?
+    warn "pytest reported failures (exit $rc) — the install itself is complete; review the output above before relying on this build"
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
