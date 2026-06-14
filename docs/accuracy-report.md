@@ -10,6 +10,27 @@ architecture prevents original data from being modified, and what happens when
 the operator tries to make it). Every example is drawn from a real investigation
 trace and cited by case and entry so it can be verified independently.
 
+## Contents
+
+- [Definitions](#definitions-kept-in-separate-buckets)
+- [How accuracy is measured](#how-accuracy-is-measured)
+- [A. False positives](#a-false-positives)
+- [B. Missed artifacts (false negatives)](#b-missed-artifacts-false-negatives)
+- [C. Hallucinated claims caught during testing](#c-hallucinated-claims-caught-during-testing)
+  - [C1. Phantom IP host from a substring (Nitroba)](#c1-a-phantom-ip-host-invented-from-a-substring-nitroba--development-run)
+  - [C2. Briefed artifacts that don't exist (SRL-2018)](#c2-briefed-artifacts-that-do-not-exist-on-the-host-srl-2018)
+  - [C3. Real ATT&CK IDs vs. a stale local cache (CFReDS)](#c3-real-attck-ids-vs-a-stale-local-cache-cfreds--a-gate-catch-not-a-hallucination-development-run)
+  - [C4. Claimed coverage that had not been run (SRL-2018)](#c4-claimed-coverage-that-had-not-been-run-srl-2018--procedural-hallucination)
+  - [C5. Invented evidentiary meaning (Schardt)](#c5-invented-evidentiary-meaning--a-category-error-schardt)
+  - [C6. Phantom candidate principals (Vanko, DEMO-LIVE)](#c6-phantom-candidate-principals-from-parser-noise-vanko-demo-live)
+- [D. Over-attribution and confidence calibration](#d-over-attribution-and-confidence-calibration)
+- [E. Self-correction across the case set](#e-self-correction-across-the-case-set)
+- [F. Evidence integrity: spoliation and bypass test (M57-Jean)](#f-evidence-integrity-spoliation-and-bypass-test-m57-jean)
+- [G. Ground-truth comparison against published answer keys](#g-ground-truth-comparison-against-published-answer-keys)
+  - [VANKO-2016 — SANS FOR500](#vanko-2016--sans-for500-case-of-the-abducted-zebrafish)
+  - [SCHARDT-2002 — NIST Hacking Case](#schardt-2002--nist-hacking-case-greg-schardt--mr-evil)
+  - [CFREDS-LEAK — NIST Data Leakage Case](#cfreds-leak--nist-data-leakage-case-iaman-informant--spy-conspirator)
+
 ## Definitions (kept in separate buckets)
 
 These failure modes are scored separately, because conflating them hides real
