@@ -30,9 +30,11 @@ Bulk tool output (multi-hundred-MB MFT/event-log CSVs, carved-file dumps, extrac
 hives) is intentionally excluded to keep the repo light and GitHub-safe — regenerate
 it by re-running the case against the evidence.
 
-> **Trace provenance.** The bundled trace for each case is its report-time export
-> (the authoritative investigation log). SCHARDT-2002 ships with its report and brief
-> only — its trace is pending a clean re-run — so the dashboard will show seven cases.
+> **Trace provenance.** Each bundled trace is the case's report-time export (the
+> authoritative investigation log). The SCHARDT-2002 trace was sanitized to remove
+> 108 cross-session repo/dev entries the session beacon had interleaved — its 21
+> findings and their `linked_call_id` lineage are intact and verified. All eight
+> cases ship a trace for the dashboard.
 
 ## Cases
 
