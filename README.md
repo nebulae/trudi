@@ -205,7 +205,9 @@ Beyond static-image investigation, TRUDI can watch a live endpoint via Velocirap
 - `live.*` — read-only live triage over SSH (processes, network, persistence, services, logons)
 - `respond.*` — **gated** containment (process suspend/kill, network block) over a structured, type-validated SSH path
 
-**Auto-protect** (default on) auto-executes the *reversible + low-risk* tier of containment and surfaces each action's rollback command; anything destructive (irreversible, or risk ≥ medium) pauses the loop until the operator types `approve ACT-N`. The auto-vs-approval boundary is server-classified from each recipe's `risk`/`reversible` metadata — the agent cannot reclassify it. See [`demo/live-monitoring/`](demo/live-monitoring/) for one-command bring-up.
+**Auto-protect** (default on) auto-executes the *reversible + low-risk* tier of containment and surfaces each action's rollback command; anything destructive (irreversible, or risk ≥ medium) pauses the loop until the operator types `approve ACT-N`. The auto-vs-approval boundary is server-classified from each recipe's `risk`/`reversible` metadata — the agent cannot reclassify it.
+
+**Try it end-to-end:** [demo/live-monitoring/README.md](demo/live-monitoring/README.md) — a self-contained Velociraptor + victim Docker stack with one-command bring-up, staged Atomic Red Team attacks, and a full walkthrough of the TRUDI loop (baseline → watcher → alert drain → auto-protect, including the `approve ACT-N` flow). It's driven by the bundled `/trudi-*` slash commands (`/trudi-start-watcher`, `/trudi-watch-alerts`, `/trudi-check-alerts`, `/trudi-stop-watcher`, `/trudi-clear-case`), which `install.sh` installs to `~/.claude/commands/`. For the read-only SSH triage path on its own, see [docs/live-endpoint-testing.md](docs/live-endpoint-testing.md).
 
 ---
 
@@ -266,12 +268,14 @@ The eight required submission components and where each one lives. Items marked 
 | 4 | Written Project Description | [docs/project-description.md](docs/project-description.md) (mirrors the **Devpost** story) |
 | 5 | Dataset Documentation | [docs/datasets.md](docs/datasets.md) — every case's source, evidence pointer, and findings; runs bundled under [cases/](cases/) and installed to `~/cases/` for the dashboard |
 | 6 | Accuracy Report | [docs/accuracy-report.md](docs/accuracy-report.md) — false positives, missed artifacts, hallucinations caught in testing, confidence calibration, and an evidence-integrity / spoliation section |
-| 7 | Try-It-Out Instructions | [Setup](#setup) + [Starting a case](#starting-a-case) (this README) |
+| 7 | Try-It-Out Instructions | [docs/try-it-out.md](docs/try-it-out.md) — browse a finished run in ~2 min (no key) or drive a fresh investigation end-to-end; condensed in [Setup](#setup) + [Starting a case](#starting-a-case) |
 | 8 | Agent Execution Logs | Committed run trace + report + console at [cases/vanko/](cases/vanko/README.md); every bundled case under [cases/](cases/) ships its full trace, and runs export to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log` |
 
-Supporting material: [docs/live-endpoint-testing.md](docs/live-endpoint-testing.md) (live-monitoring walkthrough), [docs/media/](docs/media/README.md) (dashboard screenshots + demo video notes).
+Supporting material (experimental, not judged): [demo/live-monitoring/README.md](demo/live-monitoring/README.md) (Velociraptor live-monitoring + auto-protect walkthrough), [docs/live-endpoint-testing.md](docs/live-endpoint-testing.md) (read-only `live.*` SSH triage). Plus [docs/media/](docs/media/README.md) (dashboard screenshots + demo video notes).
 
-> **For judges:** start with the [How it works](#how-it-works) overview, then [Try-It-Out](#setup). Every finding in an execution log (#8) links to the exact tool call that produced it — viewable live in the [Trace dashboard](#trace-dashboard).
+> **For judges — what a full-quality run requires:** TRUDI is run with **Claude Code** plus an **`ANTHROPIC_API_KEY`**. With Opus driving the analyst, the `reason.*` reviewer, and the `dair.*` director (the submission configuration — see [How it works](#how-it-works)), every finding is hypothesis-tested, confidence-scored, citation-checked, and phase-directed. **Without the key, TRUDI degrades: the `reason.*` and `dair.*` calls are skipped** — findings are never adversarially challenged and phase direction falls back to a static path, so a keyless run does not reflect the submitted system. See [API keys](#api-keys) for the full degradation table. The two enrichment keys (VirusTotal, AbuseIPDB) are recommended but optional and never block a run.
+>
+> Start with the [How it works](#how-it-works) overview, then **[Try It Out](docs/try-it-out.md)** — it walks you from clone to a browsable finished run in about two minutes (no key needed), then to a full fresh investigation. Every finding in an execution log (#8) links to the exact tool call that produced it — viewable live in the [Trace dashboard](#trace-dashboard).
 
 ---
 
@@ -356,6 +360,10 @@ trudi/
 │   ├── CLAUDE.md
 │   ├── .claude/settings.json
 │   └── evidence/ analysis/ exports/ reports/
+├── cases/                 ← bundled case studies (traces + reports, no evidence)
+│   └── <CASE>/            ← installed to ~/cases/ for the dashboard (see docs/datasets.md)
+├── docs/                  ← submission docs: architecture, accuracy-report, datasets,
+│                            project-description + media/ (screenshots, demo video notes)
 ├── core/
 │   ├── executor.py        ← safe subprocess runner (retry, timeout, line cap)
 │   ├── execution_log.py   ← trace log singleton
