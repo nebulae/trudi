@@ -223,10 +223,21 @@ step "Setting up Python environment"
 # A partial venv from a previous failed run (e.g. one that died at ensurepip)
 # leaves the directory but no working pip — treat that as needing recreation,
 # otherwise the pip steps below fail with a confusing error.
+make_venv() { [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"; python3 -m venv "$VENV_DIR" 2>/dev/null; }
+
 if [ ! -x "$VENV_DIR/bin/pip" ]; then
-    [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"
-    if ! python3 -m venv "$VENV_DIR"; then
-        fail "Failed to create venv — 'python3 -m venv' needs ensurepip (package python3-venv). Install it and re-run: sudo apt-get install -y python3-venv python3-pip"
+    if ! make_venv; then
+        # ensurepip is missing. The generic python3-venv metapackage tracks the
+        # apt-default python, which on a multi-python box (e.g. SIFT's python3.12)
+        # differs from the `python3` command — so install the venv package matching
+        # THIS python3 by version, then retry.
+        PYV="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+        warn "venv creation failed (ensurepip missing) — installing python${PYV}-venv to match python3 $PYV"
+        sudo apt-get install -y "python${PYV}-venv" python3-pip 2>/dev/null || \
+            sudo apt-get install -y python3-venv python3-pip 2>/dev/null || true
+        if ! make_venv; then
+            fail "Failed to create venv even after installing python${PYV}-venv. Install it manually and re-run: sudo apt-get install -y python${PYV}-venv python3-pip"
+        fi
     fi
     ok "Created venv at $VENV_DIR"
 else
