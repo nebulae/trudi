@@ -32,7 +32,7 @@ def mock_run_progress(run_ok):
 
 def run_async(coro):
     """Helper to run a coroutine in sync test context."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 class TestSymbolPathFlag:

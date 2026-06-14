@@ -38,7 +38,7 @@ class TestToolCount:
             return len(mcp._tool_manager._tools)
         if hasattr(mcp, "list_tools"):
             import asyncio
-            tools = asyncio.get_event_loop().run_until_complete(mcp.list_tools())
+            tools = asyncio.run(mcp.list_tools())
             return len(tools)
         return -1  # can't count, skip assertion
 
