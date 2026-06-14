@@ -33,15 +33,15 @@ the resulting trace against a hand-curated ground truth.
 
    ```bash
    python -m tests.regression.run_case \
-       --case-dir /home/trin/cases/<case> \
-       --ground-truth /home/trin/cases/<case>/ground_truth.json
+       --case-dir ~/cases/<case> \
+       --ground-truth ~/cases/<case>/ground_truth.json
    ```
 
    Exit code 0 if precision/recall meet the configured thresholds, 1 otherwise.
    Detailed output to stdout (true positives, false negatives, confidence
    downgrades).
 
-4. **CI integration**: run all cases under `/home/trin/cases/*/` that
+4. **CI integration**: run all cases under `~/cases/*/` that
    have a `ground_truth.json`, fail the build on any regression.
 
 ## Why this exists

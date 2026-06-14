@@ -2,8 +2,8 @@
 
 Usage:
     python -m tests.regression.run_case \\
-        --case-dir /home/trin/cases/<case> \\
-        --ground-truth /home/trin/cases/<case>/ground_truth.json \\
+        --case-dir ~/cases/<case> \\
+        --ground-truth ~/cases/<case>/ground_truth.json \\
         [--min-recall 0.8 --max-false-positives 2]
 
 Reuses tools/accuracy.py:accuracy_compare so the scoring logic stays
