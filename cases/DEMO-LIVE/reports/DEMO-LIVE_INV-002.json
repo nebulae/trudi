@@ -1,0 +1,690 @@
+{
+  "schema_version": "2.0",
+  "case_id": "DEMO-LIVE",
+  "entry_count": 14,
+  "entries": [
+    {
+      "call_id": 1,
+      "type": "investigation_narration",
+      "ts": "2026-06-13T06:27:04+00:00",
+      "content": "Investigation INV-002 opened on 4 alert(s).\nBundle of 4 alert(s).\ndetector_counts=Custom.TRUDI.NewProcess=4\nhosts=C.e6de3278ad209722\nseq_range=7..10\nalerts:\n  seq=8 det=Custom.TRUDI.NewProcess: New process not in baseline: /usr/bin/run-parts (pid=2785)\n  seq=9 det=Custom.TRUDI.NewProcess: New process not in baseline: /usr/bin/dash (pid=2787)\n  seq=10 det=Custom.TRUDI.NewProcess: New process not in baseline: /usr/bin/sleep (pid=2794)\n  seq=7 det=Custom.TRUDI.NewProcess: New process not in baseline: /usr/bin/dash (pid=2783)",
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 3,
+      "type": "call_initiated",
+      "ts": "2026-06-13T06:27:15+00:00",
+      "tool": "reason_hypothesize",
+      "backend": "claude",
+      "inputs": {
+        "model": "claude-opus-4-7"
+      },
+      "input_call_ids": [
+        1
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 4,
+      "type": "reason_call",
+      "ts": "2026-06-13T06:27:40+00:00",
+      "tool": "reason_hypothesize",
+      "success": true,
+      "conclusion": "Analysis\n\nThis is almost certainly a benign daily cron run misflagged because the baseline snapshot didn't capture the once-daily 06:25 window. Every element of the chain matches Debian/Ubuntu canonical behavior.\n\nHypothesis 1 \u2014 Benign canonical cron.daily execution (likelihood: HIGH)\nSupporting artifacts:\n- Parent chain cron -> dash (anacron-test wrapper) -> run-parts -> apt-compat -> sleep is the exact stock sequence shipped by Debian cron package.\n- Exact command string \"test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily )\" is verbatim from /etc/crontab.\n- /etc/cron.daily/apt-compat is unmodified stock file (1478 bytes, Apr 8 2022) already inventoried at cid73 \u2014 no tampering since INV-001.\n- sleep 1630 falls within apt-compat's documented RANDOM%1800 jitter range.\n- Fires at 06:25, the configured daily cron time.\n- All PIDs are tightly clustered and parent-linked to cron (ppid 2781), no orphaning or reparenting.\nConfirm: hash /etc/cron.daily/apt-compat against distro package (dpkg -V cron apt). Rule out: hash mismatch, mtime drift, or unexpected child after sleep.\n\nHypothesis 2 \u2014 Cron-job hijack / trojanized apt-compat (likelihood: LOW)\nAn attacker from INV-001 could have modified a cron.daily script to gain a root execution channel; sleep could be a decoy before a later malicious child.\nSupporting artifacts: INV-001 was a confirmed detonation 13h earlier \u2014 persistence via cron is plausible.\nAgainst: cid73 already verified apt-compat as stock 1478-byte file; size/date match distro; no abnormal child of sleep observed.\nConfirm: yara/hash apt-compat, diff /etc/cron.daily contents vs dpkg manifest, check for sibling scripts added, watch for post-sleep exec.\nRule out: clean hash match + no post-sleep children = ruled out.\n\nHypothesis 3 \u2014 LD_PRELOAD / library-level hijack of a legitimate cron child (likelihood: LOW)\nProcess tree looks clean but a malicious .so could be loaded into dash/run-parts.\nSupporting artifacts: none observed; purely theoretical given INV-001 context.\nConfirm: check /etc/ld.so.preload, environment of pid2783/2787, /proc/<pid>/maps for unexpected libraries.\nRule out: empty ld.so.preload and clean maps.\n\nHypothesis 4 \u2014 Detector baseline gap (meta-explanation, likelihood: HIGH)\nThe \"not in baseline\" flag is explained by baseline snapshot not spanning a 24h window. This is a tuning issue, not a host issue. Recommend baseline window >= 25h or explicit cron.daily allowlist.\n\nRecommendation: Do NOT contain. Verify apt-compat integrity and absence of post-sleep children, then close as false positive and tune baseline.\n\nDiscriminators between H1 (benign cron) and H2 (trojanized cron script): file hash of /etc/cron.daily/apt-compat vs distro, directory listing/hashes of /etc/cron.daily, and whether sleep (pid2794) has any child process after completion.",
+      "directives": {
+        "priority_tools": [
+          "hash.hash_file",
+          "hash.hash_directory",
+          "strings.stat_file",
+          "strings.strings_grep",
+          "yara.scan_file",
+          "live.live_process_details",
+          "live.live_processes"
+        ],
+        "skip_tools": [
+          "vol.psscan",
+          "ez.evtxecmd",
+          "net.tcpdump_read"
+        ],
+        "focus_pids": [
+          2781,
+          2783,
+          2785,
+          2787,
+          2794
+        ],
+        "focus_paths": [
+          "/etc/cron.daily/apt-compat",
+          "/etc/cron.daily/",
+          "/etc/crontab",
+          "/etc/cron.d/",
+          "/etc/ld.so.preload"
+        ],
+        "max_depth": "targeted",
+        "next_hypothesis_triggers": [
+          "apt-compat hash does not match distro package",
+          "any file in /etc/cron.daily modified after INV-001 detonation time",
+          "pid2794 (sleep) spawns a child process",
+          "/etc/ld.so.preload is non-empty or references non-distro library",
+          "additional unexplained root processes appear after 06:25:08Z + 1630s",
+          "new entries appear in /etc/cron.d/ or /var/spool/cron/"
+        ],
+        "curiosity_budget": 0,
+        "tool_manifest_version": "2026-06-11.2",
+        "unknown_priority_tools": [],
+        "priority_tool_capabilities": [
+          {
+            "tool": "hash.hash_file",
+            "capability": "static_file_triage"
+          },
+          {
+            "tool": "hash.hash_directory",
+            "capability": "static_file_triage"
+          },
+          {
+            "tool": "strings.stat_file",
+            "capability": "static_file_triage"
+          },
+          {
+            "tool": "strings.strings_grep",
+            "capability": "static_file_triage"
+          },
+          {
+            "tool": "yara.scan_file",
+            "capability": "ioc_scan_enrichment"
+          },
+          {
+            "tool": "live.live_process_details",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "live.live_processes",
+            "capability": "live_endpoint"
+          }
+        ]
+      },
+      "input_tokens": 661,
+      "output_tokens": 1566,
+      "hypothesis_id": "H0001",
+      "inputs": {
+        "user_message": "OBSERVATION:\nIs there anomalous activity on host victim warranting containment? 4 NewProcess alerts at 2026-06-13T06:25:08Z form a single parent-linked chain: cron(ppid2781) -> sh -c run-parts /etc/cron.daily -> run-parts -> /etc/cron.daily/apt-compat -> sleep.\n\nSUPPORTING EVIDENCE:\n[seq7] pid2783 ppid2781 /usr/bin/dash cmd=\"/bin/sh -c test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily )\" user=root. [seq8] pid2785 ppid2783 /usr/bin/run-parts cmd=\"run-parts --report /etc/cron.daily\" user=root. [seq9] pid2787 ppid2785 /usr/bin/dash cmd=\"/bin/sh /etc/cron.daily/apt-compat\" user=root. [seq10] pid2794 ppid2787 /usr/bin/sleep cmd=\"sleep 1630\" user=root. Context: /etc/cron.daily/apt-compat is a STOCK Ubuntu file (1478 bytes, dated Apr 8 2022) already enumerated at cid73 in INV-001 persistence sweep. apt-compat legitimately sleeps a random delay (RANDOM%1800) before apt update. The chain is the canonical Debian/Ubuntu daily cron.daily execution.\n\nCASE CONTEXT:\ncase=DEMO-LIVE INV-002; host victim Ubuntu22.04 Docker. Prior INV-001 (13h earlier) was a malicious demo detonation. This batch fired at 06:25 (daily cron time). Detector flags 'not in baseline' because the once-daily cron run was absent from the point-in-time baseline snapshot. Question: real new threat or benign scheduled-maintenance false positive?",
+        "max_tokens": 2048,
+        "system_prompt_kind": "reason_hypothesize"
+      },
+      "input_call_ids": [
+        1
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 5,
+      "type": "call_initiated",
+      "ts": "2026-06-13T06:27:55+00:00",
+      "tool": "dair_assess",
+      "backend": "claude",
+      "inputs": {
+        "model": "claude-opus-4-7"
+      },
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 6,
+      "type": "dair_call",
+      "ts": "2026-06-13T06:28:26+00:00",
+      "current_phase": "Triage",
+      "phase_rationale": "Four NewProcess alerts already pattern-matched to canonical Debian cron.daily chain with HIGH likelihood BENIGN. Must run discriminators against H0002 (trojanized-cron-script) before closing as false positive. Live endpoint (trudi-victim) authorized.",
+      "transition_recommended": false,
+      "next_phase": "",
+      "transition_rationale": "",
+      "stack_action": "stay",
+      "investigation_focus": "Confirm or refute that the cron.daily process chain (cron pid2781 -> run-parts -> apt-compat -> sleep pid2794) is the unmodified stock Debian maintenance flow with no trojanization, no rootkit preload, no anomalous children, and no new cron persistence.",
+      "verification_satisfied": false,
+      "verification_challenges": [
+        {
+          "claim": "Process chain cron(2781)->sh->run-parts->apt-compat->sleep(2794) matches canonical Debian cron.daily",
+          "challenge_method": "live.live_processes",
+          "verified": null,
+          "confidence_impact": "\u2014",
+          "notes": "Need live process tree to confirm parent-child linkage and that pid2781 is cron, pid2794 is sleep"
+        },
+        {
+          "claim": "/etc/cron.daily/apt-compat is stock, unmodified since INV-001 (cid73)",
+          "challenge_method": "live.live_read_file",
+          "verified": null,
+          "confidence_impact": "CONFIRMED\u2192SUSPECTED if hash differs",
+          "notes": "Read content + compare to INV-001 cid73 baseline; small file under 64KB cap"
+        },
+        {
+          "claim": "sleep pid2794 has no malicious child process",
+          "challenge_method": "live.live_process_details",
+          "verified": null,
+          "confidence_impact": "BENIGN\u2192SUSPECTED if children exist",
+          "notes": "Inspect pid2794 children and open files"
+        },
+        {
+          "claim": "/etc/ld.so.preload is empty/absent (no LD preload rootkit)",
+          "challenge_method": "live.live_read_file",
+          "verified": null,
+          "confidence_impact": "\u2014",
+          "notes": "Common rootkit persistence vector \u2014 check now"
+        },
+        {
+          "claim": "No new entries added to /etc/cron.daily or /etc/cron.d",
+          "challenge_method": "live.live_persistence_audit",
+          "verified": null,
+          "confidence_impact": "BENIGN\u2192SUSPECTED if new entries",
+          "notes": "Enumerate cron persistence locations"
+        },
+        {
+          "claim": "No anomalous outbound network connections from cron descendants",
+          "challenge_method": "live.live_network_connections",
+          "verified": null,
+          "confidence_impact": "BENIGN\u2192SUSPECTED if found",
+          "notes": "apt-compat + sleep should generate no network traffic"
+        }
+      ],
+      "recommended_actions": [],
+      "directives": {
+        "priority_tools": [
+          "live.live_processes",
+          "live.live_process_details",
+          "live.live_network_connections",
+          "live.live_read_file",
+          "live.live_persistence_audit",
+          "live.live_scheduled_tasks",
+          "reason.evaluate_finding"
+        ],
+        "skip_tools": [],
+        "focus_pids": [
+          2781,
+          2794
+        ],
+        "focus_paths": [
+          "/etc/cron.daily/apt-compat",
+          "/etc/ld.so.preload",
+          "/etc/cron.daily",
+          "/etc/cron.d",
+          "/etc/crontab"
+        ],
+        "max_depth": "discriminator-targeted; do not begin broad disk imaging \u2014 this is a candidate false positive and discriminators are sufficient",
+        "next_hypothesis_triggers": [
+          "If apt-compat hash differs from INV-001 cid73 baseline -> escalate H0002 trojanized-cron-script",
+          "If sleep pid2794 has any child process -> escalate to malicious detonation",
+          "If /etc/ld.so.preload non-empty -> push new hypothesis H0003 LD_PRELOAD rootkit",
+          "If new entries in /etc/cron.daily or /etc/cron.d not present in INV-001 baseline -> escalate H0002",
+          "If any cron descendant has outbound socket -> escalate to C2 hypothesis"
+        ],
+        "curiosity_budget": 3,
+        "tool_manifest_version": "2026-06-11.2",
+        "unknown_priority_tools": [],
+        "priority_tool_capabilities": [
+          {
+            "tool": "live.live_processes",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "live.live_process_details",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "live.live_network_connections",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "live.live_read_file",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "live.live_persistence_audit",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "live.live_scheduled_tasks",
+            "capability": "live_endpoint"
+          },
+          {
+            "tool": "reason.evaluate_finding",
+            "capability": "reasoning_control"
+          }
+        ]
+      },
+      "input_tokens": 538,
+      "output_tokens": 2512,
+      "inputs": {
+        "tool_results_summary": "INV-002 opened on 4 NewProcess alerts at 06:25:08Z. reason.hypothesize H0001: HIGH likelihood BENIGN canonical Debian cron.daily chain (cron->sh anacron-test->run-parts /etc/cron.daily->apt-compat->sleep 1630, RANDOM%1800 jitter, fires at daily cron time, all parent-linked to cron pid2781, apt-compat is stock file already verified at cid73 in INV-001). LOW likelihood trojanized-cron-script. Detector 'not in baseline' is a baseline-window gap (snapshot didn't span 24h). Discriminators to rule out H2: read /etc/cron.daily/apt-compat content (confirm stock, unmodified since INV-001), check /etc/ld.so.preload empty, confirm sleep pid2794 has no malicious child, confirm no new /etc/cron.daily or /etc/cron.d entries. Verdict forming: BENIGN false positive, do NOT contain.",
+        "phase_stack": [],
+        "case_context": "CASE_QUESTION: Is there anomalous activity on the monitored host that warrants containment or eradication? investigation_id=INV-002; host victim; this batch is a candidate benign scheduled-maintenance false positive (cron.daily), contrast to INV-001 malicious detonation. live.* authorized (victim=trudi-victim in live_hosts.json).",
+        "current_phase": "Triage",
+        "tool_manifest_version": "2026-06-11.2",
+        "user_message": "TOOL RESULTS SUMMARY:\nINV-002 opened on 4 NewProcess alerts at 06:25:08Z. reason.hypothesize H0001: HIGH likelihood BENIGN canonical Debian cron.daily chain (cron->sh anacron-test->run-parts /etc/cron.daily->apt-compat->sleep 1630, RANDOM%1800 jitter, fires at daily cron time, all parent-linked to cron pid2781, apt-compat is stock file already verified at cid73 in INV-001). LOW likelihood trojanized-cron-script. Detector 'not in baseline' is a baseline-window gap (snapshot didn't span 24h). Discriminators to rule out H2: read /etc/cron.daily/apt-compat content (confirm stock, unmodified since INV-001), check /etc/ld.so.preload empty, confirm sleep pid2794 has no malicious child, confirm no new /etc/cron.daily or /etc/cron.d entries. Verdict forming: BENIGN false positive, do NOT contain.\n\nCURRENT PHASE STACK (newest last):\n[]\n\nCURRENT PHASE: Triage\n\nCASE CONTEXT:\nCASE_QUESTION: Is there anomalous activity on the monitored host that warrants containment or eradication? investigation_id=INV-002; host victim; this batch is a candidate benign scheduled-maintenance false positive (cron.daily), contrast to INV-001 malicious detonation. live.* authorized (victim=trudi-victim in live_hosts.json)."
+      },
+      "input_call_ids": [
+        1,
+        4
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 8,
+      "type": "tool_call",
+      "ts": "2026-06-13T06:28:36+00:00",
+      "cmd": "ssh victim@localhost:2222 -- ps -eo pid,ppid,user,etimes,start,cmd --no-headers",
+      "success": true,
+      "truncated": false,
+      "retries": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.1,
+      "stderr": "",
+      "stdout_excerpt": "      1       0 root       47022 17:24:53 velociraptor --config /config/client.config.yaml client -v\n     29       1 root       47019 17:24:56 /usr/sbin/cron -P\n     30       1 root       47019 17:24:56 sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups\n     65       1 victim     47001 17:25:14 [sshd] <defunct>\n     75       1 root       46755 17:29:20 [.kworkerd] <defunct>\n     82       1 root       46755 17:29:20 [python3] <defunct>\n    110       1 root       46754 17:29:21 sleep 86400\n    147       1 victim     46427 17:34:48 [sshd] <defunct>\n    160       1 victim     46427 17:34:48 [",
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 10,
+      "type": "tool_call",
+      "ts": "2026-06-13T06:28:36+00:00",
+      "cmd": "ssh victim@localhost:2222 -- head -c 65536 /etc/cron.daily/apt-compat",
+      "success": true,
+      "truncated": false,
+      "retries": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.1,
+      "stderr": "",
+      "stdout_excerpt": "#!/bin/sh\n\nset -e\n\n# Systemd systems use a systemd timer unit which is preferable to\n# run. We want to randomize the apt update and unattended-upgrade\n# runs as much as possible to avoid hitting the mirrors all at the\n# same time. The systemd time is better at this than the fixed\n# cron.daily time\nif [ -d /run/systemd/system ]; then\n    exit 0\nfi\n\ncheck_power()\n{\n    # laptop check, on_ac_power returns:\n    #       0 (true)    System is on main power\n    #       1 (false)   System is not on main power\n    #       255 (false) Power status could not be determined\n    # Desktop systems always ret",
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 11,
+      "type": "tool_call",
+      "ts": "2026-06-13T06:28:37+00:00",
+      "cmd": "ssh victim@localhost:2222 -- head -c 65536 /etc/ld.so.preload",
+      "success": false,
+      "truncated": false,
+      "retries": 0,
+      "exit_code": 1,
+      "elapsed_seconds": 0.1,
+      "stderr": "head: cannot open '/etc/ld.so.preload' for reading: No such file or directory\n",
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 12,
+      "type": "tool_call",
+      "ts": "2026-06-13T06:28:37+00:00",
+      "cmd": "ssh victim@localhost:2222 -- ss -tnlpa",
+      "success": true,
+      "truncated": false,
+      "retries": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.1,
+      "stderr": "",
+      "stdout_excerpt": "State      Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\nLISTEN     0      128          0.0.0.0:22         0.0.0.0:*           \nLISTEN     0      4096      127.0.0.11:37387      0.0.0.0:*           \nESTAB      0      0         172.18.0.3:56364   172.18.0.2:8000        \nESTAB      0      72       203.0.113.2:22     203.0.113.1:51104       \nCLOSE-WAIT 1      0        203.0.113.2:60772 203.0.113.10:8080        \nLISTEN     0      128             [::]:22            [::]:*           \n",
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 13,
+      "type": "tool_call",
+      "ts": "2026-06-13T06:28:38+00:00",
+      "cmd": "ssh victim@localhost:2222 -- sh -c 'echo ===TIMERS===; systemctl list-timers --all --no-pager --plain; echo ===CRON_D===; ls -la /etc/cron.d/ /etc/cron.daily/ /etc/cron.hourly/ /etc/cron.weekly/ /etc/cron.monthly/ 2>/dev/null; echo ===ANACRONTAB===; cat /etc/anacrontab 2>/dev/null; echo ===USER_CRONTABS===; for u in $(cut -d: -f1 /etc/passwd); do   c=$(sudo -n crontab -u $u -l 2>/dev/null);   if [ -n \"$c\" ]; then echo ---$u---; echo \"$c\"; fi; done'",
+      "success": true,
+      "truncated": false,
+      "retries": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.1,
+      "stderr": "sh: 1: systemctl: not found\n",
+      "stdout_excerpt": "===TIMERS===\n===CRON_D===\n/etc/cron.d/:\ntotal 16\ndrwxr-xr-x 1 root root 4096 Jun  4 23:46 .\ndrwxr-xr-x 1 root root 4096 Jun 12 17:24 ..\n-rw-r--r-- 1 root root  102 Mar 23  2022 .placeholder\n-rw-r--r-- 1 root root  201 Jan  8  2022 e2scrub_all\n\n/etc/cron.daily/:\ntotal 20\ndrwxr-xr-x 1 root root 4096 Jun  4 23:46 .\ndrwxr-xr-x 1 root root 4096 Jun 12 17:24 ..\n-rw-r--r-- 1 root root  102 Mar 23  2022 .placeholder\n-rwxr-xr-x 1 root root 1478 Apr  8  2022 apt-compat\n-rwxr-xr-x 1 root root  123 Dec  5  2021 dpkg\n\n/etc/cron.hourly/:\ntotal 12\ndrwxr-xr-x 2 root root 4096 Jun  4 23:46 .\ndrwxr-xr-x 1 root ",
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 15,
+      "type": "call_initiated",
+      "ts": "2026-06-13T06:29:15+00:00",
+      "tool": "reason_evaluate_finding",
+      "backend": "claude",
+      "inputs": {
+        "model": "claude-opus-4-7"
+      },
+      "input_call_ids": [
+        8,
+        10,
+        11,
+        12,
+        13
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 16,
+      "type": "reason_call",
+      "ts": "2026-06-13T06:30:02+00:00",
+      "tool": "reason_evaluate_finding",
+      "success": true,
+      "conclusion": "EVIDENCE SUPPORT\nThe finding is well-supported by multiple independent live collection tools:\n- Process tree (live.live_processes): canonical cron \u2192 CRON \u2192 run-parts \u2192 apt-compat \u2192 sleep chain, all root, correct parent-linkage.\n- File content (live.live_read_file on /etc/cron.daily/apt-compat): matches stock Ubuntu script (random_sleep then exec apt.systemd.daily).\n- /etc/ld.so.preload absent \u2192 rules out a common LD_PRELOAD hook on the chain.\n- Network connections: no outbound from descendants (consistent with sleep state).\n- Scheduled tasks: timestamps and sizes match expected stock (apt-compat 1478B 2022-04-08, dpkg 123B 2021-12-05).\n- Timing: 06:25 is the documented Debian/Ubuntu cron.daily window (06:25 local per /etc/crontab default).\n\nCONTRADICTING EVIDENCE\nNone presented in the finding. Minor gap: no hash verification of /etc/cron.daily/apt-compat or /usr/lib/apt/apt.systemd.daily against the dpkg-shipped version. A trojanized script can be visually \"stock-looking\" if the attacker only appended subtle changes. The finding asserts \"verbatim stock\" without a hash/dpkg --verify comparison.\n\nALTERNATIVE EXPLANATIONS\n- Attacker timed malicious activity to coincide with cron.daily to blend in (low likelihood given the script is read and matches, sleep has no children, no network).\n- Tampering further down the chain (apt.systemd.daily, /usr/lib/apt/*) not yet inspected \u2014 apt-compat ultimately execs apt.systemd.daily, which was not read or hashed.\n- Run-parts could execute other scripts in /etc/cron.daily in sequence; only apt-compat was content-verified.\n\nHALLUCINATION CHECK\n- \"Verbatim stock Ubuntu apt-compat\" \u2014 asserted but no hash/dpkg verification cited; the comparison is by inspection. Mild overclaim.\n- Statement that detector fired due to \"absent from point-in-time baseline snapshot\" is a reasonable inference, not directly evidenced by the cited tools. Acceptable as hypothesis but stated as fact.\n- File sizes/dates for apt-compat and dpkg are specific and attributed to cid 13 \u2014 plausible and verifiable.\n\nFACT-CHECK\n- /etc/crontab default cron.daily time on Debian/Ubuntu is 06:25 \u2014 correct.\n- apt-compat does exec /usr/lib/apt/apt.systemd.daily after random_sleep \u2014 correct.\n- /etc/ld.so.preload absence ruling out LD_PRELOAD persistence \u2014 correct as one vector, but does not rule out per-binary patching, ELF section injection, or other persistence.\n- NEGATIVE FINDING SCRUTINY: claims \"no new outbound from cron descendants\" and \"no anomalous activity.\" This is based on a single point-in-time snapshot while apt-compat is in random_sleep \u2014 by definition not yet executing the payload. Outbound traffic from apt.systemd.daily (legitimate or not) hasn't occurred yet. The benign call is reasonable but the negative-network claim is trivially true during the sleep window and shouldn't be used as a discriminator.\n\nADDITIONAL INVESTIGATION TO UPGRADE\n- Hash /etc/cron.daily/apt-compat and /usr/lib/apt/apt.systemd.daily; compare to dpkg-shipped versions (or simply verify package integrity).\n- Enumerate and hash all scripts in /etc/cron.daily and /etc/cron.hourly run by this run-parts invocation.\n- Re-check network connections after the random_sleep elapses (or simulate by examining apt.systemd.daily statically).\n\nVERDICT: SUPPORTED (with minor caveat) \u2014 evidence consistently indicates benign stock cron.daily execution; recommend hash verification to fully retire residual risk, but operationally no containment warranted.",
+      "directives": {
+        "priority_tools": [
+          "hash.hash_file",
+          "live.live_read_file"
+        ],
+        "skip_tools": [
+          "vol.psscan",
+          "ez.evtxecmd",
+          "tsk.fls"
+        ],
+        "focus_pids": [
+          2787,
+          2794
+        ],
+        "focus_paths": [
+          "/etc/cron.daily/apt-compat",
+          "/usr/lib/apt/apt.systemd.daily",
+          "/etc/cron.daily/dpkg",
+          "/etc/cron.daily/"
+        ],
+        "max_depth": "targeted",
+        "next_hypothesis_triggers": [
+          "apt-compat hash mismatch vs dpkg package",
+          "apt.systemd.daily content differs from stock",
+          "unexpected script present in /etc/cron.daily",
+          "network egress observed from PID 2787 descendants after sleep elapses"
+        ],
+        "curiosity_budget": 0,
+        "tool_manifest_version": "2026-06-11.2",
+        "unknown_priority_tools": [],
+        "priority_tool_capabilities": [
+          {
+            "tool": "hash.hash_file",
+            "capability": "static_file_triage"
+          },
+          {
+            "tool": "live.live_read_file",
+            "capability": "live_endpoint"
+          }
+        ]
+      },
+      "input_tokens": 667,
+      "output_tokens": 3106,
+      "evidence_audit": [
+        {
+          "claim": "Process chain cron\u2192CRON\u2192run-parts\u2192apt-compat\u2192sleep is intact, root-owned, correctly parent-linked",
+          "tool": "live.live_processes",
+          "command": "live.live_processes (cid 8)",
+          "raw_output_excerpt": "29 /usr/sbin/cron -> 2781 CRON -P -> 2783 /bin/sh -c -> 2785 run-parts /etc/cron.daily -> 2787 /bin/sh /etc/cron.daily/apt-compat -> 2794 sleep 1630",
+          "artifact_path": "live process table",
+          "timestamp_source": "06:25:08Z alert correlated to cron.daily window",
+          "proof_rationale": "Tree structure and UIDs match canonical Debian cron.daily execution; sleep has no child confirming payload not yet executed",
+          "benign_alternatives": "This IS the benign explanation"
+        },
+        {
+          "claim": "apt-compat script is verbatim stock Ubuntu, unmodified",
+          "tool": "live.live_read_file",
+          "command": "live.live_read_file /etc/cron.daily/apt-compat (cid 10)",
+          "raw_output_excerpt": "random_sleep RANDOM%1800 then exec /usr/lib/apt/apt.systemd.daily",
+          "artifact_path": "/etc/cron.daily/apt-compat",
+          "timestamp_source": "NOT PROVIDED",
+          "proof_rationale": "Content visually matches distribution package; however no cryptographic/dpkg verification performed",
+          "benign_alternatives": "Stock package; trojanized variant remains theoretically possible without hash check"
+        },
+        {
+          "claim": "No LD_PRELOAD rootkit on chain",
+          "tool": "live.live_read_file",
+          "command": "live.live_read_file /etc/ld.so.preload (cid 11)",
+          "raw_output_excerpt": "file absent",
+          "artifact_path": "/etc/ld.so.preload",
+          "timestamp_source": "NOT PROVIDED",
+          "proof_rationale": "Absent file rules out global preload hook",
+          "benign_alternatives": "Normal default state; does not rule out other rootkit/persistence vectors"
+        },
+        {
+          "claim": "No new outbound from cron descendants",
+          "tool": "live.live_network_connections",
+          "command": "live.live_network_connections (cid 12)",
+          "raw_output_excerpt": "no new outbound from cron descendants",
+          "artifact_path": "kernel socket table",
+          "timestamp_source": "point-in-time during sleep window",
+          "proof_rationale": "Snapshot during random_sleep would not yet show payload network activity; weak discriminator",
+          "benign_alternatives": "Expected in sleep state regardless of script intent"
+        },
+        {
+          "claim": "/etc/cron.daily and /etc/cron.d unchanged since INV-001 baseline",
+          "tool": "live.live_scheduled_tasks",
+          "command": "live.live_scheduled_tasks (cid 13)",
+          "raw_output_excerpt": "apt-compat 1478B Apr 8 2022, dpkg 123B Dec 5 2021",
+          "artifact_path": "/etc/cron.daily, /etc/cron.d",
+          "timestamp_source": "stat mtime from listing",
+          "proof_rationale": "Sizes/timestamps match stock package; no new entries since prior baseline",
+          "benign_alternatives": "Timestomp possible but combined with content match unlikely"
+        },
+        {
+          "claim": "Detector fired due to absence from point-in-time baseline snapshot",
+          "tool": "NOT PROVIDED",
+          "command": "NOT PROVIDED",
+          "raw_output_excerpt": "NOT PROVIDED",
+          "artifact_path": "NOT PROVIDED",
+          "timestamp_source": "NOT PROVIDED",
+          "proof_rationale": "Plausible inference about detector behavior but not directly evidenced",
+          "benign_alternatives": "Detector tuning issue"
+        }
+      ],
+      "inputs": {
+        "user_message": "FINDING:\nThe 4 INV-002 NewProcess alerts (06:25:08Z) are a BENIGN false positive \u2014 the legitimate, unmodified Debian/Ubuntu daily cron.daily maintenance run (apt-compat). No anomalous activity, no containment warranted.\n\nSUPPORTING EVIDENCE:\nlive.live_processes (cid 8): chain 29 /usr/sbin/cron -> 2781 CRON -P -> 2783 /bin/sh -c (anacron-test/run-parts) -> 2785 run-parts /etc/cron.daily -> 2787 /bin/sh /etc/cron.daily/apt-compat -> 2794 sleep 1630; all root, correctly parent-linked to cron; sleep 2794 has NO child process. live.live_read_file /etc/cron.daily/apt-compat (cid 10): verbatim stock Ubuntu apt-compat (random_sleep RANDOM%1800 then exec /usr/lib/apt/apt.systemd.daily) \u2014 unmodified, no injected commands. /etc/ld.so.preload absent (cid 11) \u2014 no LD_PRELOAD rootkit. live.live_network_connections (cid 12): no new outbound from cron descendants (apt-compat still in random_sleep). live.live_scheduled_tasks (cid 13): /etc/cron.daily + /etc/cron.d unchanged since INV-001 cid73 (apt-compat 1478B Apr 8 2022, dpkg 123B Dec 5 2021, stock), no new entries. Detector fired only because the once-daily 06:25 run was absent from the point-in-time baseline snapshot. Tier: UNCONFIRMED (benign/false-positive determination).\n\nCASE CONTEXT:\nDEMO-LIVE INV-002; contrast to INV-001 malicious detonation; H0001 ranked this HIGH-benign with discriminators now all confirming benign.",
+        "max_tokens": 4096,
+        "system_prompt_kind": "reason_evaluate_finding"
+      },
+      "input_call_ids": [
+        8,
+        10,
+        11,
+        12,
+        13
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 17,
+      "type": "tool_call",
+      "ts": "2026-06-13T06:30:18+00:00",
+      "cmd": "<py>:misc_record_finding",
+      "success": true,
+      "truncated": false,
+      "retries": 0,
+      "exit_code": 0,
+      "elapsed_seconds": 0.0,
+      "stderr": "",
+      "input_call_ids": [
+        6
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    },
+    {
+      "call_id": 19,
+      "type": "finding",
+      "ts": "2026-06-13T06:30:36+00:00",
+      "description": "INV-002: the 4 NewProcess alerts at 2026-06-13T06:25:08Z on host victim are a BENIGN FALSE POSITIVE \u2014 the legitimate Debian/Ubuntu daily cron.daily maintenance chain: cron pid29 -> CRON pid2781 -> sh anacron-test -> run-parts /etc/cron.daily -> /etc/cron.daily/apt-compat pid2787 -> sleep 1630 pid2794, all root, correctly parent-linked, and sleep pid2794 has no child process. apt-compat content (cid10) is the verbatim stock Ubuntu script (random_sleep RANDOM%1800 then exec /usr/lib/apt/apt.systemd.daily); /etc/ld.so.preload absent (cid11, no preload rootkit); /etc/cron.daily and /etc/cron.d are byte-identical to INV-001 cid73 (apt-compat 1478B Apr 8 2022, dpkg 123B Dec 5 2021), no new entries. The detector fired only because the once-daily 06:25 cron run was absent from the point-in-time baseline snapshot. No containment warranted. Recommend baseline-window tuning (>=25h) or an allowlist for the stock cron.daily chain; optional hardening: dpkg --verify of apt-compat/apt.systemd.daily.",
+      "confidence": "UNCONFIRMED",
+      "source": "live.live_processes",
+      "linked_call_id": 8,
+      "tested_hypothesis_id": "H0001",
+      "input_call_ids": [
+        1,
+        4,
+        8,
+        10,
+        11,
+        13,
+        16
+      ],
+      "dair_phase": "Triage",
+      "dair_depth": 1
+    }
+  ],
+  "recommended_containment_commands": [
+    {
+      "action_id": "ACT-1",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 30,
+      "detector": "Custom.TRUDI.NewProcess",
+      "description": "Send SIGSTOP to the new process (forensic capture before kill)",
+      "manual_command": "kill -STOP 75",
+      "risk": "low",
+      "reversible": true,
+      "unresolved_placeholders": [],
+      "created_at_utc": "2026-06-12T17:46:58Z",
+      "action_template": "pause_pid",
+      "revert_template": "resume_pid",
+      "raw_evidence": {
+        "image_path": "/tmp/.kworkerd",
+        "process_name": ".kworkerd",
+        "pid": "75",
+        "ppid": "1",
+        "commandline": "/tmp/.kworkerd 3600",
+        "username": "root",
+        "clientid": "C.e6de3278ad209722"
+      }
+    },
+    {
+      "action_id": "ACT-2",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 30,
+      "detector": "Custom.TRUDI.NewProcess",
+      "description": "Terminate the new process (SIGKILL)",
+      "manual_command": "kill -9 75",
+      "risk": "medium",
+      "reversible": false,
+      "unresolved_placeholders": [],
+      "created_at_utc": "2026-06-12T17:46:58Z",
+      "action_template": "kill_pid",
+      "revert_template": null,
+      "raw_evidence": {
+        "image_path": "/tmp/.kworkerd",
+        "process_name": ".kworkerd",
+        "pid": "75",
+        "ppid": "1",
+        "commandline": "/tmp/.kworkerd 3600",
+        "username": "root",
+        "clientid": "C.e6de3278ad209722"
+      }
+    },
+    {
+      "action_id": "ACT-3",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 30,
+      "detector": "Custom.TRUDI.NewProcess",
+      "description": "Move the new process's image to /var/quarantine/<sha256>",
+      "manual_command": "mkdir -p /var/quarantine && chmod 000 /tmp/.kworkerd && mv /tmp/.kworkerd /var/quarantine/",
+      "risk": "low",
+      "reversible": true,
+      "unresolved_placeholders": [
+        "sha256"
+      ],
+      "created_at_utc": "2026-06-12T17:46:58Z",
+      "action_template": "quarantine_image",
+      "revert_template": "restore_quarantined_image",
+      "raw_evidence": {
+        "image_path": "/tmp/.kworkerd",
+        "process_name": ".kworkerd",
+        "pid": "75",
+        "ppid": "1",
+        "commandline": "/tmp/.kworkerd 3600",
+        "username": "root",
+        "clientid": "C.e6de3278ad209722"
+      }
+    },
+    {
+      "action_id": "ACT-4",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 60,
+      "detector": "Custom.TRUDI.NewNetwork",
+      "description": "iptables REJECT outbound to 203.0.113.10:8080",
+      "manual_command": "iptables -I OUTPUT -d 203.0.113.10 -p tcp --dport 8080 -m comment --comment TRUDI_RESPOND -j REJECT",
+      "risk": "low",
+      "reversible": true,
+      "unresolved_placeholders": [],
+      "created_at_utc": "2026-06-12T17:46:59Z",
+      "action_template": "block_egress_to_endpoint",
+      "revert_template": "unblock_egress",
+      "raw_evidence": {
+        "local_ip": "203.0.113.2",
+        "local_port": 60772,
+        "remote_ip": "203.0.113.10",
+        "remote_port": 8080,
+        "state": "ESTABLISHED",
+        "pid": 110,
+        "clientid": "C.e6de3278ad209722"
+      }
+    },
+    {
+      "action_id": "ACT-5",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 60,
+      "detector": "Custom.TRUDI.NewNetwork",
+      "description": "Terminate the process owning the new outbound connection",
+      "manual_command": "kill -9 110",
+      "risk": "medium",
+      "reversible": false,
+      "unresolved_placeholders": [],
+      "created_at_utc": "2026-06-12T17:46:59Z",
+      "action_template": "kill_owning_pid",
+      "revert_template": null,
+      "raw_evidence": {
+        "local_ip": "203.0.113.2",
+        "local_port": 60772,
+        "remote_ip": "203.0.113.10",
+        "remote_port": 8080,
+        "state": "ESTABLISHED",
+        "pid": 110,
+        "clientid": "C.e6de3278ad209722"
+      }
+    },
+    {
+      "action_id": "ACT-6",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 70,
+      "detector": "Custom.TRUDI.NewPersistence",
+      "description": "Delete the new cron entry",
+      "manual_command": "mkdir -p /var/quarantine && cp /var/spool/cron/crontabs/root /var/quarantine/cron_backup_$(basename /var/spool/cron/crontabs/root) && rm -f /var/spool/cron/crontabs/root",
+      "risk": "low",
+      "reversible": true,
+      "unresolved_placeholders": [],
+      "created_at_utc": "2026-06-12T17:47:01Z",
+      "action_template": "remove_cron_entry",
+      "revert_template": "restore_cron_entry",
+      "raw_evidence": {
+        "path": "/var/spool/cron/crontabs/root",
+        "size": 213,
+        "mtime_utc": "2026-06-12T17:29:21Z",
+        "clientid": "C.e6de3278ad209722"
+      }
+    },
+    {
+      "action_id": "ACT-7",
+      "case_id": "DEMO-LIVE",
+      "finding_id": 70,
+      "detector": "Custom.TRUDI.NewPersistence",
+      "description": "Disable + stop the new systemd unit",
+      "manual_command": "systemctl disable --now /var/spool/cron/crontabs/root",
+      "risk": "low",
+      "reversible": true,
+      "unresolved_placeholders": [],
+      "created_at_utc": "2026-06-12T17:47:01Z",
+      "action_template": "disable_systemd_unit",
+      "revert_template": "enable_systemd_unit",
+      "raw_evidence": {
+        "path": "/var/spool/cron/crontabs/root",
+        "size": 213,
+        "mtime_utc": "2026-06-12T17:29:21Z",
+        "clientid": "C.e6de3278ad209722"
+      }
+    }
+  ]
+}

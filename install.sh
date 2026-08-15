@@ -45,11 +45,13 @@ ok "Claude Code at $CLAUDE_BIN"
 
 # ── 1b. System packages (apt) ─────────────────────────────────────────────────
 
-step "Installing system forensic packages"
+step "Installing system packages (Python base + forensic tools)"
 
 APT_PACKAGES=(
+    python3-venv       # ensurepip — required by `python3 -m venv` (NOT preinstalled on the SIFT base)
+    python3-pip        # pip bootstrap for the venv
     pff-tools          # pffexport — PST/OST email extraction
-    libpst-utils       # readpst — PST→mbox conversion
+    pst-utils          # readpst — PST→mbox conversion
     binwalk            # firmware / embedded carving
     tcpxtract          # network stream carving (already covered)
     sleuthkit          # TSK tools
@@ -63,9 +65,25 @@ for pkg in "${APT_PACKAGES[@]}"; do
     fi
 done
 if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    # pst-utils, pff-tools, and tcpxtract live in the 'universe' component.
+    # SIFT normally enables it, but a bare Ubuntu base may not — make it explicit
+    # so a fresh image doesn't fail with "unable to locate package".
+    if ! grep -rq "^deb .* universe" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        if command -v add-apt-repository &>/dev/null; then
+            sudo add-apt-repository -y universe || warn "Could not enable 'universe' repo automatically"
+        else
+            warn "'universe' repo not enabled and add-apt-repository missing — pst-utils/pff-tools may not install"
+        fi
+    fi
     sudo apt-get update -qq
     sudo apt-get install -y "${MISSING_PKGS[@]}" || \
         warn "Some apt packages failed to install — see output above"
+
+    # Verify the critical binaries actually landed — dpkg state alone can report
+    # success while an apt failure (swallowed by '|| warn' above) left a tool absent.
+    for bin in readpst pffexport; do
+        command -v "$bin" &>/dev/null || warn "Expected binary '$bin' not found after install — email extraction (misc.readpst_extract / misc.pff_export) will fail"
+    done
     ok "Installed: ${MISSING_PKGS[*]}"
 else
     ok "All apt forensic packages already present"
@@ -85,9 +103,12 @@ else
     CHAINSAW_URL="https://github.com/WithSecureLabs/chainsaw/releases/download/v${CHAINSAW_VERSION}/chainsaw_x86_64-unknown-linux-gnu.tar.gz"
     TMPDIR=$(mktemp -d)
     if curl -fsSL "$CHAINSAW_URL" -o "$TMPDIR/chainsaw.tgz" 2>/dev/null; then
-        tar -xzf "$TMPDIR/chainsaw.tgz" -C "$TMPDIR"
+        # Guard extraction: a corrupt download must degrade to the optional-skip
+        # path, not abort the whole install under `set -e`.
         # Release ships as chainsaw/chainsaw + sigma rules
-        if [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
+        if ! tar -xzf "$TMPDIR/chainsaw.tgz" -C "$TMPDIR" 2>/dev/null; then
+            warn "chainsaw archive corrupt — skipping (TRUDI works without it)"
+        elif [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
             sudo install -m 0755 "$TMPDIR/chainsaw/chainsaw" "$CHAINSAW_BIN"
             if [ -d "$TMPDIR/chainsaw/sigma" ]; then
                 sudo mkdir -p /usr/local/share/chainsaw
@@ -150,12 +171,31 @@ if [ -f "$MITRE_DEST" ]; then
 elif [ -f "$MITRE_SRC" ]; then
     cp "$MITRE_SRC" "$MITRE_DEST"
     ok "Installed MITRE reference table → $MITRE_DEST"
-elif [ -f "/home/trin/cases/.common/mitre_techniques.json" ]; then
-    cp "/home/trin/cases/.common/mitre_techniques.json" "$MITRE_DEST"
-    ok "Copied MITRE reference table → $MITRE_DEST"
 else
     warn "MITRE reference table not found in repo; mitre_map will be a no-op"
 fi
+
+
+# ── 1e. Bundled case studies (traces + reports for the dashboard) ─────────────
+
+step "Installing bundled case studies"
+
+# Copy each bundled case (trace + reports + brief, NO evidence) into ~/cases so the
+# trace dashboard can render them. A case already present in ~/cases is left alone —
+# we never clobber a user's live investigation.
+CASE_COUNT=0
+for case_src in "$TRUDI_DIR"/cases/*/; do
+    case_name="$(basename "$case_src")"
+    [ "$case_name" = ".common" ] && continue
+    case_dest="$HOME/cases/$case_name"
+    if [ -e "$case_dest" ]; then
+        warn "~/cases/$case_name already exists — leaving it untouched"
+        continue
+    fi
+    cp -r "$case_src" "$case_dest"
+    CASE_COUNT=$((CASE_COUNT + 1))
+done
+ok "Installed $CASE_COUNT bundled case studies to ~/cases/ (browse with: ./dashboard.sh)"
 
 
 # ── 2. Passwordless sudo for forensic tools ───────────────────────────────────
@@ -180,16 +220,37 @@ fi
 
 step "Setting up Python environment"
 
-if [ ! -d "$VENV_DIR" ]; then
-    python3 -m venv "$VENV_DIR"
+# A partial venv from a previous failed run (e.g. one that died at ensurepip)
+# leaves the directory but no working pip — treat that as needing recreation,
+# otherwise the pip steps below fail with a confusing error.
+make_venv() { [ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"; python3 -m venv "$VENV_DIR" 2>/dev/null; }
+
+if [ ! -x "$VENV_DIR/bin/pip" ]; then
+    if ! make_venv; then
+        # ensurepip is missing. The generic python3-venv metapackage tracks the
+        # apt-default python, which on a multi-python box (e.g. SIFT's python3.12)
+        # differs from the `python3` command — so install the venv package matching
+        # THIS python3 by version, then retry.
+        PYV="$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+        warn "venv creation failed (ensurepip missing) — installing python${PYV}-venv to match python3 $PYV"
+        sudo apt-get install -y "python${PYV}-venv" python3-pip 2>/dev/null || \
+            sudo apt-get install -y python3-venv python3-pip 2>/dev/null || true
+        if ! make_venv; then
+            fail "Failed to create venv even after installing python${PYV}-venv. Install it manually and re-run: sudo apt-get install -y python${PYV}-venv python3-pip"
+        fi
+    fi
     ok "Created venv at $VENV_DIR"
 else
     ok "Venv already exists at $VENV_DIR"
 fi
 
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements.txt"
-"$VENV_DIR/bin/pip" install --quiet -r "$TRUDI_DIR/requirements-dev.txt"
+# Do NOT use --quiet here: flare-capa/flare-floss (and yara-python, which compiles
+# C) are large and can take several minutes. With --quiet the step produces zero
+# output and looks hung; show pip's normal progress instead.
+warn "Installing Python dependencies — this can take several minutes (flare-capa / flare-floss / yara-python are large). Progress shown below."
+"$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements.txt"
+"$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements-dev.txt"
 ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, pytest)"
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
@@ -350,17 +411,36 @@ if "$CLAUDE_BIN" mcp list 2>/dev/null | grep -q "trudi-sift"; then
     "$CLAUDE_BIN" mcp remove trudi-sift 2>/dev/null || true
 fi
 
-"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope user 2>/dev/null || \
-"$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global 2>/dev/null || true
-ok "Registered trudi-sift MCP server (global scope)"
+# Register at user scope, falling back to global. Do NOT hide stderr or '|| true'
+# the failure: the MCP server IS the product, so a silent registration failure
+# would leave a hollow Claude with a misleading "ready" banner. Verify after.
+if "$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope user; then
+    REG_SCOPE="user"
+elif "$CLAUDE_BIN" mcp add trudi-sift "$PYTHON_BIN" "$SERVER_PATH" --scope global; then
+    REG_SCOPE="global"
+else
+    REG_SCOPE=""
+fi
+
+if [ -n "$REG_SCOPE" ] && "$CLAUDE_BIN" mcp list 2>/dev/null | grep -q "trudi-sift"; then
+    ok "Registered trudi-sift MCP server ($REG_SCOPE scope)"
+else
+    fail "Failed to register trudi-sift MCP server — TRUDI has no tools without it. Reproduce: $CLAUDE_BIN mcp add trudi-sift $PYTHON_BIN $SERVER_PATH --scope user"
+fi
 
 # ── 7. Verify ─────────────────────────────────────────────────────────────────
 
 step "Running smoke test"
 
 cd "$TRUDI_DIR"
-"$VENV_DIR/bin/python3" -m pytest tests/ -q --tb=short 2>&1 | tail -5
-ok "Tests passed"
+# The install is already complete by this point — a failing test should not abort
+# the script under `set -e` and hide the "TRUDI is ready" banner. Warn instead.
+if "$VENV_DIR/bin/python3" -m pytest tests/ -q --tb=short; then
+    ok "Tests passed"
+else
+    rc=$?
+    warn "pytest reported failures (exit $rc) — the install itself is complete; review the output above before relying on this build"
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
@@ -368,15 +448,24 @@ echo ""
 echo -e "${GREEN}  TRUDI is ready.${NC}"
 echo ""
 echo "  Next steps:"
-echo "    1. Edit $TRUDI_DIR/.env — add API keys if you have them (optional)"
+echo "    1. Edit $TRUDI_DIR/.env and set ANTHROPIC_API_KEY — REQUIRED for a full-quality run."
+echo "       It powers the analyst, the reason.* reviewer, and the dair.* director."
+echo "       Without it TRUDI degrades: reason.* / dair.* calls are skipped, so findings"
+echo "       are never adversarially challenged. (VirusTotal / AbuseIPDB keys are optional.)"
+echo "       Submission default: REASON_MODEL=claude-opus-4-8, DAIR_MODEL=claude-opus-4-8"
 echo ""
-echo "  Foundation-Sec-8B (adversarial reasoning):"
-echo "    Local:  vllm serve \"fdtn-ai/Foundation-Sec-8B-Reasoning\" --reasoning-parser minimax_m2"
-echo "    Set FOUNDATION_SEC_URL=http://localhost:8000 in .env"
+echo "  Browse a finished investigation now (no key, no evidence needed):"
+echo "    ./dashboard.sh                 # serves ~/cases on http://127.0.0.1:8765"
 echo ""
 echo "  Start a new case:"
 echo "    cp -r $TRUDI_DIR/case-template ~/cases/<CASE_ID>"
 echo "    # Edit ~/cases/<CASE_ID>/CLAUDE.md with evidence paths"
 echo "    cd ~/cases/<CASE_ID>"
 echo "    claude"
+echo ""
+echo "  Alternative reasoning backend — Foundation-Sec-8B (local vLLM, optional):"
+echo "    vllm serve \"fdtn-ai/Foundation-Sec-8B-Reasoning\" --reasoning-parser minimax_m2"
+echo "    then set REASON_BACKEND=openai-compat, REASON_URL=http://localhost:8000 in .env"
+echo ""
+echo "  Full walkthrough: docs/try-it-out.md"
 echo ""

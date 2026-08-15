@@ -38,7 +38,7 @@ class TestDairGateMiddleware:
         l.configure("MW-001", str(tmp_path / "trace.json"))
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            result, call_next = asyncio.get_event_loop().run_until_complete(
+            result, call_next = asyncio.run(
                 _run_middleware(mw, "dair_assess")
             )
         # call_next was invoked → tool ran
@@ -54,7 +54,7 @@ class TestDairGateMiddleware:
         l.configure("MW-002", str(tmp_path / "trace.json"))
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            result, call_next = asyncio.get_event_loop().run_until_complete(
+            result, call_next = asyncio.run(
                 _run_middleware(mw, "vol_vol_psscan")
             )
         assert call_next.await_count == 1
@@ -73,7 +73,7 @@ class TestDairGateMiddleware:
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
             with pytest.raises(ToolError, match="DAIR engaged earlier"):
-                asyncio.get_event_loop().run_until_complete(
+                asyncio.run(
                     _run_middleware(mw, "vol_vol_psscan")
                 )
 
@@ -85,7 +85,7 @@ class TestDairGateMiddleware:
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            result, call_next = asyncio.get_event_loop().run_until_complete(
+            result, call_next = asyncio.run(
                 _run_middleware(mw, "vol_vol_psscan")
             )
         assert call_next.await_count == 1

@@ -17,10 +17,10 @@ class TestIsEvidencePath:
         ("/cases/example/image.E01", True),
         ("/mnt/ewf_wkstn01/ewf1", True),
         ("/media/usb/image.dd", True),
-        ("/home/trin/cases/example/evidence/image.E01", True),
-        ("/home/trin/cases/example/exports/result.csv", False),
-        ("/home/trin/cases/example/analysis/data.json", False),
-        ("/home/trin/cases/example/reports/report.md", False),
+        ("/home/analyst/cases/example/evidence/image.E01", True),
+        ("/home/analyst/cases/example/exports/result.csv", False),
+        ("/home/analyst/cases/example/analysis/data.json", False),
+        ("/home/analyst/cases/example/reports/report.md", False),
         ("/tmp/scratch.bin", False),
     ])
     def test_paths(self, path, expected):
@@ -38,7 +38,7 @@ class TestAssertOutputSafe:
 
     def test_blocks_evidence_segment(self):
         with pytest.raises(ValueError, match="protected evidence"):
-            assert_output_safe("/home/trin/cases/example/evidence/out.csv")
+            assert_output_safe("/home/analyst/cases/example/evidence/out.csv")
 
     def test_allows_analysis(self, tmp_path):
         safe = str(tmp_path / "analysis" / "out.csv")

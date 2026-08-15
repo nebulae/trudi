@@ -149,7 +149,7 @@ def yara_scan_memory_image(
     Scan a full memory image (e.g. base-wkstn-01-memory.img) with YARA rules.
     Suitable for raw memory captures — not just per-process dumps.
     rules_path: path to a .yar file or directory of .yar/.yara files.
-    Use /home/trin/trudi/rules/ for the built-in TTP rule library.
+    Use ~/trudi/rules/ for the built-in TTP rule library.
     timeout: per-scan timeout in seconds (default 300 — full images are large).
     """
     try:

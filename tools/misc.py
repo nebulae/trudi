@@ -1038,7 +1038,7 @@ def clear_case_run(case_dir: str) -> dict:
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
-    case_dir: absolute path to the case directory e.g. /home/trin/cases/example-case
+    case_dir: absolute path to the case directory e.g. ~/cases/example-case
     """
     import shutil
     import glob
@@ -1113,7 +1113,7 @@ def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) ->
     """
     binary = _bin_or_warn("readpst")
     if not binary:
-        return {"success": False, "error": "readpst not installed — apt install libpst-utils"}
+        return {"success": False, "error": "readpst not installed — sudo apt install pst-utils"}
     os.makedirs(output_dir, exist_ok=True)
     cmd = [binary, "-o", output_dir]
     if not format_mbox:
@@ -1418,7 +1418,7 @@ def serve_dashboard(case_dir: str, port: int = 8765) -> dict:
     one via ~/.cache/trudi/dashboard.url and returns a URL with the case's
     trace pre-selected in the dropdown.
 
-    case_dir: absolute path of the case (e.g. /home/trin/cases/example-case).
+    case_dir: absolute path of the case (e.g. ~/cases/example-case).
               Must live under the dashboard's --cases-root.
     port: accepted for back-compat; the standalone owns its own port.
     """
