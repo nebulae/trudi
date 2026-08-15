@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: Registry Run Keys
+description: Registry Run and RunOnce keys used for automatic program execution at user logon or system
+  startup
+platform: windows
+locations:
+- path: NTUSER.DAT\Software\Microsoft\Windows\CurrentVersion\Run
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Per-user persistence; executes at user logon
+- path: NTUSER.DAT\Software\Microsoft\Windows\CurrentVersion\RunOnce
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Per-user; executes once at next logon then deleted
+- path: SOFTWARE\Microsoft\Windows\CurrentVersion\Run
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Machine-wide persistence (HKLM); executes for all users at logon
+- path: SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Machine-wide; executes once at next startup then deleted
+- path: SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Group policy-controlled Run key; less commonly checked
+- path: SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Run
+  os_versions:
+  - Windows 10
+  - Windows 11
+  notes: 32-bit application Run key on 64-bit systems
+proves:
+- A persistence mechanism exists or existed at the recorded path
+- The binary/command configured to run at startup or logon
+- When the registry value was last written (via key LastWriteTime)
+does_not_prove:
+- That the configured program was actually executed (system may have been offline, user may not have logged
+  on)
+- That the persistence mechanism is malicious (many legitimate applications use Run keys)
+- Who created the registry entry
+timestamps:
+- field: Registry Key LastWriteTime
+  meaning: Last time any value under the Run/RunOnce key was created, modified, or deleted
+  common_misinterpretation: This is the key-level timestamp, not per-value. Any change to any value under
+    the key updates this single timestamp.
+common_misinterpretations:
+- claim: Run key entries always execute
+  correction: Run key entries execute only when the relevant logon or startup event occurs. If the user
+    never logs on, HKCU Run entries never fire.
+- claim: RunOnce entries are always deleted after execution
+  correction: RunOnce entries are deleted after execution by default, but entries prefixed with '!' persist
+    across reboots until successful execution. Entries prefixed with '*' run even in Safe Mode.
+- claim: Checking HKLM and HKCU Run keys is sufficient
+  correction: There are numerous additional persistence locations including RunServices, RunServicesOnce,
+    Policies\Explorer\Run, and the Wow6432Node equivalents on 64-bit systems.
+- claim: Registry key LastWriteTime tells you when a specific value was added
+  correction: Registry LastWriteTime applies to the entire key, not individual values. Any modification
+    to any value under the key updates the timestamp. You cannot determine which value was changed.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - Security event logs (ez_evtxecmd)
+  - event_logs_sysmon
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - Security event logs (ez_evtxecmd)
+  - USN journal (tsk_indxparse)
+  - event_logs_sysmon
+trudi_tools:
+- ez_recmd_hive

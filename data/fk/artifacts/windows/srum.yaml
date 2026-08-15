@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: SRUM
+description: System Resource Usage Monitor database tracking application resource consumption over time
+platform: windows
+locations:
+- path: C:\Windows\System32\sru\SRUDB.dat
+  os_versions:
+  - Windows 8+
+  - Windows 10
+  - Windows 11
+  notes: ESE database; requires offline parsing or VSS copy. Registry backup at SOFTWARE\Microsoft\Windows
+    NT\CurrentVersion\SRUM\Extensions
+proves:
+- Application was executed and consumed system resources
+- Network data sent and received per application (bytes in/out)
+- Network connectivity profiles and durations
+- Application energy usage and CPU time
+- User SID associated with application resource usage
+does_not_prove:
+- Exact execution start or stop times (data is aggregated in hourly intervals)
+- What network destinations were contacted
+- What files were accessed by the application
+- Specific actions performed by the application
+timestamps:
+- field: TimeStamp
+  meaning: Start of the 1-hour aggregation interval during which the resource usage was recorded
+  common_misinterpretation: Often mistaken for exact execution time; it represents the beginning of the
+    hourly bucket
+common_misinterpretations:
+- claim: SRUM timestamps represent exact execution times
+  correction: SRUM aggregates data in approximately 1-hour intervals. Timestamps represent the start of
+    the interval, not precise execution times.
+- claim: SRUM only retains 30 days of data
+  correction: SRUM can retain 30-60+ days of data depending on system activity. The retention period is
+    configurable and may vary.
+- claim: SRUM network data shows destination IPs
+  correction: SRUM records total bytes sent/received per application and network interface, but does NOT
+    record destination addresses or URLs.
+- claim: SRUM data is lost on reboot
+  correction: SRUM persists data to SRUDB.dat (ESE database). In-memory data is flushed to disk periodically
+    and on clean shutdown.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - Prefetch (ez_pecmd)
+  - Security event logs (ez_evtxecmd)
+  - event_logs_sysmon
+trudi_tools:
+- ez_sqlecmd

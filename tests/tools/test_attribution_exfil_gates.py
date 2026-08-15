@@ -210,3 +210,25 @@ class TestExfilChannelGrounding:
         ctx = _ctx("data exfiltrated to cloud via Dropbox", tier="SUSPECTED",
                    supporting_evidence="file in sync folder")
         assert ecg.check(ctx) is None
+
+    def test_adjectival_exfil_reference_does_not_fire(self):
+        # A non-exfil finding (logon-session inventory) that only *time-anchors*
+        # to a prior exfil event via adjectival phrases ("the exfil email", "the
+        # exfil window") is not asserting a channel and must not be gated —
+        # even though its evidence is a logon record, not a transfer artifact.
+        ctx = _ctx(
+            "SAM places the Jean account active ~88 min before the exfil email; "
+            "no second principal during the exfil window.",
+            supporting_evidence="SAM samparse: Jean Last login 2008-07-20 00:00:41",
+        )
+        assert ecg.check(ctx) is None
+
+    def test_genuine_egress_with_reference_still_fires(self):
+        # A real egress predicate must still trigger even when a reference phrase
+        # is also present — stripping references must not defang the gate.
+        ctx = _ctx(
+            "The archive was uploaded to Dropbox cloud storage; the exfil window "
+            "spanned two hours.",
+            supporting_evidence="Dropbox.exe present in Program Files",
+        )
+        assert ecg.check(ctx) is not None

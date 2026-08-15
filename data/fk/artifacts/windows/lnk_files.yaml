@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: LNK Files
+description: Windows shortcut (LNK) files containing metadata about target files, including paths, timestamps,
+  and system information
+platform: windows
+locations:
+- path: C:\Users\{username}\AppData\Roaming\Microsoft\Windows\Recent
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Recent items folder; automatically created when files are opened
+- path: C:\Users\{username}\Desktop
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: User-created shortcuts
+- path: C:\Users\{username}\AppData\Roaming\Microsoft\Internet Explorer\Quick Launch
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Quick launch shortcuts
+- path: C:\ProgramData\Microsoft\Windows\Start Menu\Programs
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Start menu program shortcuts
+proves:
+- A file or resource at the target path was accessed or referenced
+- Target file timestamps at the time the LNK was created/modified
+- Volume name, serial number, and type where the target file resided
+- Target file size
+- MAC address of the host where the LNK was created (in some cases)
+- NetBIOS name of the host (when targeting network resources)
+does_not_prove:
+- The target file was executed (only that it was referenced)
+- The target file still exists
+- Who accessed the target file (LNK in user profile implies user, but can be created programmatically)
+timestamps:
+- field: LNK file creation time (filesystem)
+  meaning: First time the target file was accessed (creating this Recent LNK entry)
+  common_misinterpretation: This is the LNK file's creation, not the target file's creation
+- field: LNK file modification time (filesystem)
+  meaning: Last time the target file was accessed (updating this LNK entry)
+  common_misinterpretation: This updates when the LNK is refreshed, which may lag behind actual access
+- field: Target file creation time (embedded)
+  meaning: Creation timestamp of the target file as recorded in the LNK at the time of LNK creation/update
+  common_misinterpretation: This is a snapshot — the actual target file timestamps may have changed since
+- field: Target file modification time (embedded)
+  meaning: Modification timestamp of the target file as recorded in the LNK
+  common_misinterpretation: Snapshot value; may be stale compared to current target file
+common_misinterpretations:
+- claim: LNK files are only created by user double-clicks
+  correction: LNK files in the Recent folder are created automatically by the OS when files are opened
+    through any method — File > Open dialogs, application MRU lists, and programmatic access.
+- claim: LNK files always contain MAC addresses
+  correction: MAC address data is stored in the TrackerDatabaseBlock and is not always populated. It depends
+    on the Distributed Link Tracking service and whether the LNK was created on the local machine.
+- claim: Deleting a LNK file removes evidence of access
+  correction: LNK data may persist in Jump Lists, MFT entries (even after deletion), volume shadow copies,
+    and memory. LNK metadata may also be indexed by Windows Search.
+- claim: LNK target timestamps are always accurate
+  correction: LNK target timestamps are snapshots captured when the LNK was created or last updated. If
+    the target file was subsequently modified, the LNK contains stale data. This can also reveal timestomping
+    if LNK records original timestamps.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - UserAssist (vol_userassist / ez_recmd_hive)
+  - Jump lists (ez_jlecmd)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - USN journal (tsk_indxparse)
+  for_timeline:
+  - Jump lists (ez_jlecmd)
+  - Shellbags (ez_sbecmd)
+  - $MFT (ez_mftecmd)
+trudi_tools:
+- ez_lecmd

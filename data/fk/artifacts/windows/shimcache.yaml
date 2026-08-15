@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: ShimCache
+description: Application Compatibility Cache (AppCompatCache) stored in the SYSTEM registry hive
+platform: windows
+locations:
+- path: SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Data is written to registry on shutdown; live system data resides in kernel memory
+proves:
+- File existed on the system at the recorded path
+- File metadata was observed by the Application Compatibility subsystem
+- Order of insertion into the cache (positional, most recent first)
+does_not_prove:
+- File was executed (Windows 8+ removed the execution flag)
+- File was executed at any specific time
+- File still exists on the system
+timestamps:
+- field: LastModifiedTime
+  meaning: Last modification time of the file ($STANDARD_INFORMATION) when it was cached
+  common_misinterpretation: Often mistaken for execution time or cache insertion time
+common_misinterpretations:
+- claim: ShimCache entry means the program was executed
+  correction: On Windows 8+, ShimCache proves file existence only. The InsertFlag/ExecuteFlag was removed
+    in Windows 8. Even on Windows 7 and earlier, the execute flag simply means the OS noted it — not necessarily
+    full execution.
+- claim: The timestamp is when the program ran
+  correction: The timestamp reflects the file's last modification time from $STANDARD_INFORMATION, not
+    when it was cached or executed.
+- claim: ShimCache data is always up to date on a live system
+  correction: ShimCache writes to the registry only on clean shutdown. Live system cache resides in memory
+    and must be extracted with specialized tools.
+- claim: Absence from ShimCache means the file never existed
+  correction: ShimCache has a limited size (typically 1024 entries on Win10). Older entries are evicted.
+    Absence proves nothing.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - UserAssist (vol_userassist / ez_recmd_hive)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  - USN journal (tsk_indxparse)
+  for_timeline:
+  - Prefetch (ez_pecmd)
+  - Security event logs (ez_evtxecmd)
+trudi_tools:
+- ez_appcompatcacheparser

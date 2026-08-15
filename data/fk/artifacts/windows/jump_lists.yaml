@@ -1,0 +1,68 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: Jump Lists
+description: Windows Jump Lists tracking recently and frequently accessed files per application
+platform: windows
+locations:
+- path: C:\Users\{username}\AppData\Roaming\Microsoft\Windows\Recent\AutomaticDestinations
+  os_versions:
+  - Windows 7+
+  - Windows 10
+  - Windows 11
+  notes: Automatic Jump Lists maintained by the OS; filenames are AppID.automaticDestinations-ms
+- path: C:\Users\{username}\AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations
+  os_versions:
+  - Windows 7+
+  - Windows 10
+  - Windows 11
+  notes: Custom Jump Lists maintained by individual applications; filenames are AppID.customDestinations-ms
+proves:
+- A specific user accessed or opened a file through a specific application
+- Application usage by the user (via AppID mapping)
+- File path, timestamps, and volume information of accessed files
+- Network share paths and remote file access
+does_not_prove:
+- File content that was viewed or edited
+- How long the file was open
+- That the file still exists at the recorded path
+- That the user intentionally opened the file (some applications auto-populate)
+timestamps:
+- field: TargetCreated
+  meaning: Creation timestamp of the target file at the time the Jump List entry was recorded
+  common_misinterpretation: This is the target file's timestamp, not when the Jump List entry was created
+- field: TargetModified
+  meaning: Modification timestamp of the target file at the time the Jump List entry was recorded
+  common_misinterpretation: Reflects the file's state when accessed, not the Jump List entry time
+- field: TargetAccessed
+  meaning: Access timestamp of the target file
+  common_misinterpretation: May be stale if last access time updates are disabled
+common_misinterpretations:
+- claim: Jump Lists only track files opened by double-clicking
+  correction: Jump Lists track files opened through the application regardless of method — File > Open,
+    drag-and-drop, command line with file association, and recent file lists.
+- claim: Clearing recent documents removes all Jump List data
+  correction: Clearing recent documents from the UI may not fully clear the underlying Jump List files.
+    Residual data may remain in custom destinations or in free space within the OLE compound files.
+- claim: AppIDs are unique to each application
+  correction: AppIDs are based on the application path. The same application installed in different locations
+    generates different AppIDs. Known AppID mappings are available in reference databases.
+- claim: Jump Lists and LNK files contain the same information
+  correction: Jump Lists contain embedded LNK entries but provide additional context by grouping them
+    per application. The Jump List container itself has metadata not present in standalone LNK files.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - UserAssist (vol_userassist / ez_recmd_hive)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - LNK files (ez_lecmd)
+  - Shellbags (ez_sbecmd)
+  for_timeline:
+  - LNK files (ez_lecmd)
+  - USN journal (tsk_indxparse)
+  - Security event logs (ez_evtxecmd)
+trudi_tools:
+- ez_jlecmd

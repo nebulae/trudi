@@ -998,6 +998,7 @@ class ExecutionLog:
         conclusion: str,
         directives: dict,
         evidence_audit: list | None = None,
+        blockers: list | None = None,
         input_tokens: int = 0,
         output_tokens: int = 0,
         hypothesis_id: str = "",
@@ -1021,6 +1022,10 @@ class ExecutionLog:
             }
             if evidence_audit:
                 entry["evidence_audit"] = evidence_audit
+            if blockers is not None:
+                # Store even [] — an empty list is the structured "ready" signal
+                # that pre_report_check reads instead of scraping prose.
+                entry["blockers"] = list(blockers)
             if hypothesis_id:
                 entry["hypothesis_id"] = hypothesis_id
             if inputs:

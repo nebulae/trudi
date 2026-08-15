@@ -185,6 +185,36 @@ def _parse_directives(text: str) -> dict:
         return annotate_directives_with_manifest(_EMPTY_DIRECTIVES.copy())
 
 
+def _strip_blockers(text: str) -> str:
+    return _strip_block(text, "BLOCKERS")
+
+
+def _parse_blockers(text: str):
+    """Extract the structured BLOCKERS JSON array from synthesize output.
+
+    Returns list[str] of unresolved blockers ([] when ready), or None when no
+    canonical `BLOCKERS: [...]` array is present — so pre_report_check can fall
+    back to the legacy prose scan for older traces / malformed output.
+    """
+    if not text:
+        return None
+    match = re.search(
+        r"BLOCKERS\*{0,2}\s*:?\*{0,2}\s*(?:```json\s*)?(\[.*?\])\s*(?:```)?\s*(?:DIRECTIVES:|$)",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if not match:
+        return None
+    raw = re.sub(r"\s*//[^\n]*", "", match.group(1))
+    try:
+        result = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(result, list):
+        return None
+    return [str(b).strip() for b in result if str(b).strip()]
+
+
 def _cap_lines(text: str, max_lines: int) -> str:
     """Trim text to max_lines, appending a note if trimmed."""
     lines = text.splitlines(keepends=True)
@@ -238,7 +268,7 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str,
         raw = resp.content[0].text
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
-        conclusion = _strip_evidence_audit(_strip_directives(raw))
+        conclusion = _strip_blockers(_strip_evidence_audit(_strip_directives(raw)))
         result = {
             "success": True,
             "conclusion": conclusion,
@@ -248,6 +278,8 @@ def _ask_claude(system: str, user: str, max_tokens: int, _tool_name: str,
             "output_tokens": getattr(resp.usage, "output_tokens", 0),
             "inputs": _inputs,
         }
+        if _tool_name == "reason_synthesize":
+            result["blockers"] = _parse_blockers(raw)
         if hypothesis_id:
             result["hypothesis_id"] = hypothesis_id
         _log_reason(_tool_name, result, input_call_ids=input_call_ids)
@@ -322,7 +354,7 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str,
             return result
         evidence_audit = _parse_evidence_audit(raw)
         directives = _parse_directives(raw)
-        conclusion = _strip_evidence_audit(_strip_directives(raw))
+        conclusion = _strip_blockers(_strip_evidence_audit(_strip_directives(raw)))
         usage = body.get("usage", {})
         result = {
             "success": True,
@@ -333,6 +365,8 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int, _tool_name: str,
             "output_tokens": usage.get("completion_tokens", 0),
             "inputs": _inputs,
         }
+        if _tool_name == "reason_synthesize":
+            result["blockers"] = _parse_blockers(raw)
         if hypothesis_id:
             result["hypothesis_id"] = hypothesis_id
         _log_reason(_tool_name, result, input_call_ids=input_call_ids)
@@ -378,6 +412,7 @@ def _log_reason(tool_name: str, result: dict,
             conclusion=result.get("conclusion", ""),
             directives=result.get("directives", {}),
             evidence_audit=result.get("evidence_audit"),
+            blockers=result.get("blockers"),
             input_tokens=result.get("input_tokens", 0),
             output_tokens=result.get("output_tokens", 0),
             hypothesis_id=result.get("hypothesis_id", ""),
@@ -550,14 +585,16 @@ _SYNTHESIZE_SYS = (
     "unknown' or 'no evidence found' was reached without exhausting the artifact "
     "category. Flag as BLOCKER if found identities were never cross-referenced against "
     "a suspect list that was available in the case context.\n\n"
-    "Return a structured punch list. Mark BLOCKERS (must fix before report is "
-    "written) separately from ADVISORIES (should note, not blocking).\n\n"
-    "ALWAYS end your response with a single canonical line in EXACTLY this form, "
-    "on its own line:\n"
-    "  BLOCKERS: None        (when there are no blockers)\n"
-    "  BLOCKERS: <1-line summary of each blocker>   (when there are)\n"
-    "This line is machine-parsed. Do not use the word 'blocker' elsewhere to "
-    "describe a gap you are NOT blocking on — call those ADVISORIES."
+    "Return a structured punch list. Keep BLOCKERS (must fix before report is "
+    "written) separate from ADVISORIES (should note, not blocking).\n\n"
+    "Write your full analysis first, then — before the DIRECTIVES block — emit the "
+    "BLOCKERS block as a JSON array on its own line. This is machine-parsed and is "
+    "the SOLE source of truth for report-readiness:\n"
+    '  BLOCKERS: []                                  (when the report is ready)\n'
+    '  BLOCKERS: ["<1-line gap>", "<1-line gap>"]    (one string per must-fix blocker)\n'
+    "Put ADVISORIES (non-blocking notes) only in your prose, never in the array. "
+    "You may use the word 'blocker' freely in your prose — only the JSON array "
+    "affects the gate."
     + _DIRECTIVES_INSTRUCTION
 )
 
@@ -1373,40 +1410,50 @@ def reason_pre_report_check() -> dict:
     if not has_synthesize:
         issues.append("reason.synthesize was not called — mandatory before writing report")
 
-    latest_synthesize = ""
+    latest_synth = None
     for e in reversed(entries):
         if e.get("type") == "reason_call" and e.get("tool") == "reason_synthesize":
-            latest_synthesize = e.get("conclusion") or ""
+            latest_synth = e
             break
-    if latest_synthesize:
-        m = re.search(
-            r"(?:^|\n)\s*BLOCKERS?(?:\s*\([^)]*\))?\s*:\s*(.*?)(?=\n\s*[A-Z][A-Z _-]{2,}(?:\s*\([^)]*\))?\s*:|\Z)",
-            latest_synthesize,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if m:
-            blocker_text = m.group(1).strip()
-            if blocker_text and not re.fullmatch(
-                r"(?:none|no blockers?|n/a|not applicable|0)[.\s-]*",
-                blocker_text,
-                re.IGNORECASE,
-            ):
+    if latest_synth is not None:
+        structured = latest_synth.get("blockers")  # list | None (absent on legacy traces)
+        if structured is not None:
+            # Structured path: the JSON blockers array is the sole source of truth.
+            # No prose parsing, no negation windows — block iff the list is non-empty.
+            if structured:
                 issues.append(
-                    "Latest reason.synthesize still lists BLOCKERS. Resolve the "
-                    "blockers, run the requested tools or record why they are "
-                    "inapplicable, then re-run reason.synthesize before Report."
+                    "Latest reason.synthesize lists unresolved BLOCKERS: "
+                    + "; ".join(structured)
+                    + ". Resolve them (run the tools or record why they are "
+                    "inapplicable), then re-run reason.synthesize before Report."
                 )
-        elif _has_unnegated_blocker(latest_synthesize):
-            # No canonical "BLOCKERS:" header, but a non-negated "blocker"
-            # mention remains in the prose. A negated mention ("no blockers",
-            # "free of blockers", "0 blockers") is NOT a blocker and must pass —
-            # the old bare-word \bBLOCKER\b check false-positived on those.
-            issues.append(
-                "Latest reason.synthesize still labels one or more gaps as "
-                "BLOCKER. Return to Triage/Collect/Analyze as needed, run the "
-                "missing evidence work, then re-run reason.synthesize before "
-                "Report. Do not try to satisfy this by rewording findings."
+        else:
+            # Legacy fallback for pre-structured traces: parse the prose conclusion.
+            latest_synthesize = latest_synth.get("conclusion") or ""
+            m = re.search(
+                r"(?:^|\n)\s*BLOCKERS?(?:\s*\([^)]*\))?\s*:\s*(.*?)(?=\n\s*[A-Z][A-Z _-]{2,}(?:\s*\([^)]*\))?\s*:|\Z)",
+                latest_synthesize,
+                re.IGNORECASE | re.DOTALL,
             )
+            if m:
+                blocker_text = m.group(1).strip()
+                if blocker_text and not re.fullmatch(
+                    r"(?:none|no blockers?|n/a|not applicable|0)[.\s-]*",
+                    blocker_text,
+                    re.IGNORECASE,
+                ):
+                    issues.append(
+                        "Latest reason.synthesize still lists BLOCKERS. Resolve the "
+                        "blockers, run the requested tools or record why they are "
+                        "inapplicable, then re-run reason.synthesize before Report."
+                    )
+            elif _has_unnegated_blocker(latest_synthesize):
+                issues.append(
+                    "Latest reason.synthesize still labels one or more gaps as "
+                    "BLOCKER. Return to Triage/Collect/Analyze as needed, run the "
+                    "missing evidence work, then re-run reason.synthesize before "
+                    "Report. Do not try to satisfy this by rewording findings."
+                )
 
     # Case-question gate: if any reason.plan call carries an explicit case_question
     # (passed by the agent via the case_description), or if a CASE_QUESTION: marker

@@ -332,4 +332,32 @@ class NarrationMiddleware(Middleware):
 
         _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
                                 entries_before)
+
+        # 4. Forensic-knowledge enrichment — adds interpretive context to the
+        #    result (caveats, does_not_prove, field/exit-code meanings, generic
+        #    provenance + discipline tier). Additive only; never touches
+        #    success/data/_trudi_call_id. Fails open.
+        #    FastMCP wraps dict-returning tools in a ToolResult (content +
+        #    structured_content); enrich the structured dict and keep the text
+        #    content block in sync so the client sees it either way.
+        try:
+            from tools._enrich import enrich
+            if isinstance(result, dict):
+                result = enrich(tool_name, result)
+            else:
+                sc = getattr(result, "structured_content", None)
+                if isinstance(sc, dict):
+                    enriched = enrich(tool_name, dict(sc))
+                    update = {"structured_content": enriched}
+                    blocks = getattr(result, "content", None)
+                    if (isinstance(blocks, list) and len(blocks) == 1
+                            and getattr(blocks[0], "type", None) == "text"):
+                        import json as _json
+                        from mcp.types import TextContent
+                        update["content"] = [TextContent(type="text",
+                                                         text=_json.dumps(enriched))]
+                    result = result.model_copy(update=update)
+        except Exception:
+            pass
+
         return result
