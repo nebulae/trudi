@@ -40,6 +40,21 @@ _EGRESS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Adjectival / reference uses of an egress term ("the exfil email", "the
+# exfiltration window", "the egress path") name a PRIOR event; they are not an
+# egress assertion BY THIS finding. Stripped before the assert-check so a
+# finding that merely time-anchors to an exfil event — e.g. a logon-session
+# inventory "88 min before the exfil email" — does not trip the gate. A genuine
+# predicate ("was exfiltrated", "sent to X via email") is untouched: the egress
+# term there is not immediately followed by one of these reference nouns.
+_EGRESS_REFERENCE_RE = re.compile(
+    r"\b(?:exfil\w*|egress\w*|upload)[ -]"
+    r"(?:e-?mails?|messages?|windows?|times?|timestamps?|dates?|events?|"
+    r"threads?|attempts?|recipients?|channels?|activit\w+|paths?|vectors?|"
+    r"addresses?|artifacts?|sends?|senders?|folders?)\b",
+    re.IGNORECASE,
+)
+
 # Names a channel the egress used.
 _CHANNEL_RE = re.compile(
     r"\b(?:cloud\b|dropbox|onedrive|gdrive|google drive|mega\b|box\.com"
@@ -68,7 +83,10 @@ def check(ctx) -> Optional[dict]:
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
 
-    desc = ctx.description or ""
+    # Drop adjectival references to a prior exfil event before deciding whether
+    # THIS finding asserts egress (so an incidental "exfil email" time-anchor in
+    # a non-exfil finding does not trigger the channel-grounding requirement).
+    desc = _EGRESS_REFERENCE_RE.sub(" ", ctx.description or "")
     if not (_EGRESS_RE.search(desc) and _CHANNEL_RE.search(desc)):
         return None
 
