@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: Prefetch
+description: Windows Prefetch files that record application execution to optimize load times
+platform: windows
+locations:
+- path: C:\Windows\Prefetch\*.pf
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: May be disabled on some SSD-only systems (varies by OEM and Windows version); always check HKLM\SYSTEM\CurrentControlSet\Control\Session
+    Manager\Memory Management\PrefetchParameters\EnablePrefetcher
+proves:
+- Application was executed
+- Execution count (number of times run)
+- Files and directories referenced during first 10 seconds of execution
+- Volume information where the executable resided
+does_not_prove:
+- Who executed the program (no user attribution)
+- What the program did after loading
+- That the program completed successfully
+timestamps:
+- field: PF file creation time (filesystem)
+  meaning: First time the application was executed (approximately)
+  common_misinterpretation: Sometimes confused with last execution time
+- field: PF file modification time (filesystem)
+  meaning: Last time the application was executed
+  common_misinterpretation: Rarely misinterpreted but may reflect OS prefetch service update timing
+- field: Last run timestamps (embedded, up to 8)
+  meaning: Up to 8 most recent execution timestamps (Windows 8+ only)
+  common_misinterpretation: Only the most recent is stored in pre-Win8 systems; analysts sometimes miss
+    the additional 7
+common_misinterpretations:
+- claim: Prefetch is always enabled on Windows 10/11
+  correction: Prefetch may be disabled on SSD-only systems or via group policy. Always verify EnablePrefetcher
+    registry value.
+- claim: The prefetch file name hash uniquely identifies the executable
+  correction: The hash incorporates the executable path and command-line hosting information. The same
+    binary run from different paths generates different .pf files.
+- claim: Prefetch proves the user who ran the program
+  correction: Prefetch has no user attribution. Corroborate with UserAssist, BAM, or Security event logs
+    for user context.
+- claim: 128 prefetch file limit means old data is always lost
+  correction: Windows 8+ raised the limit to 1024 .pf files. Windows 7 and earlier had a 128 file limit.
+corroborate_with:
+  for_execution:
+  - Amcache (ez_amcacheparser / vol_amcache)
+  - UserAssist (vol_userassist / ez_recmd_hive)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - USN journal (tsk_indxparse)
+  - Security event logs (ez_evtxecmd)
+  - SRUM (ez_sqlecmd)
+trudi_tools:
+- ez_pecmd

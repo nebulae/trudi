@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: MFT
+description: NTFS Master File Table containing metadata for every file and directory on an NTFS volume
+platform: windows
+locations:
+- path: $MFT (root of each NTFS volume)
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Located at the root of every NTFS volume; not directly accessible via normal file system APIs
+    on a live system
+proves:
+- File or directory existed on the volume
+- File size (both logical and physical allocation)
+- File timestamps (creation, modification, access, entry modification)
+- Parent directory relationship
+- Whether file is resident (small files stored directly in MFT) or non-resident
+- Alternate data streams exist
+does_not_prove:
+- File was executed
+- Who created or modified the file
+- File content (unless resident and MFT entry is intact)
+- That timestamps are accurate (SI timestamps can be modified by user-mode APIs)
+timestamps:
+- field: $STANDARD_INFORMATION Created
+  meaning: File creation time as recorded in $STANDARD_INFORMATION attribute
+  common_misinterpretation: Can be modified (timestomped) by user-mode applications via SetFileTime API
+- field: $STANDARD_INFORMATION Modified
+  meaning: Last data modification time in $STANDARD_INFORMATION
+  common_misinterpretation: Can be timestomped; does not distinguish between content types modified
+- field: $STANDARD_INFORMATION Accessed
+  meaning: Last access time in $STANDARD_INFORMATION
+  common_misinterpretation: Disabled by default since Vista (NtfsDisableLastAccessUpdate); often shows
+    creation time
+- field: $STANDARD_INFORMATION Entry Modified
+  meaning: Last time the MFT entry metadata was changed
+  common_misinterpretation: Can be timestomped; not the same as file content modification
+- field: $FILE_NAME Created
+  meaning: File creation time in $FILE_NAME attribute
+  common_misinterpretation: Cannot be modified by standard user-mode APIs — reliable for detecting timestomping
+- field: $FILE_NAME Modified
+  meaning: Last modification time in $FILE_NAME attribute
+  common_misinterpretation: Updated only on file rename/move operations, not on content changes
+common_misinterpretations:
+- claim: File timestamps in the MFT are always reliable
+  correction: $STANDARD_INFORMATION timestamps can be trivially modified via SetFileTime (timestomping).
+    Compare with $FILE_NAME timestamps to detect tampering.
+- claim: $FILE_NAME timestamps always match $STANDARD_INFORMATION timestamps
+  correction: FN timestamps are set at file creation and updated only on rename/move. Legitimate divergence
+    is normal. SI timestamps earlier than FN timestamps strongly suggest timestomping.
+- claim: Deleted file MFT entries are immediately overwritten
+  correction: MFT entries for deleted files are marked as free but may persist for extended periods until
+    the entry is reallocated to a new file.
+- claim: Last access time is always updated
+  correction: Since Windows Vista, NtfsDisableLastAccessUpdate is enabled by default. The last access
+    timestamp is frequently stale.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  for_presence:
+  - Shimcache (ez_appcompatcacheparser)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  - USN journal (tsk_indxparse)
+  for_timeline:
+  - USN journal (tsk_indxparse)
+  - Security event logs (ez_evtxecmd)
+  - Prefetch (ez_pecmd)
+trudi_tools:
+- ez_mftecmd
+- ez_mftecmd_dir

@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: USN Journal
+description: NTFS Update Sequence Number Journal recording file system change events
+platform: windows
+locations:
+- path: $Extend\$UsnJrnl:$J (on each NTFS volume)
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Sparse file; $J is the journal data stream, $Max contains metadata about journal configuration
+proves:
+- File system operations occurred (create, delete, rename, data change, etc.)
+- Sequence of file system changes over time
+- File and parent directory MFT reference numbers
+- Reason flags indicating the type of change
+does_not_prove:
+- Who performed the file system operation
+- What process caused the change
+- The content of files that were created or modified
+- That a file was executed
+timestamps:
+- field: Timestamp
+  meaning: Time the file system change event was recorded
+  common_misinterpretation: This is the journal entry time, which is highly reliable and resistant to
+    user-mode tampering
+common_misinterpretations:
+- claim: The USN Journal keeps a complete history of all file changes
+  correction: The USN Journal has a configurable maximum size. When full, oldest entries are overwritten.
+    Retention depends on volume activity — could be days to weeks.
+- claim: USN Journal entries survive volume formatting
+  correction: Formatting the volume destroys the USN Journal. It is only preserved through proper forensic
+    imaging.
+- claim: The USN Journal records file content changes
+  correction: The USN Journal records that a change occurred and what type (DATA_EXTEND, DATA_TRUNCATION,
+    etc.) but not the actual content that changed.
+- claim: File deletion in the USN Journal means the file is unrecoverable
+  correction: The USN Journal records the deletion event, but file content may still be recoverable from
+    unallocated space or the MFT entry.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - $MFT (ez_mftecmd)
+  - Security event logs (ez_evtxecmd)
+  - event_logs_sysmon
+trudi_tools:
+- tsk_indxparse

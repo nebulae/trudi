@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: Recycle Bin
+description: Windows Recycle Bin containing deleted files with original path and deletion timestamp metadata
+platform: windows
+locations:
+- path: C:\$Recycle.Bin\{SID}
+  os_versions:
+  - Windows Vista+
+  - Windows 10
+  - Windows 11
+  notes: Each user SID has a subfolder. $I files contain metadata, $R files contain actual file data.
+- path: C:\RECYCLER\{SID}
+  os_versions:
+  - Windows XP
+  notes: Legacy Recycle Bin location; uses INFO2 file for metadata
+proves:
+- A file was deleted by a specific user (identified by SID in path)
+- Original file path before deletion
+- Exact time of deletion
+- Original file size
+- File content (if $R file is intact)
+does_not_prove:
+- Why the file was deleted
+- Who or what triggered the deletion (user action vs. application vs. script)
+- That the file was malicious or benign
+- That the file was permanently destroyed (may have been restored)
+timestamps:
+- field: $I file deletion timestamp
+  meaning: Exact time the file was moved to the Recycle Bin
+  common_misinterpretation: This is the deletion time, not the file's original creation or modification
+    time
+- field: $R file filesystem timestamps
+  meaning: Original file timestamps are preserved on the $R file
+  common_misinterpretation: These reflect the original file's timestamps, not the deletion event
+common_misinterpretations:
+- claim: Emptying the Recycle Bin permanently destroys the data
+  correction: Emptying removes the $I and $R files, but the data may remain in unallocated space until
+    overwritten. File carving can potentially recover emptied files.
+- claim: Files deleted via command line go to the Recycle Bin
+  correction: Files deleted via 'del' or 'rm' at the command line bypass the Recycle Bin entirely. Only
+    deletions through Windows Explorer (or APIs using SHFileOperation with FOF_ALLOWUNDO) use the Recycle
+    Bin.
+- claim: All deleted files appear in the Recycle Bin
+  correction: Files deleted via Shift+Delete, command line, scripts, or files exceeding the Recycle Bin
+    size limit bypass the Recycle Bin. Files on network shares also bypass it.
+- claim: The $I and $R file names are random
+  correction: The $I and $R files share the same generated identifier. $I contains metadata (original
+    path, deletion time, size); $R contains the actual file data with the original filename as extension
+    context.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - USN journal (tsk_indxparse)
+  for_timeline:
+  - USN journal (tsk_indxparse)
+  - $MFT (ez_mftecmd)
+  - event_logs_sysmon
+trudi_tools:
+- ez_rbcmd

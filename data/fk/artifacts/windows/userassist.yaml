@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: UserAssist
+description: UserAssist registry keys tracking GUI-based program execution per user
+platform: windows
+locations:
+- path: NTUSER.DAT\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist
+  os_versions:
+  - Windows XP+
+  - Windows 10
+  - Windows 11
+  notes: Per-user artifact in each user's NTUSER.DAT hive; values are ROT13 encoded
+proves:
+- Application was executed via Windows Explorer GUI by a specific user
+- Number of times the application was launched by that user
+- Last execution time for that user
+- Focus time and focus count for the application
+does_not_prove:
+- Execution via command line, scheduled task, or service
+- That the application ran successfully or to completion
+- What the application did during execution
+timestamps:
+- field: LastExecutionTime
+  meaning: Last time the user launched this application via the GUI
+  common_misinterpretation: Rarely misinterpreted, but analysts sometimes forget this is GUI-only
+common_misinterpretations:
+- claim: UserAssist captures all program execution
+  correction: UserAssist only records programs launched through Windows Explorer (GUI). Command-line execution,
+    services, and scheduled tasks are not recorded.
+- claim: The encoded values are encrypted
+  correction: UserAssist values use ROT13 encoding, which is trivial obfuscation, not encryption. Any
+    forensic tool will decode automatically.
+- claim: Run count of 0 means the program was never run
+  correction: A run count of 0 with a valid timestamp can indicate the entry exists but the count was
+    reset or the program was run once and the counter starts at 0 in some OS versions.
+- claim: Absence from UserAssist means the user never ran the program
+  correction: The program may have been run via command line, script, or other non-GUI method. UserAssist
+    only tracks Explorer-based launches.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - Prefetch (ez_pecmd)
+  - Security event logs (ez_evtxecmd)
+  - SRUM (ez_sqlecmd)
+trudi_tools:
+- vol_userassist
+- ez_recmd_hive

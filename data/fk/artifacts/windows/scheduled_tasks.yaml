@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: Scheduled Tasks
+description: Windows Task Scheduler task definitions stored as XML files and registry entries, recording
+  configured actions, triggers, and security contexts
+platform: windows
+locations:
+- path: C:\Windows\System32\Tasks\
+  os_versions:
+  - Windows Vista+
+  - Windows 10
+  - Windows 11
+  notes: XML files containing full task definitions including actions, triggers, and principals. Subdirectories
+    organize tasks by publisher.
+- path: HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tasks\
+  os_versions:
+  - Windows Vista+
+  - Windows 10
+  - Windows 11
+  notes: Registry cache of task metadata including task GUID, path, and hash. Tasks may exist in registry
+    even after XML file deletion.
+- path: HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\
+  os_versions:
+  - Windows Vista+
+  - Windows 10
+  - Windows 11
+  notes: Registry tree structure mapping task paths to GUIDs
+proves:
+- Scheduled tasks are configured on the system
+- Actions the task will execute (executable path, arguments, working directory)
+- Trigger conditions (time-based, event-based, logon-based)
+- Security context (user account and privilege level for execution)
+- Task creation and modification timestamps
+does_not_prove:
+- That the task has actually executed (check Task Scheduler event logs for execution evidence)
+- Who created the task (Security event log 4698 required for user attribution)
+- That a task is malicious based solely on its presence
+timestamps:
+- field: Task XML Date element
+  meaning: Registration date of the task as recorded in the XML definition
+  common_misinterpretation: This timestamp can be modified by editing the XML file directly — not a reliable
+    sole indicator of creation time
+- field: Task file MFT timestamps
+  meaning: File system timestamps of the task XML file
+  common_misinterpretation: File timestamps may not match actual task creation time if the file was copied
+    or restored
+common_misinterpretations:
+- claim: All scheduled tasks are visible in Task Scheduler GUI
+  correction: Tasks can be hidden by setting the Hidden attribute in the XML. Additionally, some persistence
+    mechanisms create 'taskless' entries in the TaskCache registry that lack corresponding XML files.
+- claim: Deleting the task XML file removes the scheduled task
+  correction: Task metadata persists in the TaskCache registry. A task may continue to function or leave
+    forensic traces in the registry after the XML file is removed.
+- claim: Scheduled tasks only run executables
+  correction: Task actions can include COM handlers, email sending (deprecated), and message display (deprecated)
+    in addition to executable launch. COM handler tasks are a particularly stealthy persistence mechanism.
+- claim: Tasks in the Microsoft\Windows\ path are always legitimate
+  correction: Attackers frequently create tasks under Microsoft\Windows\ subfolders to blend in with legitimate
+    system tasks. Verify against the Windows baseline.
+corroborate_with:
+  for_execution:
+  - event_logs_task_scheduler
+  - Security event logs (ez_evtxecmd)
+  - Prefetch (ez_pecmd)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - USN journal (tsk_indxparse)
+  - registry_services
+  for_timeline:
+  - event_logs_task_scheduler
+  - Security event logs (ez_evtxecmd)
+trudi_tools:
+- ez_evtxecmd

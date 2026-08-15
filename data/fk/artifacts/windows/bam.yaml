@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: BAM
+description: Background Activity Moderator tracking application execution with user SID attribution
+platform: windows
+locations:
+- path: SYSTEM\CurrentControlSet\Services\bam\State\UserSettings\{SID}
+  os_versions:
+  - Windows 10 1709+
+  - Windows 11
+  notes: Replaced by DAM (Desktop Activity Moderator) key on some builds; check both bam and dam paths
+proves:
+- Application was executed
+- Which user (SID) executed the application
+- Full path of the executed binary
+- Last execution timestamp for that user/binary combination
+does_not_prove:
+- How many times the application was executed
+- How long the application ran
+- What the application did during execution
+- That the application completed successfully
+timestamps:
+- field: ExecutionTime
+  meaning: Last time the executable was run by the specified user SID
+  common_misinterpretation: This is the last execution only — no history of prior runs is maintained
+common_misinterpretations:
+- claim: BAM records persist indefinitely
+  correction: BAM entries are typically cleared after approximately 7 days of inactivity or on reboot
+    in some configurations. Do not assume historical completeness.
+- claim: BAM captures all execution
+  correction: BAM captures foreground and background execution but may miss very short-lived processes
+    or processes that terminate immediately.
+- claim: BAM is available on all Windows 10 systems
+  correction: BAM was introduced in Windows 10 version 1709 (Fall Creators Update). Earlier Windows 10
+    builds do not have this artifact.
+- claim: DAM and BAM are the same thing
+  correction: DAM (Desktop Activity Moderator) replaced BAM in some builds. Check both SYSTEM\CurrentControlSet\Services\bam
+    and dam paths.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - UserAssist (vol_userassist / ez_recmd_hive)
+  - Amcache (ez_amcacheparser / vol_amcache)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - Prefetch (ez_pecmd)
+  - Security event logs (ez_evtxecmd)
+  - SRUM (ez_sqlecmd)
+trudi_tools:
+- ez_recmd_hive

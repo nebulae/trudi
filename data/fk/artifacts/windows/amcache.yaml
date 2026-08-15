@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: MIT
+# Derived-From: AppliedIR forensic-knowledge @ c67a860 (Copyright (c) 2026 AppliedIncidentResponse.com)
+# Modifications: stripped Valhuntir platform-wiring fields; corroboration retargeted to TRUDI tools.
+# See ATTRIBUTION.md and THIRD_PARTY/forensic-knowledge/LICENSE.
+name: Amcache
+description: Windows application compatibility cache in Amcache.hve
+platform: windows
+locations:
+- path: C:\Windows\AppCompat\Programs\Amcache.hve
+  os_versions:
+  - Windows 8+
+  - Windows 10
+  - Windows 11
+proves:
+- File was present on the system
+- SHA1 hash of the file at time of metadata recording
+does_not_prove:
+- File was executed
+- File was executed at the recorded timestamp
+timestamps:
+- field: FileKeyLastWriteTimestamp
+  meaning: When the Amcache registry key was last modified
+  common_misinterpretation: Often mistaken for execution time
+common_misinterpretations:
+- claim: This program was executed based on Amcache
+  correction: Amcache proves presence, not execution. Corroborate with Prefetch, UserAssist, or BAM.
+corroborate_with:
+  for_execution:
+  - Prefetch (ez_pecmd)
+  - UserAssist (vol_userassist / ez_recmd_hive)
+  - BAM (ez_recmd_hive / misc_regripper_hive)
+  for_presence:
+  - $MFT (ez_mftecmd)
+  - Shimcache (ez_appcompatcacheparser)
+  for_timeline:
+  - USN journal (tsk_indxparse)
+  - event_logs
+trudi_tools:
+- ez_amcacheparser
+- vol_amcache
