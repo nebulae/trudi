@@ -134,7 +134,8 @@ def test_agents_md_installed_with_backup(tmp_path):
     m = _mod()
     msgs = m.install_agents_md(tmp_path, REPO)
     dest = tmp_path / "AGENTS.md"
-    assert dest.read_text() == (REPO / "claude" / "CLAUDE.md").read_text()
+    # OpenCode gets the CONDENSED orchestrator, not the full CLAUDE.md
+    assert dest.read_text() == (REPO / "opencode" / "AGENTS.md").read_text()
     assert any("installed TRUDI orchestrator" in x for x in msgs)
     # unchanged → no-op
     assert m.install_agents_md(tmp_path, REPO) == [
@@ -144,4 +145,33 @@ def test_agents_md_installed_with_backup(tmp_path):
     msgs = m.install_agents_md(tmp_path, REPO)
     baks = list(tmp_path.glob("AGENTS.md.*.bak"))
     assert len(baks) == 1 and baks[0].read_text() == "user edits"
-    assert dest.read_text() == (REPO / "claude" / "CLAUDE.md").read_text()
+    assert dest.read_text() == (REPO / "opencode" / "AGENTS.md").read_text()
+
+
+def test_condensed_orchestrator_stays_on_budget():
+    """OpenCode renders AGENTS.md into every request — keep it ~8k tokens.
+    Bar at 36KB chars (~9k tokens) so growth is caught before it re-bloats
+    local-model context windows."""
+    size = len((REPO / "opencode" / "AGENTS.md").read_text())
+    assert size < 36_000, f"condensed orchestrator grew to {size} chars"
+
+
+def test_condensed_orchestrator_keeps_load_bearing_contracts():
+    s = (REPO / "opencode" / "AGENTS.md").read_text()
+    for token in (
+        # typed-claim fields and enums the agent must produce
+        "claim_kind", "linked_call_id", "input_call_ids",
+        "session_binding_call_ids", "transfer_call_ids",
+        "tested_hypothesis_id",
+        # workflow anchors
+        "start_execution_log", "dair_assess", "reason.hypothesize",
+        "reason.evaluate_finding", "pre_report_check", "record_disposition",
+        "record_curiosity_probe", "knowns_pattern_generate",
+        "device_install_inventory", "read.read_mail",
+        # gates named so refusals are recognizable
+        "mcp_routing", "tier_contract", "negative_completeness",
+        "interactive_injection_grounding",
+        # the two OpenCode-critical behavior rules
+        "ONLY through the tool-calling interface", "Run fully autonomously",
+    ):
+        assert token in s, f"condensed orchestrator lost: {token}"

@@ -168,9 +168,17 @@ def link_assets(opencode_dir: Path, repo_root: Path) -> list[str]:
 
 
 def install_agents_md(opencode_dir: Path, repo_root: Path) -> list[str]:
-    """Install the orchestrator as AGENTS.md (backup any existing file)."""
+    """Install the orchestrator as AGENTS.md (backup any existing file).
+
+    Prefers the condensed OpenCode orchestrator (opencode/AGENTS.md, ~8k
+    tokens) — OpenCode renders the whole file into every request, and on a
+    local model's context the full ~17k-token orchestrator left too little
+    working room (compaction churn → stalls). Falls back to claude/CLAUDE.md
+    if the condensed variant is absent."""
     opencode_dir = Path(opencode_dir)
-    src = Path(repo_root) / "claude" / "CLAUDE.md"
+    src = Path(repo_root) / "opencode" / "AGENTS.md"
+    if not src.exists():
+        src = Path(repo_root) / "claude" / "CLAUDE.md"
     dest = opencode_dir / "AGENTS.md"
     msgs: list[str] = []
     if dest.exists():
