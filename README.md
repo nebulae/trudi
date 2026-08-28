@@ -465,6 +465,12 @@ while `REASON_BACKEND` / `DAIR_BACKEND` already run on local models — no cloud
 dependency anywhere in the loop. The server-side control plane (typed claims, tiering,
 gates, DAIR) is client-agnostic and identical under both agents.
 
+**Local provider config — declare the context limit.** OpenCode cannot see a
+custom OpenAI-compatible server's context size; without it, it never compacts
+proactively and every long turn slams into the server's wall ("request exceeds
+the available context size") before recovering reactively. In the provider's
+model entry set `"limit": {"context": <your llama-server -c value>, "output": 8192}`.
+
 Known limits: assistant-narration copying into the trace reads the Claude Code
 transcript and is skipped under OpenCode (tool calls, user messages, and the Stop
 audit still land in the trace); the OpenCode plugin API moves quickly — the adapter
