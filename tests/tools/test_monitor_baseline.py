@@ -83,3 +83,30 @@ class TestBaselinePersistenceSnapshot:
         r = monitor_mod.baseline_capture("C.deadbeef", "DEMO-TEST")
         assert r["success"] is False
         assert monitor_mod.PERSISTENCE_SNAPSHOT_ARTIFACT in r["error"]
+
+
+class TestStartInvestigationScope:
+    """start_investigation is restricted to baselined live-monitoring cases —
+    the same scope check as respond.* — so a static case can neither hijack
+    the active trace nor exempt itself from the full-DAIR-cycle requirement."""
+
+    def test_refused_without_baselines(self, tmp_path, monkeypatch):
+        import response.gates as G
+        from tools.monitor import start_investigation
+        monkeypatch.setattr(G, "CASES_ROOT", tmp_path, raising=False)
+        fn = getattr(start_investigation, "fn", start_investigation)
+        r = fn("STATIC-CASE", "INV-001", ["A-1"])
+        assert r["success"] is False and r["gate"] == "live_monitoring_scope"
+
+    def test_allowed_with_baselines(self, tmp_path, monkeypatch):
+        import response.gates as G
+        import tools.monitor as M
+        monkeypatch.setattr(G, "CASES_ROOT", tmp_path, raising=False)
+        monkeypatch.setattr(M, "CASES_ROOT", tmp_path, raising=False)
+        base = tmp_path / "LIVE-CASE" / "monitoring" / "baselines"
+        base.mkdir(parents=True)
+        (base / "C.x.json").write_text("{}")
+        fn = getattr(M.start_investigation, "fn", M.start_investigation)
+        r = fn("LIVE-CASE", "INV-001", ["A-1"])
+        # scope passes; whatever else happens, the refusal is not scope
+        assert r.get("gate") != "live_monitoring_scope"
