@@ -126,6 +126,10 @@
   .pill.narration { background: rgba(138,147,166,.10); color: var(--fg-dim); }
   .pill.error { background: rgba(255,107,107,.15); color: var(--error); }
   .pill.ok { background: rgba(74,210,149,.15); color: var(--ok); }
+  .pill.refused { background: rgba(255,107,107,.22); color: var(--error); }
+  .pill.blocked { background: rgba(255,168,107,.18); color: var(--finding-likely); }
+  .pill.fetch { background: rgba(94,209,209,.12); color: var(--curiosity); }
+  .pill.disposition { background: rgba(180,140,255,.12); color: var(--dair); }
 
   /* Entries list */
   .entry {
@@ -267,6 +271,10 @@
       <label><input type="checkbox" class="type-filter" value="call_initiated"><span class="pill narration">init</span><span class="count" data-count="call_initiated">0</span></label>
       <label><input type="checkbox" class="type-filter" value="call_abandoned" checked><span class="pill error">abort</span><span class="count" data-count="call_abandoned">0</span></label>
       <label><input type="checkbox" class="type-filter" value="system_error" checked><span class="pill error">SYS</span><span class="count" data-count="system_error">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="finding_refused" checked><span class="pill refused">⛔ REFUSED</span><span class="count" data-count="finding_refused">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="tool_blocked" checked><span class="pill blocked">⛔ BLOCKED</span><span class="count" data-count="tool_blocked">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="disposition" checked><span class="pill disposition">📌 DISP</span><span class="count" data-count="disposition">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="reason_evidence_fetch"><span class="pill fetch">🔎 FETCH</span><span class="count" data-count="reason_evidence_fetch">0</span></label>
     </div>
 
     <div class="filter-group">
@@ -580,6 +588,39 @@ function entrySummary(e) {
         line: `<code>[${escapeHtml(e.category || 'unknown')}]</code> ${escapeHtml(shorten(e.detail || '', 120))}`,
         meta: '',
       };
+    case 'finding_refused': {
+      const gate = e.detail_gate || e.gate || '';
+      return {
+        pill: '<span class="pill refused">⛔ REFUSED</span>',
+        line: `<code>[${escapeHtml((e.tier || '').toUpperCase())}]</code> <code>${escapeHtml(gate)}</code> ${escapeHtml(shorten(e.description || '', 100))}`,
+        meta: e.claim && e.claim.act ? `act=${escapeHtml(e.claim.act)}` : '',
+      };
+    }
+    case 'tool_blocked':
+      return {
+        pill: '<span class="pill blocked">⛔ BLOCKED</span>',
+        line: `<code>${escapeHtml(e.tool || '')}</code>`,
+        meta: escapeHtml(shorten(e.reason || '', 100)),
+      };
+    case 'disposition': {
+      const ev = Array.isArray(e.evidence_call_ids) ? e.evidence_call_ids : [];
+      const chips = ev.slice(0, 5).map(c => _linkChip(c, `→ #${c}`)).join('');
+      return {
+        pill: '<span class="pill disposition">📌 DISP</span>',
+        line: `<code>${escapeHtml(e.target_kind || '')}</code> ${escapeHtml(e.target_id || '')} → <b>${escapeHtml(e.reason || '')}</b>`,
+        meta: chips + (e.note ? ' ' + escapeHtml(shorten(e.note, 80)) : ''),
+      };
+    }
+    case 'reason_evidence_fetch': {
+      const reqs = Array.isArray(e.requests) ? e.requests : [];
+      const rows = reqs.reduce((n, r) => n + (r.rows_returned || 0), 0);
+      const chip = e.reason_call_id ? _linkChip(e.reason_call_id, `→ #${e.reason_call_id}`) : '';
+      return {
+        pill: '<span class="pill fetch">🔎 FETCH</span>',
+        line: `${reqs.length} request${reqs.length === 1 ? '' : 's'} · ${rows} rows · ${escapeHtml(reqs.map(r => `#${r.call_id} '${shorten(r.query || '', 30)}'${r.status && r.status !== 'ok' ? ' [' + r.status + ']' : ''}`).join('; '))}`,
+        meta: chip,
+      };
+    }
     default:
       return {
         pill: '<span class="pill">?</span>',
@@ -715,6 +756,10 @@ function renderDetail(e) {
     case 'call_initiated':
     case 'call_abandoned': body = renderInit(e); break;
     case 'system_error': body = renderSystemError(e); break;
+    case 'finding_refused': body = renderFindingRefused(e); break;
+    case 'tool_blocked': body = renderToolBlocked(e); break;
+    case 'disposition': body = renderDisposition(e); break;
+    case 'reason_evidence_fetch': body = renderEvidenceFetch(e); break;
     default: body = `<pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
   }
   $('#detail').innerHTML = head + body;
@@ -740,10 +785,62 @@ function renderToolCall(e) {
       <span class="k">retries</span><span class="v">${e.retries || 0}</span>
       ${e.protocol_violation ? `<span class="k">protocol</span><span class="v"><span class="pill error">${escapeHtml(e.protocol_violation)}</span></span>` : ''}
       ${e.truncated ? `<span class="k">truncated</span><span class="v">true</span>` : ''}
+      ${e.gate ? `<span class="k">gate</span><span class="v"><span class="pill refused">${escapeHtml(e.gate)}</span></span>` : ''}
+      ${e.exit_meaning ? `<span class="k">exit meaning</span><span class="v">${escapeHtml(e.exit_meaning)}</span></span>` : ''}
+      ${e.output_path ? `<span class="k">output_path</span><span class="v"><code>${escapeHtml(e.output_path)}</code></span>` : ''}
+      ${e.stdout_chars !== undefined ? `<span class="k">stdout</span><span class="v">${e.stdout_chars} chars${e.stdout_path ? ` · sidecar <code>${escapeHtml(e.stdout_path)}</code>${e.stdout_partial ? ' (PARTIAL)' : ''}` : (e.stdout_excerpt && e.stdout_chars > e.stdout_excerpt.length ? ' · <span class="pill error">PARTIAL — only the excerpt is stored</span>' : ' · complete')}</span>` : ''}
+      ${e.session_artifact ? `<span class="k">session artifact</span><span class="v">yes${Array.isArray(e.session_event_ids) ? ' (' + e.session_event_ids.join(', ') + ')' : ''}</span>` : ''}
     </div>
     ${e.stdout_excerpt ? `<h3>stdout excerpt</h3><pre>${escapeHtml(e.stdout_excerpt)}</pre>` : ''}
     ${e.stderr ? `<h3>stderr</h3><pre>${escapeHtml(e.stderr)}</pre>` : ''}
     ${_findingsLinkedHere(e.call_id)}
+  `;
+}
+
+function renderFindingRefused(e) {
+  const c = e.claim || {};
+  return `
+    <div class="kv">
+      <span class="k">tier</span><span class="v">${escapeHtml((e.tier || '').toUpperCase())}</span>
+      <span class="k">gate</span><span class="v"><span class="pill refused">${escapeHtml(e.detail_gate || e.gate || '')}</span></span>
+      ${e.tested_hypothesis_id ? `<span class="k">hypothesis</span><span class="v"><code>${escapeHtml(e.tested_hypothesis_id)}</code></span>` : ''}
+      ${c.act ? `<span class="k">claim</span><span class="v"><code>${escapeHtml([c.kind, c.category, c.act].filter(Boolean).join('|'))}</code></span>` : ''}
+      ${Array.isArray(e.cited_call_ids) && e.cited_call_ids.length ? `<span class="k">cited</span><span class="v">${e.cited_call_ids.slice(0, 10).map(x => _linkChip(x, `→ #${x}`)).join('')}</span>` : ''}
+    </div>
+    <h3>description</h3><pre>${escapeHtml(e.description || '')}</pre>
+    ${e.extra ? `<h3>extra</h3><pre>${escapeHtml(JSON.stringify(e.extra, null, 2))}</pre>` : ''}
+  `;
+}
+
+function renderToolBlocked(e) {
+  return `
+    <div class="kv">
+      <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool || '')}</code></span>
+      <span class="k">reason</span><span class="v">${escapeHtml(e.reason || '')}</span>
+    </div>
+  `;
+}
+
+function renderDisposition(e) {
+  const ev = Array.isArray(e.evidence_call_ids) ? e.evidence_call_ids : [];
+  return `
+    <div class="kv">
+      <span class="k">target</span><span class="v"><code>${escapeHtml(e.target_kind || '')}</code> ${escapeHtml(e.target_id || '')}</span>
+      <span class="k">reason</span><span class="v"><b>${escapeHtml(e.reason || '')}</b></span>
+      ${ev.length ? `<span class="k">evidence</span><span class="v">${ev.map(x => _linkChip(x, `→ #${x}`)).join('')}</span>` : ''}
+      ${e.window ? `<span class="k">window</span><span class="v">${escapeHtml(JSON.stringify(e.window))}</span>` : ''}
+    </div>
+    ${e.note ? `<h3>note</h3><pre>${escapeHtml(e.note)}</pre>` : ''}
+  `;
+}
+
+function renderEvidenceFetch(e) {
+  const reqs = Array.isArray(e.requests) ? e.requests : [];
+  return `
+    <div class="kv">
+      <span class="k">for reason call</span><span class="v">${e.reason_call_id ? _linkChip(e.reason_call_id, `→ #${e.reason_call_id}`) : ''}</span>
+    </div>
+    <h3>requests</h3><pre>${escapeHtml(JSON.stringify(reqs, null, 2))}</pre>
   `;
 }
 
@@ -757,6 +854,11 @@ function renderReasonCall(e) {
       <span class="k">success</span><span class="v">${e.success ? '<span class="pill ok">OK</span>' : '<span class="pill error">FAIL</span>'}</span>
       <span class="k">tokens</span><span class="v">in=${e.input_tokens || 0} out=${e.output_tokens || 0}</span>
       ${e.hypothesis_id ? `<span class="k">hypothesis</span><span class="v"><code>${escapeHtml(e.hypothesis_id)}</code></span>` : ''}
+      ${e.verdict ? `<span class="k">verdict</span><span class="v"><b>${escapeHtml(e.verdict)}</b>${e.verdict_note ? ' — ' + escapeHtml(e.verdict_note) : ''}${e.verdict_basis ? ' [' + escapeHtml(e.verdict_basis) + ']' : ''}</span>` : ''}
+      ${e.parse_path ? `<span class="k">parse_path</span><span class="v"><code>${escapeHtml(e.parse_path)}</code></span>` : ''}
+      ${e.evidence_rounds ? `<span class="k">evidence rounds</span><span class="v">${e.evidence_rounds}</span>` : ''}
+      ${e.ready_to_report !== undefined ? `<span class="k">ready_to_report</span><span class="v">${e.ready_to_report ? '<span class="pill ok">true</span>' : '<span class="pill error">false</span>'}</span>` : ''}
+      ${e.claim ? `<span class="k">claim</span><span class="v"><code>${escapeHtml([e.claim.kind, e.claim.category, e.claim.act].filter(Boolean).join('|'))}</code></span>` : ''}
     </div>
     ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
     ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
