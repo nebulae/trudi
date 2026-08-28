@@ -44,6 +44,9 @@ def most_recent_reason_call(window, tool_name: str) -> Optional[dict]:
     return None
 
 
+_SIDECAR_READ_CHARS = 64 * 1024
+
+
 def lineage_evidence_text(ctx) -> str:
     """Concatenated evidence text a grounding gate may inspect for a required
     marker: the agent-supplied ``supporting_evidence`` plus the ``cmd`` and
@@ -62,4 +65,13 @@ def lineage_evidence_text(ctx) -> str:
             continue
         parts.append(entry.get("cmd") or "")
         parts.append(entry.get("stdout_excerpt") or "")
+        # The full-stdout sidecar (when the trace persisted one) so a marker
+        # past the 600-char excerpt still grounds the finding.
+        sp = entry.get("stdout_path")
+        if sp:
+            try:
+                with open(sp, "r", errors="replace") as fh:
+                    parts.append(fh.read(_SIDECAR_READ_CHARS))
+            except OSError:
+                pass
     return " \n ".join(p for p in parts if p)

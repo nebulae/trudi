@@ -1,35 +1,22 @@
 """Gate: a negative/absence finding must search its claim's COMPLETE source set,
 and the searched logs must cover the claim's time window.
 
-Fires only on UNCONFIRMED findings (negatives are recorded UNCONFIRMED) whose
-description matches a known case-inverting category (logon/auth, identity,
-persistence, exfil — see _manifests.py). A manifest source is satisfied if the
-trace shows a tool_call touched it OR an explicit "<source> absent from evidence"
-note. STRICT: any unsatisfied source, or a claim window outside every searched
-log's coverage, is a hard refusal.
+Fires only on UNCONFIRMED findings whose DECLARED claim is a negative in a
+case-inverting category (claim_kind="negative", category ∈ logon_auth /
+identity / persistence / exfil / device_initial_access — see _manifests.py).
+Nothing here reads the description: the category comes from the typed claim,
+the window from claim.window, and a source that genuinely is not in the
+evidence is settled by a typed disposition
+(misc.record_disposition(target_kind="source", target_id=<source_id>,
+reason="absent_from_evidence"|"inapplicable"|"out_of_scope")). STRICT: any
+unsatisfied source, or a claim window outside every searched log's coverage, is
+a hard refusal.
 """
-import re
 from typing import Optional
 
-from ._device_install import claim_dates, flagged_count, inventory_for
-from ._manifests import MANIFESTS, classify
-
-# Names the device-install log / USB device class — used only to honour the
-# explicit "<source> absent from evidence" escape for DEVICE_INITIAL_ACCESS.
-_DEVLOG_NAME_RE = re.compile(
-    r"setupapi(?:\.dev)?\.log|usbdeviceforensics|device[- ]install log|usb device[- ]class",
-    re.IGNORECASE,
-)
-
-# A date in the claim description → the window the negative is asserted over.
-_DATE_RE = re.compile(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b")
-
-# Explicit "this source is genuinely absent from the evidence" escape.
-_ABSENT_RE = re.compile(
-    r"(?:absent from evidence|not (?:present|collected)|not in (?:the )?(?:evidence|image|collection)"
-    r"|no (?:such )?(?:log|artifact|channel|store)\b)",
-    re.IGNORECASE,
-)
+from ._device_install import flagged_count, inventory_for
+from ._dispositions import disposition_call, find_disposition
+from ._manifests import MANIFESTS, SOURCE_WAIVER_REASONS, manifest_for_claim
 
 
 def _tool_cmds(ctx) -> list:
@@ -37,27 +24,25 @@ def _tool_cmds(ctx) -> list:
     return [e for e in by_type.get("tool_call", []) if isinstance(e.get("cmd"), str)]
 
 
-def _claim_dates(text: str) -> list:
-    out = []
-    for y, m, d in _DATE_RE.findall(text or ""):
-        try:
-            out.append(f"{int(y):04d}-{int(m):02d}-{int(d):02d}")
-        except ValueError:
-            pass
-    return out
+def _claim_window_days(claim: dict) -> list:
+    w = (claim or {}).get("window") or {}
+    return [str(w[k])[:10] for k in ("start", "end") if w.get(k)]
+
+
+def _waived(ctx, source_id: str) -> bool:
+    return find_disposition(ctx.idx, "source", source_id, reasons=SOURCE_WAIVER_REASONS) is not None
 
 
 def check(ctx) -> Optional[dict]:
     if ctx.tier != "UNCONFIRMED":
         return None
-    desc = ctx.description or ""
-    category = classify(desc)
+    claim = getattr(ctx, "claim", None) or {}
+    category = manifest_for_claim(claim)
     if not category:
         return None
 
     spec = MANIFESTS[category]
     cmds = _tool_cmds(ctx)
-    blob = desc + " " + (ctx.supporting_evidence or "")
 
     # OS / channel alternative that waives the required list (e.g. a Linux host
     # satisfies LOGON_AUTH via wtmp/last instead of the Windows event channels).
@@ -68,12 +53,12 @@ def check(ctx) -> Optional[dict]:
     # DEVICE_INITIAL_ACCESS: a "no BadUSB" negative must be grounded on a COMPLETE
     # structured device-install inventory (misc.device_install_inventory parses the
     # whole setupapi.dev.log), not a keyword grep over a truncated/windowed dump.
-    # And the negative cannot stand if that inventory FLAGGED a device. An explicit
-    # "<log> absent from evidence" note still escapes.
+    # And the negative cannot stand if that inventory FLAGGED a device. A typed
+    # "device_inventory absent_from_evidence" disposition still escapes.
     if category == "DEVICE_INITIAL_ACCESS":
-        if _ABSENT_RE.search(blob) and _DEVLOG_NAME_RE.search(blob):
+        if _waived(ctx, "device_inventory"):
             return None
-        inv = inventory_for(ctx, claim_dates(blob))
+        inv = inventory_for(ctx, _claim_window_days(claim))
         if inv is None:
             return {
                 "success": False,
@@ -83,12 +68,14 @@ def check(ctx) -> Optional[dict]:
                     f"covering the window exists in the trace. USBSTOR / mass-storage "
                     f"enumeration and keyword greps over setupapi.dev.log can silently "
                     f"miss a device — run misc.device_install_inventory to enumerate "
-                    f"every device, or record an explicit 'setupapi.dev.log absent from "
-                    f"evidence' finding, before concluding absence."
+                    f"every device, or record "
+                    f"{disposition_call('source', 'device_inventory', 'absent_from_evidence')} "
+                    f"if setupapi.dev.log is genuinely not in evidence."
                 ),
                 "description": ctx.description,
                 "confidence": ctx.confidence,
                 "gate": "negative_completeness",
+                "missing_sources": ["device_inventory"],
             }
         fc = flagged_count(inv)
         if fc > 0:
@@ -100,8 +87,9 @@ def check(ctx) -> Optional[dict]:
                     f"keystroke-injection-capable device(s) in the window (a device "
                     f"exposing both HID/keyboard and mass-storage interfaces). "
                     f"A 'no BadUSB' negative cannot stand over an inventory that "
-                    f"flagged a device — disposition the flagged device(s) explicitly "
-                    f"(benign, with reasons) or record it as a positive finding."
+                    f"flagged a device — rule the device out with evidence "
+                    f"({disposition_call('device', '<VID:PID>', 'ruled_out', evidence=True)}) "
+                    f"or record it as a positive finding."
                 ),
                 "description": ctx.description,
                 "confidence": ctx.confidence,
@@ -109,35 +97,38 @@ def check(ctx) -> Optional[dict]:
             }
         return None
 
-    # 1) Manifest completeness — every required source touched or proven absent.
-    missing = []
-    for _sid, rx, hint in spec["required"]:
+    # 1) Manifest completeness — every required source touched or dispositioned.
+    missing, hints = [], []
+    for sid, rx, hint in spec["required"]:
         if any(rx.search(e["cmd"]) for e in cmds):
             continue
-        if _ABSENT_RE.search(blob) and rx.search(blob):
+        if _waived(ctx, sid):
             continue
-        missing.append(hint)
+        missing.append(sid)
+        hints.append(f"{sid} ({hint})")
     if missing:
+        calls = "; ".join(disposition_call("source", sid, "absent_from_evidence") for sid in missing[:3])
         return {
             "success": False,
             "error": (
                 f"Refusing UNCONFIRMED {category} finding: it asserts absence but the "
                 f"trace never searched {len(missing)} required source(s) — "
-                f"{'; '.join(missing)}. A negative is only valid over the COMPLETE "
+                f"{'; '.join(hints)}. A negative is only valid over the COMPLETE "
                 f"source set for the claim; absence from the subset you happened to "
-                f"search is not evidence of absence. Search {spec['where']}, or record "
-                f"an explicit '<source> absent from evidence' finding, before "
-                f"concluding absence."
+                f"search is not evidence of absence. Search {spec['where']}, or — only if "
+                f"a source is genuinely not in the evidence — settle it with a typed "
+                f"disposition: {calls}."
             ),
             "description": ctx.description,
             "confidence": ctx.confidence,
             "gate": "negative_completeness",
+            "missing_sources": missing,
         }
 
-    # 2) Coverage window — if the claim names a date, at least one searched source
-    #    carrying a coverage_window must span it. A silent (out-of-coverage) log
-    #    cannot ground a negative.
-    dates = _claim_dates(blob)
+    # 2) Coverage window — when the claim declares a window, at least one searched
+    #    source carrying a coverage_window must span it. A silent (out-of-coverage)
+    #    log cannot ground a negative.
+    dates = _claim_window_days(claim)
     covered = [e for e in cmds if isinstance(e.get("coverage_window"), dict)]
     if dates and covered:
         def _spans(cw: dict, day: str) -> bool:
@@ -151,15 +142,14 @@ def check(ctx) -> Optional[dict]:
                 f"{(e['coverage_window'].get('end') or '?')[:10]}"
                 for e in covered[:4]
             )
-            claim = ", ".join(dates[:4])
             return {
                 "success": False,
                 "error": (
                     f"Refusing UNCONFIRMED {category} finding: the searched log(s) cover "
-                    f"{ranges} but the claim window ({claim}) is OUTSIDE that coverage — a "
-                    f"negative cannot be drawn from a log that is silent about the window. "
-                    f"Search a source that covers it: TerminalServices logs, Volume Shadow "
-                    f"Copies, or carved EVTX from unallocated/pagefile/hiberfil."
+                    f"{ranges} but the claim window ({', '.join(dates)}) is OUTSIDE that "
+                    f"coverage — a negative cannot be drawn from a log that is silent about "
+                    f"the window. Search a source that covers it: TerminalServices logs, "
+                    f"Volume Shadow Copies, or carved EVTX from unallocated/pagefile/hiberfil."
                 ),
                 "description": ctx.description,
                 "confidence": ctx.confidence,

@@ -1,21 +1,22 @@
-"""Gate: a recent dair_assess must exist in the last 30 trace entries.
+"""Gate: DAIR must have been engaged before findings are recorded.
 
-Findings only make sense inside an active DAIR-directed investigation. This
-gate forces the agent to call dair_assess to establish phase before recording.
+Findings only make sense inside a DAIR-directed investigation. Checks that a
+dair_call exists anywhere in the trace (DAIR has established phase), not within
+a fixed window — a long collection batch must not age it out.
 """
 from typing import Optional
 
 
 def check(ctx) -> Optional[dict]:
-    has_recent_dair = any(e.get("type") == "dair_call" for e in ctx.window)
-    if has_recent_dair:
+    by_type = getattr(ctx.idx, "by_type", {}) or {}
+    if by_type.get("dair_call"):
         return None
     return {
         "success": False,
         "error": (
             "Findings can only be recorded inside an active DAIR investigation "
-            "(no dair_assess call found in last 30 trace entries). Call "
-            "dair_assess to establish current phase before recording findings."
+            "(no dair_assess call found in the trace). Call dair_assess to "
+            "establish current phase before recording findings."
         ),
         "description": ctx.description,
         "confidence": ctx.confidence,

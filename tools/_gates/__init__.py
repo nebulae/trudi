@@ -14,7 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional, Any
 
-from . import mcp_routing, dair_required, lineage_required, contracts
+from . import (mcp_routing, agent_authored_source, dair_required, lineage_required, contracts,
+               refusal_rewording, tier_contract)
 
 
 @dataclass
@@ -60,11 +61,30 @@ class GateContext:
     # taken, so record_finding can mark the finding's citation provenance.
     citation_mode: str = ""
 
+    # Typed claim declared by the agent: {kind, category, entities, channel,
+    # window}. Gates key on this declared structure FIRST (the typed_claims
+    # checker enforces its presence for CONFIRMED/LIKELY and classified
+    # negatives); description regexes remain only as fallback for legacy
+    # findings.
+    claim: dict = None  # type: ignore[assignment]
+
+    # Deterministic tier contract (tier_contract gate, data/fk/tiering.yaml):
+    # the highest tier the cited artifact classes reach, the classes found
+    # ({class: [cids]}) and the rule key (e.g. "egress/ftp"). Stamped on the
+    # finding entry by record_finding.
+    tier_achievable: str = ""
+    artifact_classes: dict = None  # type: ignore[assignment]
+    tier_rule: str = ""
+
     def __post_init__(self):
+        if self.artifact_classes is None:
+            self.artifact_classes = {}
         if self.validated_techniques is None:
             self.validated_techniques = []
         if self.input_call_ids is None:
             self.input_call_ids = []
+        if self.claim is None:
+            self.claim = {}
 
 
 GateFn = Callable[[GateContext], Optional[dict]]
@@ -73,9 +93,20 @@ GateFn = Callable[[GateContext], Optional[dict]]
 # contracts then run from cheapest/most universal to most claim-specific.
 GATES: list[tuple[str, GateFn]] = [
     ("mcp_routing", mcp_routing.check),
+    # Uncitable-source refusals next to mcp_routing: a finding resting on a
+    # file the agent wrote (Write/Edit/bash redirect) is not evidence.
+    ("agent_authored_source", agent_authored_source.check),
     ("dair_required", dair_required.check),
     ("lineage_required", lineage_required.check),
+    # Anti-loop: a re-record of a refused finding with only the wording changed
+    # (refusal ledger in core/execution_log.record_finding_refused). After the
+    # structural gates so a lineageless attempt gets the clearer message first.
+    ("refusal_rewording", refusal_rewording.check),
     ("evidence_strength", contracts.evidence_strength),
+    # The tier is arithmetic over the cited artifact classes:
+    # once the claim is typed and fact-checked, refuse a tier the evidence
+    # cannot reach, naming the classes and tools that would reach it.
+    ("tier_contract", tier_contract.check),
     ("completeness", contracts.completeness),
     ("attribution", contracts.attribution),
     ("transfer", contracts.transfer),

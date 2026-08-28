@@ -1,0 +1,310 @@
+# Deterministic tier contract (Phase J-1).
+#
+# The confidence tier of a CONFIRMED / LIKELY finding is a FUNCTION of the
+# artifact classes present among the tool calls it cites — never of the
+# finding's wording and never of a reviewer's opinion. tools/_gates/_tiering.py
+# reads this file; record_finding refuses a tier the cited classes cannot
+# reach and names the classes (and the tools that produce them) that would
+# reach it. SUSPECTED is always achievable (it is the honest floor).
+#
+# classes: how a cited tool_call entry is classified.
+#   cmd     — regex over the entry's `cmd` (the shell command / MCP call line)
+#   text    — regex over cmd + stdout excerpt + stdout sidecar (tool OUTPUT,
+#             never agent prose)
+#   marker  — a server-stamped field on the entry (annotate_tool_call)
+#   tools   — the MCP tools that produce the class (shown in tier_path)
+# groups: named OR-sets of classes.
+# acts: per act (and per channel for egress) the clauses each tier needs.
+#   A tier value is a list of ALTERNATIVES (OR); each alternative is a list of
+#   clauses (AND); a clause is {group, min} = at least `min` DISTINCT classes
+#   of that group are present. Two runs of the same tool are one class.
+version: 1
+
+classes:
+  event_logs_security:
+    cmd: 'evtxecmd|\.evtx\b|evtx_filter|evtx_dump|chainsaw'
+    tools: [ez.evtxecmd, misc.evtx_filter, misc.chainsaw_hunt]
+    label: Windows event log records
+  terminalservices:
+    cmd: 'terminalservices|localsessionmanager|remoteconnectionmanager'
+    tools: ["ez.evtxecmd on the TerminalServices channels"]
+    label: TerminalServices channel (RDP sessions with source IP)
+  logon_session:
+    marker: session_artifact
+    tools: [ez.evtxecmd (Security 4624/4625/4778/4779), misc.evtx_filter, net.pcap_identity_timeline, net.http_session_inventory, live.live_recent_logins]
+    label: logon / session artifact (type + source)
+  sam_account:
+    cmd: 'samparse|config[\\/]sam(?:$|[ ."\\/])|[\\/]sam\.(?:hive|bak|save)\b'
+    tools: [ez.recmd_hive SAM, misc.regripper_hive SAM samparse]
+    label: SAM account record
+  prefetch:
+    cmd: '(?<![a-z])pecmd|prefetch'
+    tools: [ez.pecmd]
+    label: Prefetch
+  userassist:
+    text: 'userassist'
+    tools: [ez.recmd_hive NTUSER (UserAssist), misc.regripper_hive userassist, vol.userassist]
+    label: UserAssist
+  amcache:
+    cmd: 'amcache'
+    tools: [ez.amcacheparser, vol.amcache]
+    label: Amcache
+  shimcache:
+    cmd: 'appcompatcache|shimcache'
+    tools: [ez.appcompatcacheparser, vol.shimcachemem]
+    label: Shimcache / AppCompatCache
+  bam:
+    text: '[\\/]bam[\\/]|bam\\state|\bbam_dam\b|services\\bam\b'
+    tools: [ez.recmd_hive SYSTEM (BAM), misc.regripper_hive bam]
+    label: BAM / DAM
+  mft:
+    cmd: 'mftecmd|analyzemft|\$mft|mftscan'
+    tools: [ez.mftecmd, misc.analyzemft_parse]
+    label: $MFT record
+  usn_journal:
+    cmd: 'usnparser|usn_journal|\$j\b|usnjrnl|\$usnjrnl'
+    marker: transfer_artifact_usn
+    tools: [misc.usnparser_parse, ez.mftecmd on $J]
+    label: USN journal ($J)
+  lnk_files:
+    cmd: '(?<![a-z])lecmd|\.lnk\b'
+    tools: [ez.lecmd]
+    label: LNK shortcut
+  jump_lists:
+    cmd: 'jlecmd|automaticdestinations|customdestinations'
+    tools: [ez.jlecmd]
+    label: Jump list
+  shellbags:
+    cmd: 'sbecmd|shellbags'
+    tools: [ez.sbecmd]
+    label: Shellbags
+  recycle_bin:
+    cmd: 'rbcmd|\$recycle\.bin|recycle'
+    tools: [ez.rbcmd, tsk.fls on $Recycle.Bin]
+    label: Recycle Bin
+  registry:
+    cmd: 'recmd|regripper|rip\.pl|printkey|hivelist|usbdeviceforensics'
+    tools: [ez.recmd_hive, misc.regripper_hive, vol.registry_printkey]
+    label: registry value
+  usb_storage:
+    text: 'usbstor|mounteddevices|usbdeviceforensics|\bwpdbusenum\b|devpkey|disk&ven_'
+    tools: [ez.recmd_hive SYSTEM (USBSTOR/MountedDevices), misc.usbdeviceforensics, misc.regripper_hive usbstor]
+    label: USB mass-storage registry record
+  device_install:
+    marker: device_install_inventory
+    cmd: 'device_install_inventory|setupapi'
+    tools: [misc.device_install_inventory]
+    label: device-install inventory (setupapi.dev.log)
+  srum:
+    cmd: 'sqlecmd|srudb|srum'
+    tools: [ez.sqlecmd SRUDB]
+    label: SRUM network / app usage
+  scheduled_tasks:
+    cmd: 'parse_scheduled_tasks|scheduled_tasks|schtasks|\\tasks\\|/tasks/'
+    tools: [misc.parse_scheduled_tasks, vol.scheduled_tasks]
+    label: scheduled task
+  services:
+    cmd: 'svcscan|svclist|svcdiff|config[\\/]services|controlset\d+[\\/]services|\b7045\b|services\.reb'
+    tools: [vol.svcscan, ez.recmd_hive SYSTEM (Services), ez.evtxecmd System 7045]
+    label: service record
+  transfer:
+    marker: transfer_artifact
+    text: '(?:\btransfers?\.log\b|\bftp log\b|\b\d[\d,]*\s*bytes?\s*(?:sent|written|read|transferred|uploaded)\b|\bbytes[_ ](?:sent|written|read)\b|\$j\b|\$usnjrnl|\busnjrnl\b|\busn[ _]journal\b|\b(?:data ?extend|filecreate|file ?write)\b|\bmounteddevices\b|\bdisk ?\[usbstor\]|content-disposition:\s*attachment|\bnetflow\b|\bsrudb\b|\bbytessent\b)'
+    tools: [FTP transfers.log via read.read_output, misc.usnparser_parse, ez.lecmd on the removable volume, ez.recmd_hive SYSTEM MountedDevices, read.read_mail (attachment), ez.sqlecmd SRUM, net.tcpdump_read]
+    label: transfer artifact (bytes moved)
+  receipt:
+    marker: receipt_artifact
+    text: '(?:\bhttp/\d(?:\.\d)?\s+2\d\d\b|\b(?:response|status)(?:[ _]code)?\s*[:=]\s*2\d\d\b|\b226\b[^.\n]{0,30}complete|\btransfer complete\b|\b250\b[^.\n]{0,20}(?:ok|queued|accepted|delivered|2\.\d)|\bmessage (?:accepted for delivery|delivered|queued)\b|\bdsn\b|\bdelivery status notification\b|\bdiagnostic-code\b|\bdelivery receipt\b|\bread receipt\b|\baccess\.log\b)'
+    tools: [destination-side log via read.read_output, net.http_session_inventory (2xx), read.read_mail (250/DSN)]
+    label: destination-side receipt
+  mail_store:
+    cmd: 'readpst|pff_export|read\.read_mail|\.mbox\b|\.eml\b|\.pst\b|\.ost\b'
+    tools: [misc.readpst_extract, misc.pff_export, read.read_mail]
+    label: mail store message
+  chat_store:
+    marker: chat_db_export
+    cmd: 'chat_db_export'
+    tools: [misc.chat_db_export]
+    label: chat store message / transfer
+  network_capture:
+    cmd: 'tcpdump|ngrep|tcpxtract|\.pcap|http_session_inventory|pcap_identity'
+    tools: [net.tcpdump_read, net.http_session_inventory, net.ngrep_search]
+    label: packet capture
+  memory_process:
+    cmd: '(?:^|[\s/])vol(?:atility)?\b.*(?:pslist|pstree|psscan|cmdline|dlllist|handles|getsids|privileges|psxview|envars|consoles|cmdscanner|sessions|thrdscan|mutantscan|filescan|dumpfiles|hashdump|lsadump|cachedump)|live_process'
+    tools: [vol.pslist, vol.pstree, vol.cmdline, vol.dlllist, live.live_processes]
+    label: memory process record
+  memory_network:
+    cmd: 'netscan|netstat|live_network'
+    tools: [vol.netscan, vol.netstat, live.live_network_connections]
+    label: memory network connection
+  memory_injection:
+    cmd: 'malfind|hollowprocesses|ldrmodules|suspicious_threads|unhooked|callbacks|ssdt|vadyarascan'
+    tools: [vol.malfind, vol.hollowprocesses, vol.ldrmodules]
+    label: memory injection / hooking record
+  file_content:
+    cmd: 'strings_extract|strings_grep|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.read_output|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
+    tools: [strings.strings_grep, tsk.icat, read.read_output, misc.capa_analyze]
+    label: file content read
+  hash_match:
+    cmd: 'hash_file|hashdeep|md5deep|ssdeep|verify_evidence_hash'
+    tools: [hash.hash_file, hash.ssdeep_compare]
+    label: hash match
+  yara:
+    cmd: 'yara'
+    tools: [yara.scan_file, yara.scan_memory_image]
+    label: YARA match
+  av:
+    cmd: 'clamscan'
+    tools: [misc.clamscan_file]
+    label: AV detection
+  enrichment:
+    cmd: 'virustotal|vt_lookup|abuseipdb|machinae|enrich'
+    tools: [enrich.vt_lookup_hash, enrich.abuseipdb_check]
+    label: threat-intel enrichment
+  timeline:
+    cmd: 'log2timeline|psort|plaso|mactime'
+    tools: [plaso.plaso_create_timeline, tsk.mactime]
+    label: super-timeline row
+  filesystem_listing:
+    cmd: '(?:^|[ /])fls(?:\s|$)|\bistat\b|\bffind\b|indxparse|mftecmd_dir|\bils\b|tsk_fls'
+    tools: [tsk.fls, tsk.istat, tsk.indxparse]
+    label: filesystem listing / inode record
+  live_host:
+    cmd: 'live\.|live_'
+    tools: [live.live_persistence_audit, live.live_open_files]
+    label: live host record
+  unix_auth_log:
+    cmd: 'auth\.log|[\\/]secure\b|\bwtmp\b|\bbtmp\b|lastlog|journalctl|\bsshd\b|\blast\b -f'
+    tools: [read.read_output on auth.log/secure, live.live_recent_logins, strings.strings_grep on wtmp]
+    label: unix authentication log
+  unix_shell_history:
+    cmd: 'bash_history|zsh_history|sh_history|\.histfile'
+    tools: [read.read_output on shell history, strings.strings_extract]
+    label: shell history
+  unix_persistence:
+    cmd: 'crontab|[\\/]cron\.(?:d|daily|hourly)|[\\/]systemd[\\/]|\.service\b|rc\.local|[\\/]init\.d[\\/]|launchagents|launchdaemons'
+    tools: [live.live_persistence_audit, read.read_output on cron/systemd units]
+    label: unix/macOS persistence record
+  unix_syslog:
+    cmd: '[\\/]syslog\b|[\\/]messages\b|journal(?:ctl)?\b'
+    tools: [read.read_output on syslog, live.live_event_log_tail]
+    label: unix system log
+  macos_artifacts:
+    cmd: 'fseventsd|\.logarchive|log show|unified log|\bplutil\b|\.plist\b|knowledgec\.db|quarantine'
+    tools: [read.read_output on plists/KnowledgeC, strings.strings_extract on fsevents]
+    label: macOS system artifact
+
+groups:
+  # ANY = every class (used by act=other)
+  execution_primary: [prefetch, userassist, amcache, bam, event_logs_security, memory_process, live_host, srum, jump_lists, unix_shell_history, unix_auth_log, macos_artifacts]
+  execution_weak: [shimcache, mft, lnk_files, shellbags, registry, file_content, timeline, yara, av, usn_journal, filesystem_listing]
+  presence_primary: [mft, filesystem_listing, usn_journal, file_content, hash_match, memory_process, recycle_bin, memory_injection]
+  presence_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, prefetch, registry, timeline, yara, av, userassist]
+  timeline_primary: [mft, usn_journal, event_logs_security, prefetch, timeline, srum, logon_session, registry, network_capture, terminalservices, device_install, unix_auth_log, unix_syslog, macos_artifacts]
+  timeline_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, file_content, userassist, mail_store, chat_store]
+  creation_event: [event_logs_security, sam_account, unix_auth_log]
+  creation_corroborator: [logon_session, device_install, prefetch, userassist, amcache, memory_process, usn_journal, mft, registry, terminalservices, bam]
+  session: [logon_session]
+  session_corroborator: [terminalservices, registry, network_capture, usn_journal, prefetch, userassist, lnk_files, srum, shellbags, jump_lists, bam, event_logs_security, device_install, unix_auth_log, unix_syslog, unix_shell_history]
+  documentary_binding: [registry, mail_store, chat_store, network_capture, lnk_files, shellbags, userassist, recycle_bin, sam_account, jump_lists, file_content, srum, unix_shell_history, macos_artifacts]
+  transfer: [transfer]
+  receipt: [receipt]
+  ftp_context: [prefetch, userassist, amcache, bam, file_content, registry, network_capture, srum, memory_process, event_logs_security, jump_lists]
+  removable_context: [usb_storage, registry, device_install, lnk_files, shellbags, jump_lists, usn_journal, mft]
+  email_context: [mail_store, network_capture, receipt]
+  cloud_context: [registry, file_content, network_capture, srum, mft, usn_journal, prefetch, userassist, amcache]
+  chat_context: [chat_store, network_capture, srum, prefetch, userassist]
+  staging: [file_content, mft, usn_journal, lnk_files, jump_lists, shellbags, registry, prefetch, userassist, amcache, recycle_bin, usb_storage, mail_store, chat_store, network_capture, srum]
+  persistence_record: [registry, scheduled_tasks, services, event_logs_security, memory_process, live_host, memory_injection, unix_persistence, macos_artifacts]
+  persistence_weak: [file_content, yara, av, mft, prefetch, amcache, shimcache, timeline, filesystem_listing]
+  network_evidence: [memory_network, network_capture, srum, live_host]
+  process_evidence: [memory_process, memory_injection, prefetch, userassist, amcache, bam, event_logs_security]
+  c2_weak: [yara, av, enrichment, file_content, memory_injection, registry, timeline]
+  lateral_primary: [logon_session, network_capture, terminalservices, unix_auth_log]
+  lateral_corroborator: [registry, prefetch, userassist, srum, memory_process, event_logs_security, jump_lists, shellbags, lnk_files, terminalservices, memory_network]
+  lateral_weak: [registry, lnk_files, shellbags, jump_lists, file_content, timeline]
+  credential_primary: [memory_process, event_logs_security, prefetch, userassist, amcache, memory_injection, logon_session]
+  credential_weak: [yara, av, file_content, registry, timeline, hash_match]
+  destruction_primary: [usn_journal, mft, event_logs_security, prefetch, userassist, amcache, registry, recycle_bin]
+  destruction_weak: [file_content, lnk_files, timeline, jump_lists, shellbags, filesystem_listing]
+
+acts:
+  execution:
+    CONFIRMED: [[{group: execution_primary, min: 2}]]
+    LIKELY:    [[{group: execution_primary, min: 1}]]
+    SUSPECTED: [[{group: execution_weak, min: 1}]]
+  presence:
+    CONFIRMED: [[{group: presence_primary, min: 2}]]
+    LIKELY:    [[{group: presence_primary, min: 1}]]
+    SUSPECTED: [[{group: presence_weak, min: 1}]]
+  timeline:
+    CONFIRMED: [[{group: timeline_primary, min: 2}]]
+    LIKELY:    [[{group: timeline_primary, min: 1}]]
+    SUSPECTED: [[{group: timeline_weak, min: 1}]]
+  account_creation:
+    CONFIRMED: [[{group: creation_event, min: 1}, {group: creation_corroborator, min: 1}]]
+    LIKELY:    [[{group: creation_event, min: 1}]]
+    SUSPECTED: [[{group: creation_corroborator, min: 1}]]
+  logon:
+    CONFIRMED: [[{group: session, min: 1}, {group: session_corroborator, min: 1}]]
+    LIKELY:    [[{group: session, min: 1}]]
+    SUSPECTED: [[{group: session_corroborator, min: 1}]]
+  attribution:
+    CONFIRMED: [[{group: session, min: 1}, {group: documentary_binding, min: 1}]]
+    LIKELY:    [[{group: session, min: 1}], [{group: documentary_binding, min: 2}]]
+    SUSPECTED: [[{group: documentary_binding, min: 1}]]
+  lateral_movement:
+    CONFIRMED: [[{group: lateral_primary, min: 1}, {group: lateral_corroborator, min: 1}]]
+    LIKELY:    [[{group: lateral_primary, min: 1}]]
+    SUSPECTED: [[{group: lateral_weak, min: 1}]]
+  persistence_install:
+    CONFIRMED: [[{group: persistence_record, min: 1}, {group: execution_primary, min: 1}], [{group: persistence_record, min: 2}]]
+    LIKELY:    [[{group: persistence_record, min: 1}]]
+    SUSPECTED: [[{group: persistence_weak, min: 1}]]
+  c2:
+    CONFIRMED: [[{group: network_evidence, min: 1}, {group: process_evidence, min: 1}]]
+    LIKELY:    [[{group: network_evidence, min: 1}]]
+    SUSPECTED: [[{group: c2_weak, min: 1}]]
+  credential_access:
+    CONFIRMED: [[{group: credential_primary, min: 2}]]
+    LIKELY:    [[{group: credential_primary, min: 1}]]
+    SUSPECTED: [[{group: credential_weak, min: 1}]]
+  destruction:
+    CONFIRMED: [[{group: destruction_primary, min: 2}]]
+    LIKELY:    [[{group: destruction_primary, min: 1}]]
+    SUSPECTED: [[{group: destruction_weak, min: 1}]]
+  delivery:
+    CONFIRMED: [[{group: receipt, min: 1}, {group: transfer, min: 1}]]
+    LIKELY:    [[{group: receipt, min: 1}]]
+    SUSPECTED: [[{group: staging, min: 1}]]
+  possession:
+    CONFIRMED: [[{group: receipt, min: 1}, {group: transfer, min: 1}]]
+    LIKELY:    [[{group: receipt, min: 1}]]
+    SUSPECTED: [[{group: staging, min: 1}]]
+  egress:
+    channels:
+      ftp:
+        CONFIRMED: [[{group: transfer, min: 1}, {group: ftp_context, min: 1}]]
+        LIKELY:    [[{group: transfer, min: 1}]]
+        SUSPECTED: [[{group: staging, min: 1}]]
+      removable:
+        CONFIRMED: [[{group: transfer, min: 1}, {group: removable_context, min: 1}]]
+        LIKELY:    [[{group: transfer, min: 1}]]
+        SUSPECTED: [[{group: staging, min: 1}]]
+      email:
+        CONFIRMED: [[{group: transfer, min: 1}, {group: email_context, min: 1}]]
+        LIKELY:    [[{group: transfer, min: 1}]]
+        SUSPECTED: [[{group: staging, min: 1}]]
+      chat:
+        CONFIRMED: [[{group: transfer, min: 1}, {group: chat_context, min: 1}]]
+        LIKELY:    [[{group: transfer, min: 1}]]
+        SUSPECTED: [[{group: staging, min: 1}]]
+      default:
+        CONFIRMED: [[{group: transfer, min: 1}, {group: cloud_context, min: 1}]]
+        LIKELY:    [[{group: transfer, min: 1}]]
+        SUSPECTED: [[{group: staging, min: 1}]]
+  other:
+    CONFIRMED: [[{group: ANY, min: 2}]]
+    LIKELY:    [[{group: ANY, min: 1}]]
+    SUSPECTED: []

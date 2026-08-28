@@ -1,19 +1,17 @@
-"""Gate: CONFIRMED/LIKELY findings about specific behaviour kinds require a
-recent reason.hypothesize call OR an explicit tested_hypothesis_id.
+"""Gate: CONFIRMED/LIKELY findings whose typed claim asserts a behaviour that
+deserves an adversarial hypothesis pass require a reason.hypothesize call
+ANYWHERE in the investigation OR an explicit tested_hypothesis_id — never a
+tool-call-inflated recency window.
 
-The keyword list (process, service, persistence, C2, lateral, ...) keys on
-the things the agent is most likely to claim without first hypothesising.
-A spurious hit on a pure file-existence finding is satisfied by a thin
-reason.hypothesize call describing the observation.
+Trigger (typed claim, never wording): tier ∈ {CONFIRMED, LIKELY} AND no
+tested_hypothesis_id AND (claim.category not in {"", "other"} OR claim.act ∈
+HYPOTHESIS_ACTS). A finding with an undeclared claim (enforcement off) is not
+gated here.
 """
 from typing import Optional
 
-_HYPOTHESIZE_KEYWORDS = (
-    "process", "service", "scheduled task", "task ",
-    "persist", "c2", "beacon", "exfil", "lateral",
-    "ghost", "orphan", "detached", "null cmdline",
-    "unsigned", "credential", "implant", "stager",
-)
+HYPOTHESIS_ACTS = frozenset({"execution", "persistence_install", "account_creation",
+                             "egress", "c2", "lateral_movement", "credential_access"})
 
 
 def check(ctx) -> Optional[dict]:
@@ -21,31 +19,34 @@ def check(ctx) -> Optional[dict]:
         return None
     if (ctx.tested_hypothesis_id or "").strip():
         return None
-
-    desc_l = (ctx.description or "").lower()
-    if not any(kw in desc_l for kw in _HYPOTHESIZE_KEYWORDS):
+    claim = getattr(ctx, "claim", None) or {}
+    cat = str(claim.get("category") or "").lower()
+    act = str(claim.get("act") or "").lower()
+    if not ((cat and cat != "other") or act in HYPOTHESIS_ACTS):
         return None
 
-    # Find the most recent hypothesize call so the finding can carry its id
-    # as an explicit foreign key.
-    matched_hyp = None
-    for e in reversed(ctx.window):
-        if e.get("type") == "reason_call" and e.get("tool") == "reason_hypothesize":
-            matched_hyp = e
-            break
-    if matched_hyp is not None:
-        ctx.gated_by_hypothesize_call_id = int(matched_hyp.get("call_id") or 0)
+    # Existence over the WHOLE trace, not a 30-ENTRY window: a hypothesize→collect
+    # (many tool calls)→record flow blows a raw-entry window out every time, so a
+    # 30-entry recency check just churns the agent into re-running the same
+    # hypothesize. The gate is a backstop — "you asserted a conclusion with NO
+    # hypothesis pass anywhere" — so it fires only when the investigation never
+    # hypothesized; per-artifact contemporaneity is carried by tested_hypothesis_id
+    # (the strong form above) and driven by the DAIR loop, not a tool-call count.
+    by_type = getattr(getattr(ctx, "idx", None), "by_type", {}) or {}
+    hyps = [e for e in by_type.get("reason_call", [])
+            if e.get("tool") == "reason_hypothesize" and e.get("success") is not False]
+    if hyps:
+        ctx.gated_by_hypothesize_call_id = int(hyps[-1].get("call_id") or 0)
         return None
 
     return {
         "success": False,
         "error": (
-            f"{ctx.tier} finding mentions process / service / persistence / "
-            f"C2 / lateral-movement behaviour but no recent "
-            f"reason.hypothesize call exists in the last 30 trace entries. "
-            f"Call reason.hypothesize(observation=..., evidence=..., context=...) "
-            f"and capture the returned hypothesis_id, then pass it as "
-            f"tested_hypothesis_id when recording this finding."
+            f"{ctx.tier} finding declares category={cat or 'n/a'} / act={act or 'n/a'} "
+            f"but the investigation has NO reason.hypothesize call at all. Call "
+            f"reason.hypothesize(observation=..., evidence=..., context=...) and capture "
+            f"the returned hypothesis_id, then pass it as tested_hypothesis_id when "
+            f"recording this finding (per-artifact hypotheses build the strongest lineage)."
         ),
         "description": ctx.description,
         "confidence": ctx.confidence,

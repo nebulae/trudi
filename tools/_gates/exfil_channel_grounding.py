@@ -1,114 +1,69 @@
-"""Gate: a CONFIRMED/LIKELY finding asserting data *left the host* via a named
-channel must cite a *transfer* artifact — not tool-execution or file-presence.
+"""Gate: a CONFIRMED/LIKELY finding asserting data *left the host* must cite a
+*transfer* artifact — not tool-execution or file-presence.
 
-Root-cause failure this closes (generic, not scenario-specific): an
-investigation promotes an exfiltration channel into the verdict on the strength
-of a tool being installed or a file sitting in a sync/staging folder ("Dropbox
-client present + archive in the Dropbox folder ⇒ cloud exfil"), while the actual
-transfer is never evidenced and a competing channel with stronger evidence is
-downranked. "The tool was here" and "the file was in the folder" are *presence*,
-not *egress*. A channel claim must rest on a record that bytes actually moved.
+Trigger (typed claim, never wording): tier ∈ {CONFIRMED, LIKELY} AND
+claim.act == "egress" (typed_claims already requires a channel for it).
 
-Trigger (description prose):
-  tier ∈ {CONFIRMED, LIKELY}
-  AND the description asserts egress (exfiltrated / uploaded / transferred /
-      sent to / copied to / transmitted / leaked)
-  AND it names a channel (cloud / Dropbox / OneDrive / GDrive / FTP / USB /
-      removable / email / attachment / web upload / C2 / Telegram / SMTP).
-
-Pass condition (evidence, NOT prose): a transfer marker appears in
-lineage_evidence_text(ctx) — the agent's supporting_evidence plus the cmd /
-stdout_excerpt of the linked_call_id and input_call_ids entries. Transfer
-markers: an FTP/transfer log (transfers.log), a byte-count of data sent/written/
-transferred, a USN $J write/rename record, a removable-volume LNK / MountedDevices
-/ DEVPKEY binding (the file physically resided on removable media), a mail record
-carrying an attachment, netflow/pcap egress, or SRUM per-app network bytes.
+Pass: claim.transfer_call_ids name successful evidence tool calls (the record
+that bytes moved — an FTP/transfer log, USN $J write/rename, removable-volume
+LNK / MountedDevices binding, mail attachment record, SRUM/netflow egress); or
+— legacy validator — a transfer marker appears in the cited evidence TEXT.
 
 Explicitly NON-satisfying (presence only): a file in a sync/staging folder, a
 cloud-client ADS such as :com.dropbox.attributes, or tool-execution alone
 ("VeraCrypt ran", "Dropbox.exe present"). These describe staging, not egress.
+
+The gate does not read the description.
 """
 import re
 from typing import Optional
 
+from ._claims import FIELD_HELP
+from ._evidence_calls import is_evidence_tool_call
 from ._match import lineage_evidence_text
-
-# Asserts data left the host.
-_EGRESS_RE = re.compile(
-    r"\b(?:exfil\w*|uploaded|upload\b|transferred|transmit\w*|sent to\b"
-    r"|copied to\b|leaked|egress\w*)\b",
-    re.IGNORECASE,
-)
-
-# Adjectival / reference uses of an egress term ("the exfil email", "the
-# exfiltration window", "the egress path") name a PRIOR event; they are not an
-# egress assertion BY THIS finding. Stripped before the assert-check so a
-# finding that merely time-anchors to an exfil event — e.g. a logon-session
-# inventory "88 min before the exfil email" — does not trip the gate. A genuine
-# predicate ("was exfiltrated", "sent to X via email") is untouched: the egress
-# term there is not immediately followed by one of these reference nouns.
-_EGRESS_REFERENCE_RE = re.compile(
-    r"\b(?:exfil\w*|egress\w*|upload)[ -]"
-    r"(?:e-?mails?|messages?|windows?|times?|timestamps?|dates?|events?|"
-    r"threads?|attempts?|recipients?|channels?|activit\w+|paths?|vectors?|"
-    r"addresses?|artifacts?|sends?|senders?|folders?)\b",
-    re.IGNORECASE,
-)
-
-# Names a channel the egress used.
-_CHANNEL_RE = re.compile(
-    r"\b(?:cloud\b|dropbox|onedrive|gdrive|google drive|mega\b|box\.com"
-    r"|ftp\b|sftp\b|tftp\b|usb\b|removable\b|thumb ?drive|flash drive"
-    r"|e-?mail\b|webmail|attachment|web upload|http upload|c2\b|telegram|smtp)\b",
-    re.IGNORECASE,
-)
 
 # Evidence that bytes actually moved (a transfer record), as opposed to mere
 # staging/presence. A removable-volume binding counts: it is positive evidence
 # the file resided on media that physically left the host.
 _TRANSFER_RE = re.compile(
-    r"(?:\btransfers?\.log\b|\bftp log\b"
-    r"|\b\d[\d,]*\s*bytes?\s*(?:sent|written|read|transferred|uploaded)\b"
-    r"|\bbytes[_ ](?:sent|written|read)\b"
-    r"|\busn\b|\$j\b|\$usnjrnl|\busnjrnl\b"
-    r"|\b(?:data ?extend|filecreate|file ?write|rename)\b"
-    r"|\bmounteddevices\b|\bdevpkey\b|\bremovable\b|\bdisk ?\[usbstor\]"
-    r"|\battachment\b|\battached file\b|\bcontent-disposition\b"
-    r"|\bnetflow\b|\bpcap\b|\bpackets?\b|\bsrum\b|\bsrudb\b|\bbytessent\b)",
+    # STRUCTURAL tokens only (artifact names, opcodes, byte counts, status
+    # codes) — vocabulary like "attachment"/"removable"/"packets" must never
+    # ground a transfer/receipt class (evidence-class inflation).
+    r"""(?:\btransfers?\.log\b|\bftp log\b|\b\d[\d,]*\s*bytes?\s*(?:sent|written|read|transferred|uploaded)\b|\bbytes[_ ](?:sent|written|read)\b|\$j\b|\$usnjrnl|\busnjrnl\b|\busn[ _]journal\b|\b(?:data ?extend|filecreate|file ?write)\b|\bmounteddevices\b|\bdisk ?\[usbstor\]|content-disposition:\s*attachment|\bnetflow\b|\bsrudb\b|\bbytessent\b)""",
     re.IGNORECASE,
 )
+
+
+def _cited_evidence_calls(ctx, cids) -> bool:
+    by_id = getattr(ctx.idx, "by_call_id", {}) or {}
+    cids = [int(c) for c in (cids or []) if c]
+    return bool(cids) and all(is_evidence_tool_call(by_id.get(c) or {}) for c in cids)
 
 
 def check(ctx) -> Optional[dict]:
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
-
-    # Drop adjectival references to a prior exfil event before deciding whether
-    # THIS finding asserts egress (so an incidental "exfil email" time-anchor in
-    # a non-exfil finding does not trigger the channel-grounding requirement).
-    desc = _EGRESS_REFERENCE_RE.sub(" ", ctx.description or "")
-    if not (_EGRESS_RE.search(desc) and _CHANNEL_RE.search(desc)):
+    claim = getattr(ctx, "claim", None) or {}
+    if claim.get("act") != "egress":
         return None
-
-    evidence = lineage_evidence_text(ctx)
-    if _TRANSFER_RE.search(evidence):
+    if _cited_evidence_calls(ctx, claim.get("transfer_call_ids")):
         return None
-
+    if _TRANSFER_RE.search(lineage_evidence_text(ctx)):
+        return None
     return {
         "success": False,
         "error": (
-            f"{ctx.tier} finding claims data was exfiltrated over a named channel "
-            f"but its evidence (supporting_evidence or the linked_call_id / "
-            f"input_call_ids entries) shows only presence/staging, not a transfer. "
-            f"A file in a sync folder, a :com.dropbox.attributes ADS, or "
-            f"tool-execution alone is not egress. Cite a transfer artifact — an "
-            f"FTP/transfer log, a byte count sent/written, a USN $J write/rename, "
-            f"a removable-volume LNK / MountedDevices binding, a mail attachment "
-            f"record, or SRUM/netflow egress — and link it (input_call_ids), or "
-            f"downgrade this finding to SUSPECTED. Enumerate ALL candidate channels "
-            f"and headline only the strongest-evidenced one."
+            f"{ctx.tier} finding claims data left the host over {claim.get('channel') or 'a channel'} "
+            f"but its evidence shows only presence/staging, not a transfer. A file in a "
+            f"sync folder, a :com.dropbox.attributes ADS, or tool-execution alone is not "
+            f"egress. Cite a transfer artifact — an FTP/transfer log, a byte count "
+            f"sent/written, a USN $J write/rename, a removable-volume LNK / MountedDevices "
+            f"binding, a mail attachment record, or SRUM/netflow egress — and pass "
+            f"{FIELD_HELP['transfer_call_ids']}, or downgrade to SUSPECTED. Enumerate ALL "
+            f"candidate channels and headline only the strongest-evidenced one."
         ),
         "description": ctx.description,
         "confidence": ctx.confidence,
         "gate": "exfil_channel_grounding",
+        "missing": ["transfer_call_ids"],
     }

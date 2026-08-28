@@ -4,10 +4,9 @@ CLAUDE.md global rule (Directive Binding → "Truncated output follow-up"):
 when a tool result has `truncated: true`, treat it as INCOMPLETE — re-run
 with a narrower pattern before recording a negative finding. Recording an
 UNCONFIRMED ("absent" / "no match") finding whose only evidence is a
-truncated scan is the most common failure mode of that rule, observed in
-NITROBA-2008 where a 56MB pcap roster sweep was truncated by ngrep's
-progress markers and the resulting "no roster match" finding masked the
-true CONFIRMED-tier attribution.
+truncated scan is the most common failure mode of that rule: a truncated
+large-pcap roster sweep once produced a "no roster match" negative that
+masked a CONFIRMED-tier attribution.
 
 This gate makes the rule a hard refusal. It fires only when:
   - tier is UNCONFIRMED (the finding is asserting absence)

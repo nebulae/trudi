@@ -18,9 +18,20 @@ _HASH = re.compile(r"\b[0-9a-fA-F]{32,64}\b")
 _TID = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
 # Absolute unix path with >= 2 segments (avoids matching a lone "/tmp").
 _UNIX_PATH = re.compile(r"/[A-Za-z0-9._\-]+(?:/[A-Za-z0-9._\-]+)+")
-# Windows path or registry key.
-_WIN_PATH = re.compile(r"[A-Za-z]:\\[\\A-Za-z0-9._\- ]+")
-_REG_KEY = re.compile(r"\bHK(?:LM|CU|U|CR|CC)\\[\\A-Za-z0-9._\- ]+", re.IGNORECASE)
+# Windows path / registry key. A path segment may contain spaces ("Program
+# Files", "Documents and Settings", a spaced user profile name) but is bounded
+# so it cannot run into the prose after the path or be cut short at an '@'.
+_SC = r"[^\\\s,;:()'\"<>|]"          # one segment char (space and punctuation excluded)
+_INT_SEG = rf"{_SC}+(?: {_SC}+){{0,3}}"                 # interior dir: ≤3 internal spaces
+# Final segment: a spaced name that ENDS in a file extension ("vacation
+# photos.7z"), else a single space-free token (which may itself carry an
+# extension). Trailing sentence punctuation is stripped in add().
+_FINAL_SEG = rf"(?:{_SC}+ ){{1,3}}{_SC}*\.[A-Za-z0-9]{{1,8}}|{_SC}+"
+_WIN_PATH = re.compile(rf"[A-Za-z]:\\(?:{_INT_SEG}\\)*(?:{_FINAL_SEG})")
+# Registry subkeys: no internal spaces (safer to under-match a rare spaced key
+# than to swallow "HKLM\Software\Vendor value Foo was set").
+_REG_KEY = re.compile(rf"\bHK(?:LM|CU|U|CR|CC)(?:\\{_SC}+)+", re.IGNORECASE)
+_TRAILING_PUNCT = ".,;:)'\""
 
 
 def extract_claims(finding: str) -> list[tuple[str, str]]:
@@ -30,6 +41,7 @@ def extract_claims(finding: str) -> list[tuple[str, str]]:
     seen: set[str] = set()
 
     def add(kind: str, value: str):
+        value = value.strip().rstrip(_TRAILING_PUNCT)   # "…\file.ini." at sentence end
         key = value.lower()
         if key and key not in seen:
             seen.add(key)
