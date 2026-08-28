@@ -209,6 +209,93 @@ def _finding_nudge() -> str:
         return ""
 
 
+# ── Repeat-call gate (identical call + identical result = redundant) ─────────
+# Observed live: a compaction-driven closed loop re-ran the SAME two ngrep
+# searches 147 and 146 times — each returned the same empty result, each
+# compaction dropped the low-salience negative, and OpenCode's auto-continue
+# prompt restarted the cycle. The context forgets what the trace knows; this
+# gate lends the trace's memory back at the moment of action. A call triggers
+# ONLY when both the arguments AND the previous result are identical — a
+# re-read of a changed file resets it, so legitimate repetition never fires.
+REPEAT_GATE_ENABLED = (os.environ.get("TRUDI_REPEAT_GATE") or "1").strip().lower() not in (
+    "0", "off", "false", "none")
+# Refuse the call once the same call has returned the same result this many
+# times (0 = never refuse, notices only).
+REPEAT_BLOCK_AFTER = int(os.environ.get("TRUDI_REPEAT_BLOCK_AFTER") or "4")
+
+_REPEAT_MAX_KEYS = 512
+# key -> {"result_hash": str, "identical": int}
+_repeat_state: dict = {}
+
+# Volatile result keys that differ on every run of an otherwise identical call.
+_REPEAT_VOLATILE = ("elapsed_seconds", "retries", "stdout_path")
+
+
+def _repeat_key(tool_name: str, args: dict) -> str:
+    import hashlib
+    import json as _json
+    payload = _json.dumps({k: v for k, v in (args or {}).items() if k != "_note"},
+                          sort_keys=True, default=str)
+    return hashlib.sha256(f"{tool_name}|{payload}".encode()).hexdigest()
+
+
+def _result_hash(payload: dict) -> str:
+    import hashlib
+    import json as _json
+    clean = {k: v for k, v in payload.items()
+             if not k.startswith("_") and k not in _REPEAT_VOLATILE
+             and not k.endswith("_notice")}
+    return hashlib.sha256(_json.dumps(clean, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _repeat_precheck(key: str, tool_name: str) -> str:
+    """Return a refusal message when this exact call has already returned the
+    same result REPEAT_BLOCK_AFTER times; else ''. Fail-open."""
+    if not REPEAT_GATE_ENABLED or REPEAT_BLOCK_AFTER <= 0:
+        return ""
+    st = _repeat_state.get(key)
+    if st and st["identical"] >= REPEAT_BLOCK_AFTER:
+        n = st["identical"] + 1
+        return (
+            f"repeat_call_gate: this exact {tool_name} call has run {n - 1} "
+            f"times with an IDENTICAL result. A repeated negative is evidence "
+            f"of absence — record it once via misc.record_finding("
+            f"description=\"No matches for <what was searched>\", "
+            f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", "
+            f"category=..., act=..., scope=[...], linked_call_id=<the prior "
+            f"call's cid>, input_call_ids=[...]) and run a DIFFERENT query, or "
+            f"call dair.dair_assess for the next work order."
+        )
+    return ""
+
+
+def _repeat_update(key: str, tool_name: str, payload: dict) -> str:
+    """Record this call's result; return a repeat notice when the result is
+    identical to the previous run of the same call. Fail-open."""
+    if not REPEAT_GATE_ENABLED:
+        return ""
+    try:
+        h = _result_hash(payload)
+        st = _repeat_state.get(key)
+        if st is None or st["result_hash"] != h:
+            if len(_repeat_state) >= _REPEAT_MAX_KEYS and key not in _repeat_state:
+                _repeat_state.pop(next(iter(_repeat_state)), None)
+            _repeat_state[key] = {"result_hash": h, "identical": 0}
+            return ""
+        st["identical"] += 1
+        n = st["identical"] + 1
+        return (
+            f"REPEAT CALL: this exact call has now run {n}x with an identical "
+            f"result — re-running it cannot produce new evidence. If it is a "
+            f"negative, record it once (misc.record_finding, "
+            f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", with "
+            f"scope) and move to a DIFFERENT query, or call dair.dair_assess "
+            f"for the next work order."
+        )
+    except Exception:
+        return ""
+
+
 def _apply_notices(payload: dict, notices: list) -> dict:
     for key, msg in notices:
         payload.setdefault(key, msg)
@@ -441,7 +528,19 @@ class NarrationMiddleware(Middleware):
 
         # 2b. DAIR engagement nudge (allow → notice → block; see constants above)
         notices: list = []
+        repeat_key = None
         if tool_name not in DAIR_GATE_ALLOWLIST:
+            if not (tool_name.startswith(_NUDGE_SKIP_PREFIXES)
+                    or tool_name.endswith(_NUDGE_SKIP_SUFFIXES)):
+                repeat_key = _repeat_key(tool_name, args)
+                rmsg = _repeat_precheck(repeat_key, tool_name)
+                if rmsg:
+                    try:
+                        from core.execution_log import log
+                        log.record_tool_blocked(tool_name, rmsg[:300])
+                    except Exception:
+                        pass
+                    raise ToolError(f"Tool {tool_name} blocked: {rmsg}")
             action, nmsg = _nudge_decision(tool_name)
             if action == "block":
                 try:
@@ -500,11 +599,21 @@ class NarrationMiddleware(Middleware):
         try:
             from tools._enrich import enrich
             if isinstance(result, dict):
-                result = _apply_notices(enrich(tool_name, result), notices)
+                enriched_d = enrich(tool_name, result)
+                if repeat_key:
+                    rn = _repeat_update(repeat_key, tool_name, enriched_d)
+                    if rn:
+                        notices.append(("repeat_notice", rn))
+                result = _apply_notices(enriched_d, notices)
             else:
                 sc = _result_payload(result)
                 if isinstance(sc, dict):
-                    enriched = _apply_notices(enrich(tool_name, dict(sc)), notices)
+                    enriched = enrich(tool_name, dict(sc))
+                    if repeat_key:
+                        rn = _repeat_update(repeat_key, tool_name, enriched)
+                        if rn:
+                            notices.append(("repeat_notice", rn))
+                    enriched = _apply_notices(enriched, notices)
                     update = {"structured_content": enriched}
                     blocks = getattr(result, "content", None)
                     if (isinstance(blocks, list) and len(blocks) == 1
