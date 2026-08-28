@@ -133,6 +133,8 @@ DAIR_MODEL=claude-opus-4-8
 
 > Optional: `VIRUSTOTAL_API_KEY` and `ABUSEIPDB_API_KEY` add IOC corroboration but never block a run. Everything else degrades gracefully — except the two keys above, whose absence skips the review/direction loop entirely.
 
+> No Anthropic key? Both reasoning surfaces also run on any OpenAI-compatible local server (`REASON_BACKEND=openai-compat`, `REASON_URL=…`). For a *thinking* model such as Qwen3 keep thinking on and set `TRUDI_COMPAT_THINKING_BUDGET` / raise the timeouts — see the "Local thinking model" block in the [README](../README.md#reasoning-backends) and `.env.example`.
+
 **2. Get the evidence.** Each case in [docs/datasets.md](datasets.md) links to its authoritative source. The bundled case briefs (`~/cases/<CASE>/CLAUDE.md`) already have the evidence paths filled in, so the simplest reproduction is to drop the matching image into an existing bundled case:
 
 ```bash
@@ -193,7 +195,7 @@ ls ~/.claude/commands/trudi-*.md
 ls ~/.claude/skills/
 
 # The test suite passes (also run by install.sh)
-cd ~/trudi && source ~/.venv/bin/activate && pytest -q
+cd ~/trudi && source ~/.venv/bin/activate && pytest -n auto --no-cov -q   # ~30 s; drop -n auto for a serial run
 
 # The dashboard serves the bundled cases
 ./dashboard.sh           # then open http://127.0.0.1:8765
