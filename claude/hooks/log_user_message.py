@@ -63,12 +63,20 @@ def _process(trace_path: str, payload: dict) -> None:
 
     source_uuid = payload.get("uuid") or _uuid.uuid4().hex
 
-    # Load dedup state — same file `log_narration.py` writes to.
+    # Load dedup state — same file `log_narration.py` writes to; scoped per
+    # session so one session's churn can't evict another's dedup keys.
     try:
         state = json.loads(_STATE_FILE.read_text()) if _STATE_FILE.exists() else {}
     except (OSError, json.JSONDecodeError):
         state = {}
-    processed = set(state.get("processed_user_message_uuids", []) or [])
+    sid = payload.get("session_id") or "_global"
+    sessions = state.setdefault("sessions", {})
+    mine = sessions.setdefault(sid, {})
+    if state.get("processed_user_message_uuids"):  # legacy top-level key
+        mine["processed_user_message_uuids"] = list(
+            set(mine.get("processed_user_message_uuids", []))
+            | set(state.pop("processed_user_message_uuids")))
+    processed = set(mine.get("processed_user_message_uuids", []) or [])
 
     if source_uuid in processed:
         return
@@ -99,6 +107,8 @@ def _process(trace_path: str, payload: dict) -> None:
         "role": "user",
         "_source_uuid": source_uuid,
     }
+    if payload.get("session_id"):
+        entry["_source_session_id"] = payload["session_id"]
 
     existing = trace.get("entries", []) or []
     existing.append(entry)
@@ -110,7 +120,7 @@ def _process(trace_path: str, payload: dict) -> None:
     os.replace(tmp_trace, trace_path)
 
     processed.add(source_uuid)
-    state["processed_user_message_uuids"] = list(processed)[-1000:]
+    mine["processed_user_message_uuids"] = list(processed)[-1000:]
     _STATE_FILE.write_text(json.dumps(state))
 
 
@@ -120,33 +130,18 @@ def main() -> None:
     except json.JSONDecodeError:
         return
 
-    if not _SESSION_FILE.exists():
-        return  # No active TRUDI investigation.
-    try:
-        session = json.loads(_SESSION_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    trace_path = session.get("path")
-    if not trace_path:
-        return
-    # Older session beacons stored a relative path (e.g.
-    # `./analysis/<case>_trace.json`); resolve it against the case dir
-    # so the hook works regardless of the harness CWD. New beacons store
-    # absolute paths but we defensively handle both.
-    if not Path(trace_path).is_absolute():
-        case_id = session.get("case_id") or ""
-        candidate = Path.home() / "cases" / case_id / trace_path.lstrip("./")
-        if candidate.exists():
-            trace_path = str(candidate.resolve())
-    if not Path(trace_path).exists():
-        return
-
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock = open(_LOCK_FILE, "w")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        # Make log_narration.py importable as a sibling module.
+        # Make sibling modules importable (log_narration, _session_owner).
         sys.path.insert(0, str(Path(__file__).resolve().parent))
+        # Session-ownership gate — only the beacon-owning session writes
+        # (claim atomic under the flock we hold). See _session_owner.py.
+        from _session_owner import resolve_owner
+        trace_path, _reason = resolve_owner(payload, claim=True)
+        if trace_path is None:
+            return
         _process(trace_path, payload)
     finally:
         try:

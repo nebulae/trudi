@@ -82,6 +82,21 @@ def main() -> None:
     except Exception:
         payload = {}
 
+    # Session-ownership gate: a Stop from a non-owner session (a concurrent
+    # dev session on the same box) must not append to the case audit log.
+    # Read-only check (claim=False) — the writing hooks own the claim; a
+    # legacy payload without session_id/cwd fails open (single-session use
+    # unchanged).
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _session_owner import resolve_owner
+        _tp, _reason = resolve_owner(
+            payload if isinstance(payload, dict) else {}, claim=False)
+        if _tp is None and _reason in ("not_owner", "cwd_outside_case"):
+            return
+    except Exception:
+        pass
+
     target = resolve_audit_log()
     if target is None:
         return  # no active investigation / unsafe location → write nothing

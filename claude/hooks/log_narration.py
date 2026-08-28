@@ -156,10 +156,19 @@ def _next_shared_id(trace_path: str) -> int:
 
 
 def _process(transcript_path: str, trace_path: str, payload: dict) -> None:
-    # 1) Load dedup state.
+    # 1) Load dedup state — scoped per session so one session's churn can't
+    #    evict another's dedup keys (the uuid stream is per-transcript).
     state = json.loads(_STATE_FILE.read_text()) if _STATE_FILE.exists() else {}
-    processed_uuids   = set(state.get("processed_uuids", []))
-    processed_tool_ids = set(state.get("processed_tool_use_ids", []))
+    real_sid = payload.get("session_id") or ""
+    sid = real_sid or "_global"
+    sessions = state.setdefault("sessions", {})
+    mine = sessions.setdefault(sid, {})
+    # Migrate legacy top-level dedup keys into this session's bucket once.
+    for legacy in ("processed_uuids", "processed_tool_use_ids"):
+        if state.get(legacy):
+            mine[legacy] = list(set(mine.get(legacy, [])) | set(state.pop(legacy)))
+    processed_uuids   = set(mine.get("processed_uuids", []))
+    processed_tool_ids = set(mine.get("processed_tool_use_ids", []))
 
     # 2) Belt-and-suspenders: collect prior dedup keys from the trace itself.
     trace = json.loads(Path(trace_path).read_text())
@@ -223,8 +232,9 @@ def _process(transcript_path: str, trace_path: str, payload: dict) -> None:
     if not new_entries:
         # Only persist dedup state if we saw new uuids; otherwise no-op.
         if new_uuids:
-            state["processed_uuids"] = list(processed_uuids)[-1000:]
-            state["processed_tool_use_ids"] = list(processed_tool_ids)[-1000:]
+            mine["processed_uuids"] = list(processed_uuids)[-1000:]
+            mine["processed_tool_use_ids"] = list(processed_tool_ids)[-1000:]
+            _prune_sessions(sessions)
             _STATE_FILE.write_text(json.dumps(state))
         return
 
@@ -245,6 +255,8 @@ def _process(transcript_path: str, trace_path: str, payload: dict) -> None:
     existing_entries = trace_now.get("entries", []) or []
 
     for entry in new_entries:
+        if real_sid:
+            entry["_source_session_id"] = real_sid
         entry["call_id"] = _next_shared_id(trace_path)
 
     merged = existing_entries + new_entries
@@ -256,11 +268,18 @@ def _process(transcript_path: str, trace_path: str, payload: dict) -> None:
     tmp_trace.write_text(json.dumps(trace_now, indent=2))
     os.replace(tmp_trace, trace_path)
 
-    # 6) Persist dedup state (cap dedup sets at 1000).
-    state["processed_uuids"]         = list(processed_uuids)[-1000:]
-    state["processed_tool_use_ids"]  = list(processed_tool_ids)[-1000:]
+    # 6) Persist dedup state (cap dedup sets at 1000 per session).
+    mine["processed_uuids"]         = list(processed_uuids)[-1000:]
+    mine["processed_tool_use_ids"]  = list(processed_tool_ids)[-1000:]
     state.pop("next_hook_call_id", None)  # legacy field — now handled by shared counter
+    _prune_sessions(sessions)
     _STATE_FILE.write_text(json.dumps(state))
+
+
+def _prune_sessions(sessions: dict, keep: int = 8) -> None:
+    """Bound the per-session dedup buckets (insertion-ordered dict)."""
+    while len(sessions) > keep:
+        sessions.pop(next(iter(sessions)), None)
 
 
 def main() -> None:
@@ -272,29 +291,20 @@ def main() -> None:
     if not transcript_path or not Path(transcript_path).exists():
         return
 
-    if not _SESSION_FILE.exists():
-        return  # no active TRUDI investigation
-    try:
-        session = json.loads(_SESSION_FILE.read_text())
-    except (OSError, json.JSONDecodeError):
-        return
-    trace_path = session.get("path")
-    if not trace_path:
-        return
-    # Older session beacons stored a relative path; resolve against the
-    # case dir so the hook works regardless of harness CWD.
-    if not Path(trace_path).is_absolute():
-        case_id = session.get("case_id") or ""
-        candidate = Path.home() / "cases" / case_id / trace_path.lstrip("./")
-        if candidate.exists():
-            trace_path = str(candidate.resolve())
-    if not Path(trace_path).exists():
-        return
-
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock = open(_LOCK_FILE, "w")
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        # Session-ownership gate (_session_owner.py): resolves the beacon trace
+        # path AND refuses writes from any session that isn't the beacon owner
+        # (cwd outside the case dir, or a different session_id) — a concurrent
+        # dev session can no longer pollute a live investigation's trace. The
+        # claim is atomic because we hold the flock.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _session_owner import resolve_owner
+        trace_path, _reason = resolve_owner(payload, claim=True)
+        if trace_path is None:
+            return
         _process(transcript_path, trace_path, payload)
     finally:
         try:
