@@ -659,4 +659,17 @@ def tcpxtract_streams(
     import os
     os.makedirs(output_dir, exist_ok=True)
     cmd = ["tcpxtract", "-f", pcap_file, "-o", output_dir]
-    return run(cmd, needs_sudo=True, timeout=300, output_dir=output_dir)
+    # Carve-class job: a ~50MB pcap runs well past the 300s default (observed
+    # live: killed at 300s with thousands of files already carved). On timeout
+    # the partial output REMAINS in output_dir and is usable evidence.
+    result = run(cmd, needs_sudo=True, timeout=1800, output_dir=output_dir)
+    if not result.get("success"):
+        try:
+            carved = len(os.listdir(output_dir))
+        except OSError:
+            carved = 0
+        if carved:
+            result["partial_output"] = (
+                f"{carved} files already carved into {output_dir} — "
+                "usable despite the failure")
+    return result
