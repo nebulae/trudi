@@ -1810,6 +1810,18 @@ def record_agent_message(
 
 
 @mcp.tool()
+def job_status(job_id: str) -> dict:
+    """
+    Poll a background job (e.g. net.tcpxtract_streams). While running:
+    status + elapsed + files-so-far. When finished: the full tool result —
+    trace-logged with a citable _trudi_call_id on first collection. Poll
+    between other work; never wait idle on a running job.
+    """
+    from core.jobs import job_status as _job_status
+    return _job_status(job_id)
+
+
+@mcp.tool()
 @output_safe
 def clear_case_run(case_dir: str) -> dict:
     """
@@ -2374,3 +2386,4 @@ def knowns_pattern_generate(
             pass
 
     return result
+

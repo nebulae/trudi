@@ -29,6 +29,10 @@ full rationale lives in `~/trudi/claude/CLAUDE.md` and `~/trudi/docs/gates.md`.
 - Timestamps always UTC. Check `success: true` after every run; on failure read
   stderr, correct, retry. A result with `truncated: true` is INCOMPLETE — re-run
   narrower before recording any negative.
+- **Background jobs:** carve-class tools (e.g. `net.tcpxtract_streams`)
+  return a `job_id` immediately — poll `misc.job_status(job_id)` between other
+  work; never sit idle waiting on a running job. The finished job_status
+  result is the citable record.
 - Never manually edit `~/.cache/trudi/*` files; reset with
   `python -m tools.trudi_reset --case-dir <case>`.
 
