@@ -1,5 +1,6 @@
 """FastMCP middleware: trace every MCP tool call and enforce DAIR oversight."""
 import asyncio
+import os
 import sys
 import time
 import traceback
@@ -61,6 +62,144 @@ DAIR_GATE_ALLOWLIST = frozenset({
 # then requires a DAIR-directed return to a collection phase.
 _DAIR_ACTIVE_PHASES = frozenset({"Triage", "Collect", "Analyze", "Scan"})
 DAIR_WINDOW = 20       # retained for backward-compat imports; no longer used by the gate
+
+# ── DAIR engagement nudge (phase-boundary, counter-free) ────────────────────
+# A local driving model (observed: Titus) investigates competently but never
+# consults DAIR or records findings (108 and 177 forensic calls with DAIR never
+# engaged in the two pathological runs). The dair_required gate teaches at
+# record_finding time, but a model that also never records findings never meets
+# it. This gate teaches at the PHASE BOUNDARIES of the investigation protocol
+# instead — no call counters (a windowed counter is the retired DAIR_WINDOW
+# friction: long legitimate batches age out mid-work-order):
+#
+#   Triage (DAIR not yet engaged, _current_phase == ""):
+#     baseline collection        → allow (pre-plan batch freedom)
+#     after reason_hypothesize   → notice: finish the ritual (reason.plan → dair)
+#     after reason_plan          → BLOCK forensic tools: call dair_assess to
+#                                  enter Collect. Measured 2026-08-28: 10/11
+#                                  compliant historical runs make ZERO MCP
+#                                  forensic calls between plan and first dair,
+#                                  so this boundary never fires on a compliant
+#                                  driver. dair/reason/record tools are
+#                                  allowlisted — the way forward is always open.
+#   Engaged (Triage/Collect/Analyze/Scan): allow — DAIR directs via its own
+#     directives; Report blocking stays with the existing phase gate above.
+#   Analyze/Scan with zero recorded findings: advisory finding_notice
+#     (time-throttled) — analysis that is never recorded cannot reach the report.
+DAIR_NUDGE_ENABLED = (os.environ.get("TRUDI_DAIR_NUDGE") or "1").strip().lower() not in (
+    "0", "off", "false", "none")
+
+# Live-monitoring uses per-investigation traces and its own flow; job polling
+# must never be gated.
+_NUDGE_SKIP_PREFIXES = ("monitor_", "respond_", "velo_", "live_")
+_NUDGE_SKIP_SUFFIXES = ("job_status", "job_list")
+
+_FINDING_NOTICE_INTERVAL_S = 60.0   # advisory throttle, wall-clock (not a counter)
+
+_DAIR_CALL_SHAPE = (
+    "dair.dair_assess(tool_results_summary=\"<3-5 sentences: what this batch "
+    "found>\", phase_stack='[]' (or the current stack), case_context=\"<case id "
+    "+ confirmed IOCs>\", input_call_ids=[<recent cids>])"
+)
+
+
+class _RitualState:
+    """Incremental view of the trace's Triage-ritual facts. Per-process; a
+    trace reset (new case / shorter entry list) clears it."""
+    def __init__(self) -> None:
+        self.scanned_idx = 0
+        self.has_hypothesize = False
+        self.has_plan = False
+        self.findings = 0
+        self.last_finding_notice = 0.0
+
+
+_ritual = _RitualState()
+
+
+def _scan_ritual() -> None:
+    from core.execution_log import log
+    entries = log._entries
+    if len(entries) < _ritual.scanned_idx:      # trace reset / new case
+        _ritual.__init__()
+    for e in entries[_ritual.scanned_idx:]:
+        t = e.get("type")
+        if t == "reason_call":
+            tool = e.get("tool", "")
+            if tool == "reason_hypothesize":
+                _ritual.has_hypothesize = True
+            elif tool == "reason_plan":
+                _ritual.has_plan = True
+        elif t == "finding":
+            _ritual.findings += 1
+    _ritual.scanned_idx = len(entries)
+
+
+def _nudge_decision(tool_name: str) -> tuple[str, str]:
+    """('allow'|'notice'|'block', message). Fail-open on any internal error."""
+    if not DAIR_NUDGE_ENABLED:
+        return "allow", ""
+    if tool_name.startswith(_NUDGE_SKIP_PREFIXES) or tool_name.endswith(_NUDGE_SKIP_SUFFIXES):
+        return "allow", ""
+    try:
+        from core.execution_log import log
+        phase = getattr(log, "_current_phase", "") or ""
+        if phase:
+            return "allow", ""            # engaged: DAIR directs; Report handled above
+        _scan_ritual()
+        if _ritual.has_plan:
+            return "block", (
+                "DAIR PROTOCOL: Triage is complete (reason.plan recorded) but "
+                "DAIR has not been engaged. Call " + _DAIR_CALL_SHAPE + " to "
+                "receive the Collect work order before any further forensic "
+                "tools. Findings cannot be recorded until DAIR is engaged "
+                "(gate dair_required)."
+            )
+        if _ritual.has_hypothesize:
+            return "notice", (
+                "DAIR PROTOCOL: Triage ritual in progress — after the baseline "
+                "batch, run reason.plan(case_description=..., "
+                "evidence_available=..., case_question=...), then "
+                + _DAIR_CALL_SHAPE + ". Findings cannot be recorded until DAIR "
+                "is engaged."
+            )
+        return "allow", ""
+    except Exception:
+        return "allow", ""
+
+
+def _finding_nudge() -> str:
+    """Advisory, phase-conditioned: in Analyze/Scan with zero recorded findings."""
+    if not DAIR_NUDGE_ENABLED:
+        return ""
+    try:
+        from core.execution_log import log
+        phase = getattr(log, "_current_phase", "") or ""
+        if phase not in ("Analyze", "Scan"):
+            return ""
+        _scan_ritual()
+        if _ritual.findings:
+            return ""
+        now = time.monotonic()
+        if now - _ritual.last_finding_notice < _FINDING_NOTICE_INTERVAL_S:
+            return ""
+        _ritual.last_finding_notice = now
+        return (
+            f"FINDINGS: the investigation is in {phase} with 0 recorded "
+            f"findings. For each confirmed observation call "
+            f"misc.record_finding(description=..., confidence=..., "
+            f"linked_call_id=<this call's _trudi_call_id>, claim_kind=..., "
+            f"category=..., act=..., input_call_ids=[...]). Analysis that is "
+            f"never recorded cannot reach the report."
+        )
+    except Exception:
+        return ""
+
+
+def _apply_notices(payload: dict, notices: list) -> dict:
+    for key, msg in notices:
+        payload.setdefault(key, msg)
+    return payload
 
 
 # ── MCP routing gate configuration ───────────────────────────────────────────
@@ -287,6 +426,23 @@ class NarrationMiddleware(Middleware):
                     pass
                 raise ToolError(f"Tool {tool_name} blocked: {reason}.")
 
+        # 2b. DAIR engagement nudge (allow → notice → block; see constants above)
+        notices: list = []
+        if tool_name not in DAIR_GATE_ALLOWLIST:
+            action, nmsg = _nudge_decision(tool_name)
+            if action == "block":
+                try:
+                    from core.execution_log import log
+                    log.record_tool_blocked(tool_name, f"dair_engagement_gate: {nmsg[:300]}")
+                except Exception:
+                    pass
+                raise ToolError(f"Tool {tool_name} blocked: {nmsg}")
+            if action == "notice":
+                notices.append(("dair_notice", nmsg))
+            fmsg = _finding_nudge()
+            if fmsg:
+                notices.append(("finding_notice", fmsg))
+
         if "_note" in (context.message.arguments or {}):
             new_message = context.message.model_copy(update={"arguments": args})
             context = context.copy(message=new_message)
@@ -331,11 +487,11 @@ class NarrationMiddleware(Middleware):
         try:
             from tools._enrich import enrich
             if isinstance(result, dict):
-                result = enrich(tool_name, result)
+                result = _apply_notices(enrich(tool_name, result), notices)
             else:
                 sc = _result_payload(result)
                 if isinstance(sc, dict):
-                    enriched = enrich(tool_name, dict(sc))
+                    enriched = _apply_notices(enrich(tool_name, dict(sc)), notices)
                     update = {"structured_content": enriched}
                     blocks = getattr(result, "content", None)
                     if (isinstance(blocks, list) and len(blocks) == 1
