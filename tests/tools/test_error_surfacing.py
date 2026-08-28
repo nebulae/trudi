@@ -70,6 +70,59 @@ class TestToolBodyExceptionCapture:
         assert "boom" in py_entry["stderr"]
         # Traceback (not just str(e)) must be captured.
         assert "Traceback" in py_entry["stderr"]
+        # F-4: the MESSAGE comes first (the trace keeps 512 chars), not the
+        # traceback head.
+        assert py_entry["stderr"].startswith("Unhandled ValueError: boom")
+
+    def test_finding_correction_allowed_in_report_phase(self, tmp_path):
+        # record_finding(supersedes=…) is report-phase work.
+        from core.middleware import NarrationMiddleware
+        from fastmcp.exceptions import ToolError
+        l = _configured_log(tmp_path)
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        mw = NarrationMiddleware()
+
+        async def _ok(_ctx):
+            return {"success": True}
+
+        with patch("core.execution_log.log", l):
+            with pytest.raises(ToolError, match="blocked"):
+                _run_async(mw.on_call_tool(_build_context("misc_misc_record_finding",
+                                                          {"description": "new", "confidence": "LIKELY"}), _ok))
+            r = _run_async(mw.on_call_tool(_build_context("misc_misc_record_finding",
+                                                          {"description": "fix", "confidence": "SUSPECTED",
+                                                           "supersedes": 12}), _ok))
+        assert isinstance(r, dict) and r.get("success") is True
+        blocked = [e for e in l._entries if e.get("type") == "tool_blocked"]
+        assert len(blocked) == 1
+
+    def test_input_validation_error_is_a_typed_refusal_with_arg_shapes(self, tmp_path):
+        # A fastmcp/pydantic ValidationError must name
+        # the field and the arg types the agent sent, and carry a gate id.
+        from core.middleware import NarrationMiddleware
+        from fastmcp.exceptions import ToolError
+
+        class ValidationError(Exception):
+            pass
+
+        l = _configured_log(tmp_path)
+        l.record_dair_call("Triage", "", False, "", "", "stay", "")
+        mw = NarrationMiddleware()
+        ctx = _build_context("reason_reason_evaluate_finding",
+                             {"finding": "x", "entities": "not-a-list", "input_call_ids": [1]})
+
+        async def _bad(_ctx):
+            raise ValidationError("1 validation error for evaluate_finding\nentities\n  Input should be a valid list")
+
+        with patch("core.execution_log.log", l):
+            with pytest.raises(ToolError) as ei:
+                _run_async(mw.on_call_tool(ctx, _bad))
+        msg = str(ei.value)
+        assert "rejected its input" in msg and "entities" in msg and "entities:str" in msg
+        py_entry = next(e for e in l._entries if e.get("cmd") == "<py>:reason_reason_evaluate_finding")
+        assert py_entry["gate"] == "input_validation"
+        assert py_entry["stderr"].startswith("Unhandled ValidationError: 1 validation error")
+        assert "entities:str" in py_entry["stderr"] and "not-a-list" not in py_entry["stderr"]
 
     def test_exception_chain_preserved(self, tmp_path):
         from core.middleware import NarrationMiddleware
@@ -148,6 +201,55 @@ class TestToolBodyExceptionCapture:
         assert baselines, ("middleware must write a baseline tool_call entry "
                            f"for a successful pure-Python tool; got {new_entries}")
         assert baselines[0]["success"] is True
+
+    def test_refused_pure_python_tool_baseline_is_a_failure(self, tmp_path):
+        """A wrapper that RETURNS a refusal ({"success": False, "gate": ...})
+        without self-logging (export_execution_log / write_final_report
+        behind _pre_report_ready_gate) must not read as a successful run in
+        the trace: the baseline carries success=False + the gate id."""
+        from core.middleware import NarrationMiddleware
+
+        l = _configured_log(tmp_path)
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        before_len = len(l._entries)
+        mw = NarrationMiddleware()
+        ctx = _build_context("misc_export_execution_log", {"output_path": "reports/x"})
+
+        async def _refused(_ctx):
+            return {"success": False, "gate": "pre_report_check_required",
+                    "error": "export_execution_log refused: ready_to_report is false"}
+
+        with patch("core.execution_log.log", l):
+            r = _run_async(mw.on_call_tool(ctx, _refused))
+
+        assert r["success"] is False
+        e = [x for x in l._entries[before_len:]
+             if x.get("cmd") == "<py>:misc_export_execution_log"][0]
+        assert e["success"] is False and e["exit_code"] == 1
+        assert e["gate"] == "pre_report_check_required"
+        assert "refused" in e["stderr"]
+
+    def test_refusal_inside_toolresult_is_unwrapped(self, tmp_path):
+        from core.middleware import NarrationMiddleware
+
+        l = _configured_log(tmp_path)
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        before_len = len(l._entries)
+        mw = NarrationMiddleware()
+        ctx = _build_context("misc_write_final_report")
+        wrapped = MagicMock()
+        wrapped.structured_content = {"success": False, "gate": "pre_report_check_required"}
+        wrapped.content = []
+        wrapped.model_copy = MagicMock(return_value=wrapped)
+
+        async def _refused(_ctx):
+            return wrapped
+
+        with patch("core.execution_log.log", l):
+            _run_async(mw.on_call_tool(ctx, _refused))
+        e = [x for x in l._entries[before_len:]
+             if x.get("cmd") == "<py>:misc_write_final_report"][0]
+        assert e["success"] is False and e["gate"] == "pre_report_check_required"
 
     def test_self_logging_tool_is_not_double_logged(self, tmp_path):
         """Tools that already write their own record_* entry (subprocess
