@@ -820,6 +820,11 @@ def start_execution_log(case_id: str, output_path: str,
     stderr and written to <analysis_dir>/dashboard.url for easy retrieval.
     """
     from core.execution_log import log
+    # Normalize: the dashboard discovers traces by *_trace.json — an
+    # extension-less output_path (models omit it) would make the run
+    # invisible there while writing fine.
+    if not output_path.endswith(".json"):
+        output_path = output_path + ".json"
     # Self-test: configure flushes the initial empty trace, and our explicit
     # sentinel write confirms record_* works end-to-end. Either failure
     # surfaces as a clean error return rather than an unhandled exception.
@@ -860,7 +865,8 @@ def start_execution_log(case_id: str, output_path: str,
             import sys as _modsys
             _dash_fn = _modsys.modules[__name__].launch_dashboard
             try:
-                dash = _dash_fn(case_dir, port=dashboard_port)
+                dash = _dash_fn(case_dir, port=dashboard_port,
+                                trace_path=output_path)
             except (OSError, ValueError) as _disc_err:
                 # Disk / parse / discovery problems are non-fatal — the
                 # investigation can run without the dashboard. Surface in
@@ -2140,7 +2146,8 @@ def _discover_dashboard() -> dict | None:
     return info
 
 
-def launch_dashboard(case_dir: str, port: int = 8765) -> dict:
+def launch_dashboard(case_dir: str, port: int = 8765,
+                     trace_path: str = "") -> dict:
     """Discover the running standalone dashboard and return a deep-link URL.
 
     Does NOT start any server — that's the standalone `trudi-dashboard`
@@ -2158,7 +2165,12 @@ def launch_dashboard(case_dir: str, port: int = 8765) -> dict:
     info = _discover_dashboard()
     case_id = _detect_case_id(case_dir)
     case_basename = os.path.basename(case_dir)
-    trace_rel = f"/{case_basename}/analysis/{case_id}_trace.json"
+    if trace_path:
+        # Deep-link the ACTUAL trace file — the {case_id}_trace.json guess
+        # breaks whenever the operator/agent named the trace differently.
+        trace_rel = f"/{case_basename}/analysis/{os.path.basename(trace_path)}"
+    else:
+        trace_rel = f"/{case_basename}/analysis/{case_id}_trace.json"
 
     if not info:
         return {
