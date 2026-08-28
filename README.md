@@ -84,6 +84,7 @@ Every tool call, DAIR call, reason call, and confirmed finding is written to a l
 
 2. **Claude Code CLI** — the agent runtime
    - Install: `curl -fsSL https://claude.ai/install.sh | bash` (or `npm install -g @anthropic-ai/claude-code`)
+   - [OpenCode](https://opencode.ai) is also supported, side-by-side — see [OpenCode support](#opencode-support-side-by-side)
 
 3. **Python 3.10+** and **dotnet** — both included in SIFT Workstation
 
@@ -138,6 +139,7 @@ cd ~/trudi
 - Copies `.env.example` → `.env` (edit this to add API keys)
 - **Backs up** any existing `~/.claude/CLAUDE.md` with a UTC timestamp, then installs the TRUDI orchestrator
 - Registers Claude Code hooks and slash commands (run directly from the repo — no drift-prone deployed copies)
+- Configures **OpenCode side-by-side** when detected — MCP registration, forensic-binary deny rules, `/trudi-*` commands, hook-adapter plugin, `AGENTS.md`
 - Registers the TRUDI MCP server globally with `claude mcp add --scope global`
 - Runs the full test suite (1,100+ tests) as a smoke check
 
@@ -441,6 +443,36 @@ scales linearly — and never contends with a live TRUDI session.
 
 ---
 
+## OpenCode support (side-by-side)
+
+TRUDI also runs under [OpenCode](https://opencode.ai) — configured automatically by
+`install.sh` when OpenCode is detected (or on re-run after installing it). Claude Code
+and OpenCode are supported **side-by-side**: the same repo, MCP server, gates, hooks,
+commands, and orchestrator serve both.
+
+What `opencode/register_opencode.py` sets up under `~/.config/opencode/`:
+
+| Piece | How |
+|-------|-----|
+| MCP server | `opencode.json` → `mcp["trudi-sift"]` pointing at the venv python + `server.py` |
+| Forensic-binary deny rules | `permission.bash` deny map **derived from the same ban list Claude Code uses** (`case-template/.claude/settings.json`) — one source of truth, parsed not copied |
+| `/trudi-*` commands | symlinked from `claude/commands/` (repo path — no drift) |
+| Execution-time guard + trace hooks | `plugin/trudi.js`, a **logic-free adapter** that translates OpenCode plugin events (`tool.execute.before/after`, `chat.message`, `session.idle`) into the stdin-JSON contract of the Python hooks in `claude/hooks/` and spawns them — the tested Python hooks stay the single source of truth; a guard deny becomes a thrown error, which blocks the tool call |
+| Orchestrator | `claude/CLAUDE.md` installed as `AGENTS.md` (existing file backed up first) |
+
+**Why:** a fully local stack. OpenCode can drive the investigation on a local model
+while `REASON_BACKEND` / `DAIR_BACKEND` already run on local models — no cloud
+dependency anywhere in the loop. The server-side control plane (typed claims, tiering,
+gates, DAIR) is client-agnostic and identical under both agents.
+
+Known limits: assistant-narration copying into the trace reads the Claude Code
+transcript and is skipped under OpenCode (tool calls, user messages, and the Stop
+audit still land in the trace); the OpenCode plugin API moves quickly — the adapter
+is contract-tested against the Python hooks (`tests/security/test_opencode_contract.py`),
+but re-verify event payload shapes when upgrading OpenCode.
+
+---
+
 ## Repository layout
 
 ```
@@ -449,6 +481,7 @@ trudi/
 ├── install.sh             ← one-command setup on a SIFT Workstation
 ├── claude/
 │   └── CLAUDE.md          ← global orchestrator (installed to ~/.claude/CLAUDE.md)
+├── opencode/              ← OpenCode side-by-side support (registrar + hook-adapter plugin)
 ├── case-template/         ← starter case directory for new investigations
 │   ├── CLAUDE.md
 │   ├── .claude/settings.json

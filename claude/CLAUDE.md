@@ -1,6 +1,7 @@
-# CLAUDE.md
+# TRUDI Orchestrator
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file directs the coding agent running a TRUDI investigation — installed as
+`~/.claude/CLAUDE.md` for Claude Code and as `AGENTS.md` for OpenCode.
 
 ## DFIR Orchestrator — TRUDI / SANS SIFT Workstation
 

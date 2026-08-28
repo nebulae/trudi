@@ -41,6 +41,7 @@ cd ~/trudi
 - Copy the MITRE ATT&CK table and the **bundled case studies** into `~/cases/` (existing cases are never overwritten)
 - Back up then install the TRUDI orchestrator to `~/.claude/CLAUDE.md`
 - Register the Claude Code **hooks** and the 5 **`/trudi-*` slash commands** — all run from the repo path (no drift-prone copies)
+- Configure **OpenCode side-by-side** when detected (MCP + deny rules + commands + hook-adapter plugin + `AGENTS.md`) — see the README's *OpenCode support* section
 - Register the **`trudi-sift` MCP server** globally
 - Run the test suite (1,100+ tests) as a smoke check
 

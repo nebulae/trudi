@@ -329,6 +329,27 @@ else
     warn "No commands at $COMMANDS_SRC — skipping slash command install"
 fi
 
+# ── 6c. OpenCode support (optional, side-by-side) ────────────────────────────
+
+step "OpenCode support (optional)"
+
+OPENCODE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+if command -v opencode &>/dev/null || [ -d "$OPENCODE_DIR" ]; then
+    # Registers the trudi-sift MCP server, derives the forensic-binary bash
+    # deny rules from the same ban list Claude Code uses, symlinks the
+    # /trudi-* commands + the hook-adapter plugin (repo path — no drift), and
+    # installs the orchestrator as AGENTS.md (existing file backed up).
+    if python3 "$TRUDI_DIR/opencode/register_opencode.py" \
+            "$OPENCODE_DIR" "$TRUDI_DIR" "$VENV_DIR/bin/python3"; then
+        ok "OpenCode configured at $OPENCODE_DIR (side-by-side with Claude Code)"
+    else
+        warn "OpenCode registration failed — Claude Code setup is unaffected"
+    fi
+else
+    ok "OpenCode not detected — skipping (re-run ./install.sh after installing it)"
+fi
+
+
 # ── 7. MCP server registration ────────────────────────────────────────────────
 
 step "Registering TRUDI MCP server"
