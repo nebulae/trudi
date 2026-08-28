@@ -82,8 +82,8 @@ Every tool call, DAIR call, reason call, and confirmed finding is written to a l
 1. **SANS SIFT Workstation** — Ubuntu 22.04 x86-64 with forensic tools (Volatility 3, EZ Tools, Sleuth Kit, Plaso, YARA, bulk_extractor, etc.)
    - Download: https://www.sans.org/tools/sift-workstation/
 
-2. **Protocol SIFT** — installs Claude Code and the forensic skill playbooks
-   - Install: https://github.com/teamdfir/protocol-sift
+2. **Claude Code CLI** — the agent runtime
+   - Install: `curl -fsSL https://claude.ai/install.sh | bash` (or `npm install -g @anthropic-ai/claude-code`)
 
 3. **Python 3.10+** and **dotnet** — both included in SIFT Workstation
 
@@ -137,11 +137,11 @@ cd ~/trudi
 - Creates a Python venv at `~/.venv` and installs all dependencies
 - Copies `.env.example` → `.env` (edit this to add API keys)
 - **Backs up** any existing `~/.claude/CLAUDE.md` with a UTC timestamp, then installs the TRUDI orchestrator
-- Registers Claude Code hooks, slash commands, and skills (hooks run directly from the repo — no drift-prone deployed copies)
+- Registers Claude Code hooks and slash commands (run directly from the repo — no drift-prone deployed copies)
 - Registers the TRUDI MCP server globally with `claude mcp add --scope global`
 - Runs the full test suite (1,100+ tests) as a smoke check
 
-If `~/.claude/CLAUDE.md` already exists (e.g. from a Protocol SIFT install), the backup is written to `~/.claude/CLAUDE.md.<YYYYMMDDTHHMMSS>.bak` — the original is never overwritten without a backup.
+If `~/.claude/CLAUDE.md` already exists, the backup is written to `~/.claude/CLAUDE.md.<YYYYMMDDTHHMMSS>.bak` — the original is never overwritten without a backup.
 
 ### API keys
 
@@ -446,7 +446,7 @@ scales linearly — and never contends with a live TRUDI session.
 ```
 trudi/
 ├── server.py              ← FastMCP server — mounts all 24 tool namespaces
-├── install.sh             ← one-command setup from a Protocol SIFT baseline
+├── install.sh             ← one-command setup on a SIFT Workstation
 ├── claude/
 │   └── CLAUDE.md          ← global orchestrator (installed to ~/.claude/CLAUDE.md)
 ├── case-template/         ← starter case directory for new investigations

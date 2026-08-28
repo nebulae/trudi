@@ -1808,7 +1808,7 @@ def record_agent_message(
 def clear_case_run(case_dir: str) -> dict:
     """
     Reset a case for a fresh investigation run. Deletes:
-      - analysis/, exports/, reports/ contents (preserves generate_pdf_report.py)
+      - analysis/, exports/, reports/ contents
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
@@ -1822,8 +1822,6 @@ def clear_case_run(case_dir: str) -> dict:
     for subdir in ("analysis", "exports", "reports"):
         target = os.path.join(case_dir, subdir)
         for item in glob.glob(os.path.join(target, "*")):
-            if os.path.basename(item) == "generate_pdf_report.py":
-                continue
             try:
                 if os.path.isdir(item):
                     shutil.rmtree(item)
