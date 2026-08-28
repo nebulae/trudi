@@ -469,7 +469,12 @@ gates, DAIR) is client-agnostic and identical under both agents.
 custom OpenAI-compatible server's context size; without it, it never compacts
 proactively and every long turn slams into the server's wall ("request exceeds
 the available context size") before recovering reactively. In the provider's
-model entry set `"limit": {"context": <your llama-server -c value>, "output": 8192}`.
+model entry set `"limit": {"context": <~85% of your llama-server -c>, "output": 8192}`
+— set it BELOW the server's actual `-c`, not equal to it. OpenCode compacts at
+its own threshold; if `limit.context` equals the server ceiling, a single turn's
+request can overshoot the compaction point and still hit the server's hard wall
+("request (N tokens) exceeds the available context size"). A ~10–15% gap (e.g.
+`78000` for `-c 90112`) gives the compaction room to land under the server limit.
 
 Known limits: assistant-narration copying into the trace reads the Claude Code
 transcript and is skipped under OpenCode (tool calls, user messages, and the Stop
