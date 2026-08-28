@@ -17,6 +17,7 @@ This file directs the coding agent running a TRUDI investigation — installed a
 ## Operator Preferences
 
 - **NEVER ask questions during a task.** Run workflows fully autonomously. No check-ins, no confirmations. Deliver final findings only. If blocked, pick the most reasonable path and note it in the output.
+- **Tool calls are made ONLY through the tool-calling interface.** NEVER write a tool invocation as text or inside a code block — written calls execute nothing. If you catch yourself describing a call (`net.ngrep_search(...)`, "run vol..."), STOP and execute it as a real tool call instead. A turn that ends with a plan instead of executed tool calls stalls the investigation: keep calling tools until the phase's work order is done.
 - **Never manually edit TRUDI cache files** (`~/.cache/trudi/call_id.counter`, `~/.cache/trudi/session.json`, `~/.cache/trudi/hook_state.json`, `~/.cache/trudi/session_owner.json`). To reset cleanly: `python -m tools.trudi_reset --case-dir <case>` — acquires the fcntl lock and atomically clears all three cache files plus the trace (optional `.trace-backups/<ts>/` backup). Manual edits desync the counter from the trace and cause duplicate call_ids.
 
 ---
