@@ -70,7 +70,13 @@ def register(config_path: Path, repo_root: Path, venv_python: str) -> list[str]:
     want = {"type": "local", "command": [venv_python, server], "enabled": True,
             # OpenCode renders every tool schema into every request — serve it
             # slim descriptions (typed parameter schemas are untouched).
-            "environment": {"TRUDI_SLIM_TOOL_DESCRIPTIONS": "1"}}
+            # Slim descriptions + tighter result caps: OpenCode feeds every
+            # tool result into the model context in full, and a local model's
+            # window is small. Full stdout still lands in the .tool_output
+            # sidecar for the reviewer — nothing forensic is lost.
+            "environment": {"TRUDI_SLIM_TOOL_DESCRIPTIONS": "1",
+                            "TRUDI_OUTPUT_CAP": "16384",
+                            "TRUDI_OUTPUT_LINE_CAP": "100"}}
     if mcp.get("trudi-sift") != want:
         stale = "trudi-sift" in mcp
         mcp["trudi-sift"] = want

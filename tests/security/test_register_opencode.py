@@ -23,7 +23,9 @@ def test_fresh_config_registers_mcp_and_permissions(tmp_path):
         "type": "local",
         "command": ["/venv/bin/python3", str(REPO / "server.py")],
         "enabled": True,
-        "environment": {"TRUDI_SLIM_TOOL_DESCRIPTIONS": "1"},
+        "environment": {"TRUDI_SLIM_TOOL_DESCRIPTIONS": "1",
+                        "TRUDI_OUTPUT_CAP": "16384",
+                        "TRUDI_OUTPUT_LINE_CAP": "100"},
     }
     assert d["permission"]["trudi-sift*"] == "allow"
     bash = d["permission"]["bash"]

@@ -14,10 +14,13 @@ READ_ONLY_PREFIXES = (
 READ_ONLY_SEGMENTS = ("evidence",)
 
 # Maximum subprocess output returned to the LLM (bytes)
-OUTPUT_CAP = 51_200  # 50 KB
+# Env-overridable: schema-eager clients with small model contexts (OpenCode on
+# a local model) set these lower via the registrar — the COMPLETE stdout is
+# still persisted to the .tool_output sidecar, so nothing forensic is lost.
+OUTPUT_CAP = int(os.environ.get("TRUDI_OUTPUT_CAP") or "51200")  # 50 KB default
 
 # Maximum tool output lines returned to the agent (line-based cap)
-MAX_TOOL_OUTPUT_LINES = 150
+MAX_TOOL_OUTPUT_LINES = int(os.environ.get("TRUDI_OUTPUT_LINE_CAP") or "150")
 
 # Full-stdout sidecar cap (bytes). The trace entry keeps a 600-char excerpt for
 # humans; the COMPLETE stdout is persisted to <analysis>/.tool_output/<cid>.txt
