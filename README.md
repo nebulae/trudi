@@ -471,6 +471,15 @@ audit still land in the trace); the OpenCode plugin API moves quickly — the ad
 is contract-tested against the Python hooks (`tests/security/test_opencode_contract.py`),
 but re-verify event payload shapes when upgrading OpenCode.
 
+**Local driving models must emit real tool calls.** A fine-tune's GGUF can ship a
+chat template without the `tools` branch — the server then silently drops the tool
+schemas and the model narrates tool calls as prose instead of executing them.
+Diagnostic: send a `tools`-bearing request and check `usage.prompt_tokens`; a count
+that ignores your tool definitions means the template never rendered them. Fix:
+serve with the **base model's** chat template (`llama-server --jinja
+--chat-template-file <base>.jinja`) — e.g. Titus (a Qwen3.6-35B-A3B LoRA) drives
+correctly under the base Qwen3.6 template.
+
 ---
 
 ## Repository layout
