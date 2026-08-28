@@ -73,7 +73,11 @@ DAIR_WINDOW = 20       # retained for backward-compat imports; no longer used by
 # friction: long legitimate batches age out mid-work-order):
 #
 #   Triage (DAIR not yet engaged, _current_phase == ""):
-#     baseline collection        → allow (pre-plan batch freedom)
+#     baseline collection        → allow + standing protocol notice (a session
+#                                  that never STARTS the ritual would otherwise
+#                                  stay in baseline freedom forever — observed
+#                                  live within minutes of the first deploy:
+#                                  48 calls, no hypothesize, tcpdump_read x38)
 #     after reason_hypothesize   → notice: finish the ritual (reason.plan → dair)
 #     after reason_plan          → BLOCK forensic tools: call dair_assess to
 #                                  enter Collect. Measured 2026-08-28: 10/11
@@ -163,7 +167,16 @@ def _nudge_decision(tool_name: str) -> tuple[str, str]:
                 + _DAIR_CALL_SHAPE + ". Findings cannot be recorded until DAIR "
                 "is engaged."
             )
-        return "allow", ""
+        # Ritual not yet started: standing notice on every forensic result —
+        # persistent instruction pressure, no counter, no block.
+        return "notice", (
+            "DAIR PROTOCOL: the Triage ritual has not started. After the "
+            "baseline batch: (1) reason.hypothesize(hypothesis_kind="
+            "\"case_question\", observation=<the case question>), then "
+            "(2) reason.plan(case_description=..., evidence_available=..., "
+            "case_question=...), then (3) " + _DAIR_CALL_SHAPE + ". Findings "
+            "cannot be recorded until DAIR is engaged (gate dair_required)."
+        )
     except Exception:
         return "allow", ""
 

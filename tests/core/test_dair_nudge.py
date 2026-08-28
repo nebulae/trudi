@@ -1,7 +1,8 @@
 """Phase-boundary DAIR engagement gate (core/middleware.py).
 
 Semantics (counter-free — a windowed counter is the retired DAIR_WINDOW
-friction): during cold-start Triage, baseline collection is free; once
+friction): during cold-start Triage, baseline collection is allowed but every
+forensic result carries a standing start-the-ritual notice; once
 reason_hypothesize is recorded, forensic results carry a finish-the-ritual
 notice; once reason_plan is recorded, forensic tools BLOCK until dair_assess
 engages DAIR (measured: 10/11 compliant historical runs make zero MCP forensic
@@ -36,10 +37,17 @@ _TOOLCALL = {"type": "tool_call", "cmd": "x"}
 
 
 class TestColdStartTriage:
-    def test_baseline_collection_is_free(self):
+    def test_pre_ritual_baseline_carries_standing_protocol_notice(self):
+        """A session that never STARTS the ritual must not sit in silent
+        baseline freedom (observed live: 48 calls, no hypothesize, tcpdump
+        orbit). Every forensic result carries the full ritual sequence —
+        notice only, never a block, no counter."""
         with patch("core.execution_log.log", _log(entries=[_TOOLCALL] * 30)):
-            for _ in range(30):
-                assert M._nudge_decision("net_tcpdump_read") == ("allow", "")
+            for _ in range(5):
+                action, msg = M._nudge_decision("net_tcpdump_read")
+                assert action == "notice"
+                assert "reason.hypothesize(" in msg
+                assert "reason.plan(" in msg and "dair.dair_assess(" in msg
 
     def test_after_hypothesize_notice_names_plan_then_dair(self):
         with patch("core.execution_log.log", _log(entries=[_HYP, _TOOLCALL])):
@@ -80,9 +88,12 @@ class TestEngaged:
     def test_trace_reset_clears_ritual_state(self):
         with patch("core.execution_log.log", _log(entries=[_HYP, _PLAN])):
             assert M._nudge_decision("t")[0] == "block"
-        # new case: shorter trace, no ritual entries
+        # new case: shorter trace, no ritual entries — the BLOCK lifts; the
+        # fresh pre-ritual state carries the standing start-the-ritual notice.
         with patch("core.execution_log.log", _log(entries=[])):
-            assert M._nudge_decision("t") == ("allow", "")
+            action, msg = M._nudge_decision("t")
+            assert action == "notice"
+            assert "reason.hypothesize(" in msg
 
 
 class TestExemptions:
