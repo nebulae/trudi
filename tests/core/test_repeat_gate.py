@@ -109,3 +109,35 @@ class TestBounds:
                 raise RuntimeError("boom")
         k = _key()
         assert M._repeat_update(k, "t", {"x": Weird()}) == ""
+
+
+class TestEnrichRotationCannotDefeatGate:
+    """Regression: enrich() adds a ROTATING discipline_reminder to every
+    result; the gate must hash the RAW tool output, so identical calls still
+    register as identical. (This is why the wiring passes result-BEFORE-enrich
+    to _repeat_update — a unit-level guard that the raw payload is what's
+    hashed.)"""
+
+    def test_rotating_enrich_field_does_not_reset_identity(self):
+        k = _key()
+        # Simulate the raw tool output being identical each call; the rotating
+        # enrich field never reaches _repeat_update because we hash raw.
+        M._repeat_update(k, "net_ngrep_search", dict(RESULT))
+        msg = M._repeat_update(k, "net_ngrep_search", dict(RESULT))
+        assert "2x" in msg
+
+    def test_rotating_enrich_field_excluded_from_hash_too(self):
+        # Defense in depth: even if a decorated result reaches the gate, the
+        # rotating interpretive fields are in the strip set, so identity holds.
+        k = _key()
+        M._repeat_update(k, "t", {**RESULT, "discipline_reminder": "A",
+                                  "data_provenance": "p"})
+        msg = M._repeat_update(k, "t", {**RESULT, "discipline_reminder": "B",
+                                        "data_provenance": "p"})
+        assert "2x" in msg
+
+    def test_wiring_hashes_raw_before_enrich(self):
+        import inspect
+        import core.middleware as MM
+        src = inspect.getsource(MM.NarrationMiddleware.on_call_tool)
+        assert "BEFORE enrich" in src

@@ -228,7 +228,10 @@ _REPEAT_MAX_KEYS = 512
 _repeat_state: dict = {}
 
 # Volatile result keys that differ on every run of an otherwise identical call.
-_REPEAT_VOLATILE = ("elapsed_seconds", "retries", "stdout_path")
+_REPEAT_VOLATILE = ("elapsed_seconds", "retries", "stdout_path",
+                    # enrich() interpretive additions (some rotate per call)
+                    "discipline_reminder", "data_provenance", "caveats",
+                    "does_not_prove")
 
 
 def _repeat_key(tool_name: str, args: dict) -> str:
@@ -599,21 +602,22 @@ class NarrationMiddleware(Middleware):
         try:
             from tools._enrich import enrich
             if isinstance(result, dict):
-                enriched_d = enrich(tool_name, result)
+                # Repeat-hash the RAW tool output, BEFORE enrich() decorates it
+                # — enrich adds rotating interpretive fields (discipline_reminder)
+                # that would make every identical call look different.
                 if repeat_key:
-                    rn = _repeat_update(repeat_key, tool_name, enriched_d)
+                    rn = _repeat_update(repeat_key, tool_name, result)
                     if rn:
                         notices.append(("repeat_notice", rn))
-                result = _apply_notices(enriched_d, notices)
+                result = _apply_notices(enrich(tool_name, result), notices)
             else:
                 sc = _result_payload(result)
                 if isinstance(sc, dict):
-                    enriched = enrich(tool_name, dict(sc))
                     if repeat_key:
-                        rn = _repeat_update(repeat_key, tool_name, enriched)
+                        rn = _repeat_update(repeat_key, tool_name, dict(sc))
                         if rn:
                             notices.append(("repeat_notice", rn))
-                    enriched = _apply_notices(enriched, notices)
+                    enriched = _apply_notices(enrich(tool_name, dict(sc)), notices)
                     update = {"structured_content": enriched}
                     blocks = getattr(result, "content", None)
                     if (isinstance(blocks, list) and len(blocks) == 1
