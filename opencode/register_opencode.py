@@ -89,6 +89,16 @@ def register(config_path: Path, repo_root: Path, venv_python: str) -> list[str]:
         else:
             msgs.append("  experimental.mcp_timeout → 1800000 (30 min)")
 
+    # 1c) External-directory access: /trudi-clear-case runs
+    #     `python -m tools.trudi_reset` from the repo, and command docs point
+    #     at repo files — OpenCode's external_directory permission would
+    #     re-ask every session (always-allow clicks are session-scoped).
+    ext = config.setdefault("permission", {}).setdefault("external_directory", {})
+    repo_pat = f"{repo_root}/*"
+    if ext.get(repo_pat) != "allow":
+        ext[repo_pat] = "allow"
+        msgs.append(f"  permission.external_directory: {repo_pat} → allow")
+
     # 2) Permissions: allow every trudi-sift tool; deny raw forensic binaries
     #    in bash (derived from the Claude Code ban list — one source of truth).
     ban = _load_ban_list(repo_root / "case-template" / ".claude" / "settings.json")

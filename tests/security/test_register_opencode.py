@@ -36,6 +36,8 @@ def test_fresh_config_registers_mcp_and_permissions(tmp_path):
     assert any("Registered mcp.trudi-sift" in x for x in msgs)
     # MCP execution timeout: OpenCode's default aborts long DAIR/reason calls
     assert d["experimental"]["mcp_timeout"] == 1_800_000
+    # repo access for /trudi-* commands (tools.trudi_reset etc.)
+    assert d["permission"]["external_directory"][f"{REPO}/*"] == "allow"
 
 
 def test_mcp_timeout_respects_larger_user_value(tmp_path):
