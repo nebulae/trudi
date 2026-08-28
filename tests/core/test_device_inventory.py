@@ -96,3 +96,62 @@ class TestParser:
     def test_missing_file_fails_gracefully(self, tmp_path):
         inv = parse_device_install_log(str(tmp_path / "nope.log"))
         assert inv["success"] is False
+
+
+# A storage-ONLY device whose product name self-identifies as a keystroke injector:
+# its HID/keyboard interface is never separately logged, so it enumerates purely as
+# USBSTOR. The structural HID+storage lens cannot see it; the identity (name) lens
+# must. An ordinary flash drive in the same log must still be enumerated as a row —
+# every attached disk is investigable, being an egress candidate — but must NOT be
+# injector-flagged. Devices/serials/dates below are synthetic.
+_IDENTITY_FIXTURE = textwrap.dedent(r"""
+    [Device Install Log]
+    [BeginLog]
+    >>>  [Device Install (Hardware initiated) - USBSTOR\Disk&Ven_Hak5&Prod_Bash_Bunny&Rev_1.00\SYNTH-INJ-0001&0]
+    >>>  Section start 2021/05/01 08:00:00.000
+         dvi: mass-storage only; no HID interface ever logged
+    <<<  Section end 2021/05/01 08:00:01.000
+    >>>  [Device Install (Hardware initiated) - USBSTOR\Disk&Ven_Generic&Prod_Flash_Disk&Rev_1.00\SYNTH-STOR-0002&0]
+    >>>  Section start 2021/05/02 09:00:00.000
+         dvi: ordinary flash drive
+    <<<  Section end 2021/05/02 09:00:01.000
+    """).strip()
+
+
+class TestIdentityLens:
+    @pytest.fixture()
+    def log_path(self, tmp_path):
+        p = tmp_path / "setupapi.dev.log"
+        p.write_text(_IDENTITY_FIXTURE, encoding="utf-8")
+        return str(p)
+
+    def test_storage_only_injector_name_flagged(self, log_path):
+        # No HID interface in the log — the structural lens is blind. The
+        # self-identifying product name must still raise the flag, so
+        # flagged_count > 0 and the "no BadUSB" negative refusal can fire.
+        inv = parse_device_install_log(log_path)
+        inj = [d for d in inv["flagged"]
+               if "bunny" in d["identity"] or "hak5" in d["identity"]]
+        assert len(inj) == 1
+        assert not ({"HID"} & set(inj[0]["interfaces"]))  # flagged despite no HID
+        assert any("keystroke-injector name token" in r for r in inj[0]["flag_reasons"])
+
+    def test_ordinary_disk_enumerated_but_not_injector_flagged(self, log_path):
+        # Thoroughness: every attached disk is enumerated as a row (an egress
+        # candidate worth investigating). The injector flag is the narrower ingress
+        # hint and must not false-positive on ordinary storage.
+        inv = parse_device_install_log(log_path)
+        ordinary = [d for d in inv["devices"] if "flash_disk" in d["identity"]]
+        assert len(ordinary) == 1               # enumerated / investigable
+        assert "flag_reasons" not in ordinary[0]  # but not injector-flagged
+        assert len(inv["flagged"]) == 1         # only the injector device
+
+
+def test_flag_reasons_lenses_are_independent():
+    # Unit-level: identity lens fires without any HID/storage class at all, and the
+    # structural lens fires with no injector name — the two are independent.
+    from core.device_inventory import _flag_reasons
+    assert _flag_reasons(set(), {"vendor": "Hak5", "product": "Bash Bunny", "identity": "x"})
+    assert _flag_reasons({"HID", "USBSTOR"}, {"vendor": "", "product": "", "identity": "y"})
+    assert not _flag_reasons({"USBSTOR"}, {"vendor": "Kingston", "product": "DataTraveler",
+                                           "identity": "venprod:kingston:datatraveler"})
