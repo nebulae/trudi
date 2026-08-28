@@ -111,6 +111,19 @@ def register(config_path: Path, repo_root: Path, venv_python: str) -> list[str]:
         ext[repo_pat] = "allow"
         msgs.append(f"  permission.external_directory: {repo_pat} → allow")
 
+    # 1d) Disable the subagent + todo tools for TRUDI runs. On a serialized
+    #     local backend (llama-server -np 1) an OpenCode `task` subagent is a
+    #     fresh full-context inference that re-ships the orchestrator + tool
+    #     schemas for zero parallelism, and its result dumps back into the
+    #     parent — observed live driving a local model straight into its
+    #     context ceiling + compaction churn. todowrite/todoread double as a
+    #     plan-instead-of-act crutch. Respect a user's explicit true.
+    tools_cfg = config.setdefault("tools", {})
+    for t in ("task", "todowrite", "todoread"):
+        if tools_cfg.get(t) is not False and tools_cfg.get(t) is not True:
+            tools_cfg[t] = False
+            msgs.append(f"  tools.{t} → disabled (local-backend token economy)")
+
     # 2) Permissions: allow every trudi-sift tool; deny raw forensic binaries
     #    in bash (derived from the Claude Code ban list — one source of truth).
     ban = _load_ban_list(repo_root / "case-template" / ".claude" / "settings.json")

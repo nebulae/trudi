@@ -40,6 +40,9 @@ def test_fresh_config_registers_mcp_and_permissions(tmp_path):
     assert d["experimental"]["mcp_timeout"] == 25_200_000
     # repo access for /trudi-* commands (tools.trudi_reset etc.)
     assert d["permission"]["external_directory"][f"{REPO}/*"] == "allow"
+    # subagent + todo tools disabled: token-burn / plan-crutch on local backends
+    assert d["tools"]["task"] is False
+    assert d["tools"]["todowrite"] is False
 
 
 def test_mcp_timeout_respects_larger_user_value(tmp_path):
