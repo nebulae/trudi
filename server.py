@@ -46,34 +46,34 @@ mcp = FastMCP(
 )
 mcp.add_middleware(NarrationMiddleware())
 
-mcp.mount(imaging_mcp, namespace="img")
-mcp.mount(vol_mcp, namespace="vol")
-mcp.mount(tsk_mcp, namespace="tsk")
-mcp.mount(ewf_mcp, namespace="ewf")
-mcp.mount(ez_mcp, namespace="ez")
-mcp.mount(plaso_mcp, namespace="plaso")
-mcp.mount(yara_mcp, namespace="yara")
-mcp.mount(hash_mcp, namespace="hash")
-mcp.mount(strings_mcp, namespace="strings")
-mcp.mount(carving_mcp, namespace="carve")
-mcp.mount(network_mcp, namespace="net")
-mcp.mount(enrichment_mcp, namespace="enrich")
-mcp.mount(misc_mcp, namespace="misc")
-mcp.mount(read_mcp, namespace="read")
-mcp.mount(reason_mcp, namespace="reason")
-mcp.mount(dair_mcp, namespace="dair")
-mcp.mount(accuracy_mcp, namespace="accuracy")
-mcp.mount(correlate_mcp, namespace="correlate")
-mcp.mount(coverage_mcp, namespace="coverage")
-mcp.mount(antiforensics_mcp, namespace="af")
-mcp.mount(attribution_mcp, namespace="attribution")
-mcp.mount(live_mcp, namespace="live")
-mcp.mount(velo_mcp, namespace="velo")
-mcp.mount(monitor_mcp, namespace="monitor")
-mcp.mount(respond_mcp, namespace="respond")
+# (namespace, server) pairs — mounted below, and walked by the slim-descriptions
+# pass, which must mutate CHILD tool objects (the parent's get_tool returns
+# copies for mounted tools).
+NAMESPACES = [
+    ("img", imaging_mcp), ("vol", vol_mcp), ("tsk", tsk_mcp), ("ewf", ewf_mcp),
+    ("ez", ez_mcp), ("plaso", plaso_mcp), ("yara", yara_mcp), ("hash", hash_mcp),
+    ("strings", strings_mcp), ("carve", carving_mcp), ("net", network_mcp),
+    ("enrich", enrichment_mcp), ("misc", misc_mcp), ("read", read_mcp),
+    ("reason", reason_mcp), ("dair", dair_mcp), ("accuracy", accuracy_mcp),
+    ("correlate", correlate_mcp), ("coverage", coverage_mcp),
+    ("af", antiforensics_mcp), ("attribution", attribution_mcp),
+    ("live", live_mcp), ("velo", velo_mcp), ("monitor", monitor_mcp),
+    ("respond", respond_mcp),
+]
+for _ns, _child in NAMESPACES:
+    mcp.mount(_child, namespace=_ns)
 
 
 if __name__ == "__main__":
+    # Schema-eager clients (OpenCode) pay for every description in every
+    # request; the registrar sets this env for them. Claude Code defers schema
+    # loading and keeps the full docstrings. Typed parameter schemas are never
+    # touched — see core/slim_descriptions.py.
+    if os.environ.get("TRUDI_SLIM_TOOL_DESCRIPTIONS") == "1":
+        import asyncio
+        from core.slim_descriptions import slim_tool_descriptions
+        asyncio.run(slim_tool_descriptions(NAMESPACES))
+
     # The trace dashboard runs as a separate long-lived process (`trudi-dashboard`).
     # We no longer autostart a per-case copy here — it caused port collisions and
     # died whenever MCP restarted. start_execution_log surfaces the standalone

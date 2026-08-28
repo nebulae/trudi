@@ -67,7 +67,10 @@ def register(config_path: Path, repo_root: Path, venv_python: str) -> list[str]:
     # 1) MCP server
     server = str(repo_root / "server.py")
     mcp = config.setdefault("mcp", {})
-    want = {"type": "local", "command": [venv_python, server], "enabled": True}
+    want = {"type": "local", "command": [venv_python, server], "enabled": True,
+            # OpenCode renders every tool schema into every request — serve it
+            # slim descriptions (typed parameter schemas are untouched).
+            "environment": {"TRUDI_SLIM_TOOL_DESCRIPTIONS": "1"}}
     if mcp.get("trudi-sift") != want:
         stale = "trudi-sift" in mcp
         mcp["trudi-sift"] = want
