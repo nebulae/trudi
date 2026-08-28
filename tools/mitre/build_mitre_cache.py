@@ -118,9 +118,13 @@ def build_tables(stix: dict, existing_techniques: dict) -> tuple[dict, dict]:
                 for p in phases
                 if p.get("kill_chain_name") == "mitre-attack"
             })
-            if not any(t in DFIR_TACTICS for t in tactics):
-                continue
-            tactic_human = " ".join(_tactic_human(t) for t in tactics)
+            # Every LIVE enterprise technique is kept: the table is the
+            # VALIDATION reference for T-ids in findings, and a tactic filter
+            # dropped 230 of 697 (the CTI bundle now uses phase names such as
+            # 'stealth' / 'defense-impairment' that the DFIR_TACTICS allowlist
+            # never contained — T1027 and T1562 were "unknown" for months).
+            # DFIR_TACTICS still drives keyword/ranking emphasis downstream.
+            tactic_human = " ".join(_tactic_human(t) for t in tactics) or "unclassified"
             technique_by_stix_id[obj["id"]] = {
                 "_tid": tid,
                 "name": obj.get("name", "")[:120],

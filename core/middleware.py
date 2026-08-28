@@ -20,18 +20,17 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "misc_write_final_report",
     "misc_record_agent_message",
     "misc_record_self_correction",
+    # Typed dispositions are bookkeeping, not evidence: legal in Report, where
+    # pre_report_check surfaces the leads/sources/tools that need settling.
+    "misc_record_disposition", "record_disposition",
     "misc_serve_dashboard",
     # Phase director itself
     "dair_assess",
     "dair_dair_assess",
-    # Adversarial-review + scoring tools. These are META operations (they
-    # reason ABOUT findings, they don't execute forensics on evidence), so
-    # they must not independently require a fresh dair_assess in the window.
-    # record_finding still carries the dair_required gate, so the investigation
-    # as a whole stays DAIR-directed — but the per-finding review chain
-    # (evaluate -> confidence -> cite) no longer ages the dair_call out of the
-    # 20-entry window and forces a no-op re-engagement. Both the bare and
-    # namespace-doubled registration forms are listed (cf. dair_assess above).
+    # Adversarial-review + scoring META tools (they reason ABOUT findings, they
+    # don't execute forensics), exempt so they never require a fresh dair_assess.
+    # record_finding still carries the dair_required gate, keeping the
+    # investigation DAIR-directed. Bare and namespace-doubled forms both listed.
     "reason_plan", "reason_reason_plan",
     "reason_hypothesize", "reason_reason_hypothesize",
     "reason_evaluate_finding", "reason_reason_evaluate_finding",
@@ -43,6 +42,10 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "accuracy_compare", "accuracy_accuracy_compare",
     "accuracy_export_report", "accuracy_accuracy_export_report",
     "correlate_mitre_validate", "correlate_correlate_mitre_validate",
+    # Produced-output readers — they read parsed output only (never evidence),
+    # so they are phase-free: legal in Report to ground citations while writing.
+    "read_output", "read_read_output",
+    "read_mail", "read_read_mail",
     # Pre-flight reads that run before the first dair_assess
     "hash_verify_evidence_hash",
     "vol_symbol_check",
@@ -51,95 +54,22 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "strings_stat_file",
 })
 
-DAIR_WINDOW = 20
+# The gate reads DAIR's own phase state (the execution log maintains
+# _current_phase via DAIR transitions), not a tool counter. Forensics are allowed
+# pre-plan (before DAIR engages) and in any active evidence phase; blocked only in
+# Report, where DAIR has decided the investigation is converging — new evidence
+# then requires a DAIR-directed return to a collection phase.
+_DAIR_ACTIVE_PHASES = frozenset({"Triage", "Collect", "Analyze", "Scan"})
+DAIR_WINDOW = 20       # retained for backward-compat imports; no longer used by the gate
 
 
 # ── MCP routing gate configuration ───────────────────────────────────────────
-
-FORENSIC_BINARY_PATTERNS = (
-    r"/usr/local/bin/vol\b",
-    r"(?<![\w-])vol\.py\b",
-    r"\bdotnet\s+\S*(?:MFTECmd|RECmd|EvtxECmd|PECmd|JLECmd|LECmd|SBECmd|"
-    r"AmcacheParser|AppCompatCacheParser|WxTCmd|SQLECmd|RBCmd|RLA)\.dll",
-    r"(?<![\w-])(?:fls|icat|istat|ils|blkls|mactime|tsk_recover|sigfind|"
-    r"sorter|jls|jcat|mmls|fsstat|mmcat|mmstat|blkcalc|blkcat|blkstat|"
-    r"ffind|hfind)\b",
-    r"(?<![\w-])(?:hexdump|xxd|exiftool|ssdeep|hashdeep|md5deep)\b",
-    r"(?<![\w-])(?:log2timeline\.py|psort\.py|pinfo\.py)\b",
-    r"(?<![\w-])(?:yara|yarac|bulk_extractor|foremost|scalpel|photorec)\b",
-    r"(?<![\w-])(?:ewfmount|ewfinfo|ewfverify|vshadowmount|bdemount|xmount)\b",
-    r"(?<![\w-])tcpdump\b",
-    r"(?<![\w-])clamscan\b",
-    r"(?<![\w-])rip\.pl\b",
+# Definitions live in core/forensic_binaries.py (stdlib-only, so the PreToolUse
+# guard hook can import them without fastmcp); re-exported here for existing
+# importers (tools/_gates/mcp_routing.py, tests).
+from core.forensic_binaries import (  # noqa: F401
+    FORENSIC_BINARY_PATTERNS, MCP_WRAPPER_HINTS, _identify_forensic_binary,
 )
-
-MCP_WRAPPER_HINTS = {
-    "vol": "vol.vol_* (e.g. vol.vol_pslist, vol.vol_netscan)",
-    "RECmd": "ez.ez_recmd_hive / ez.ez_recmd_batch",
-    "MFTECmd": "ez.ez_mftecmd",
-    "EvtxECmd": "ez.ez_evtxecmd",
-    "PECmd": "ez.ez_pecmd",
-    "JLECmd": "ez.ez_jlecmd",
-    "LECmd": "ez.ez_lecmd",
-    "SBECmd": "ez.ez_sbecmd",
-    "AmcacheParser": "ez.ez_amcacheparser",
-    "AppCompatCacheParser": "ez.ez_appcompatcacheparser",
-    "WxTCmd": "ez.ez_wxtcmd",
-    "SQLECmd": "ez.ez_sqlecmd",
-    "RBCmd": "ez.ez_rbcmd",
-    "RLA": "ez.ez_rla",
-    "fls": "tsk.tsk_fls",
-    "icat": "tsk.tsk_icat",
-    "istat": "tsk.tsk_istat",
-    "ils": "tsk.tsk_ils",
-    "blkls": "tsk.tsk_blkls",
-    "mactime": "tsk.tsk_mactime",
-    "tsk_recover": "tsk.tsk_recover",
-    "sigfind": "tsk.tsk_sigfind",
-    "sorter": "tsk.tsk_sorter",
-    "jls": "tsk.tsk_jls",
-    "jcat": "tsk.tsk_jcat",
-    "mmls": "tsk.tsk_mmls",
-    "fsstat": "tsk.tsk_fsstat",
-    "hexdump": "strings.strings_hexdump",
-    "xxd": "strings.strings_xxd_dump",
-    "exiftool": "strings.strings_exiftool_metadata / strings.strings_exiftool_batch",
-    "ssdeep": "hash.hash_ssdeep_hash / hash.hash_ssdeep_compare",
-    "hashdeep": "hash.hash_hashdeep_compute / hash.hash_hashdeep_audit",
-    "md5deep": "hash.hash_md5deep_scan",
-    "log2timeline.py": "plaso.plaso_create_timeline / plaso.plaso_create_targeted",
-    "psort.py": "plaso.plaso_export_csv / plaso.plaso_export_json / plaso.plaso_filter_incident_window",
-    "pinfo.py": "plaso.plaso_info / plaso.plaso_list_parsers",
-    "yara": "yara.yara_scan_file / yara.yara_scan_directory / yara.yara_scan_memory_image",
-    "bulk_extractor": "carve.carve_bulk_extractor_scan",
-    "foremost": "carve.carve_foremost_carve",
-    "scalpel": "carve.carve_scalpel_carve",
-    "photorec": "img.img_photorec_carve",
-    "ewfmount": "ewf.ewf_ewf_mount / ewf.ewf_mount_full_image",
-    "ewfinfo": "ewf.ewf_ewf_info",
-    "ewfverify": "ewf.ewf_ewf_verify",
-    "vshadowmount": "img.img_vshadow_mount",
-    "bdemount": "img.img_bde_mount",
-    "xmount": "img.img_xmount_image",
-    "tcpdump": "net.net_tcpdump_read / net.net_tcpdump_extract_http / net.net_tcpdump_extract_dns",
-    "clamscan": "misc.misc_clamscan_file / misc.misc_clamscan_directory",
-    "rip.pl": "misc.misc_regripper_hive",
-}
-
-
-def _identify_forensic_binary(cmd: str) -> str | None:
-    import re
-    if not cmd:
-        return None
-    for pat in FORENSIC_BINARY_PATTERNS:
-        if not re.search(pat, cmd):
-            continue
-        for key in MCP_WRAPPER_HINTS:
-            if key in cmd:
-                return key
-        return ""
-    return None
-
 
 # ── Gate helpers ──────────────────────────────────────────────────────────────
 
@@ -147,16 +77,16 @@ def _gate_decision() -> tuple[bool, str]:
     """Return (should_block, reason). Fail-open on gate errors, but log them."""
     try:
         from core.execution_log import log
-        entries = log._entries
-        if not entries:
+        if not log._entries:
             return False, "cold start (empty trace)"
-        ever_dair = any(e.get("type") == "dair_call" for e in entries)
-        if not ever_dair:
+        phase = getattr(log, "_current_phase", "") or ""
+        if not phase:
             return False, "cold start (DAIR not yet engaged)"
-        recent_dair = any(e.get("type") == "dair_call" for e in entries[-DAIR_WINDOW:])
-        if recent_dair:
-            return False, "active DAIR batch"
-        return True, "DAIR engaged earlier but no dair_call in recent window"
+        if phase in _DAIR_ACTIVE_PHASES:
+            return False, f"active DAIR phase ({phase})"
+        # Report (or any non-active phase): the investigation is converging.
+        return True, (f"investigation is in the {phase} phase — call dair_assess to "
+                      f"return to a collection phase before running more forensic tools")
     except Exception:
         tb = traceback.format_exc()
         print(f"[TRUDI WARN] dair gate check failed (fail-open): {tb}", file=sys.stderr)
@@ -213,8 +143,31 @@ def _trace_cancelled(tool_name: str, elapsed: float) -> None:
               f"{err!r}", file=sys.stderr, flush=True)
 
 
-def _trace_exception(tool_name: str, exc: Exception, elapsed: float) -> None:
+def _arg_shapes(args: dict | None) -> str:
+    """Argument NAMES and python types — never values — so a validation
+    failure is diagnosable from the trace (which field, which type)."""
+    try:
+        return ", ".join(f"{k}:{type(v).__name__}" for k, v in (args or {}).items()
+                         if not str(k).startswith("_"))[:400]
+    except Exception:
+        return ""
+
+
+def _is_input_validation(exc: Exception) -> bool:
+    return type(exc).__name__ in ("ValidationError", "ArgumentError") or \
+        "validation error" in str(exc).lower()
+
+
+def _trace_exception(tool_name: str, exc: Exception, elapsed: float,
+                     args: dict | None = None) -> None:
     tb = traceback.format_exc()
+    # The exception MESSAGE first (a traceback head tells the auditor nothing
+    # about WHICH field failed), then arg names/types, then the traceback tail.
+    msg = f"{type(exc).__name__}: {str(exc)[:700]}"
+    shapes = _arg_shapes(args)
+    head = (f"Unhandled {msg} in {tool_name}"
+            + (f" | args: {shapes}" if shapes else "")
+            + f"\n--- traceback tail ---\n{tb[-1500:]}")
     try:
         from core.execution_log import log
         log.record_tool_call(
@@ -223,9 +176,10 @@ def _trace_exception(tool_name: str, exc: Exception, elapsed: float) -> None:
             truncated=False,
             retries=0,
             exit_code=-1,
-            stderr=f"Unhandled {type(exc).__name__} in {tool_name}:\n{tb}"[:4096],
+            stderr=head[:4096],
             elapsed_seconds=elapsed,
             input_call_ids=_parent_cids(),
+            gate="input_validation" if _is_input_validation(exc) else "",
         )
     except Exception as log_err:
         print(
@@ -235,28 +189,47 @@ def _trace_exception(tool_name: str, exc: Exception, elapsed: float) -> None:
         )
 
 
+def _result_payload(result) -> dict | None:
+    """The dict a tool returned — directly, or unwrapped from a FastMCP
+    ToolResult's structured_content. None when neither shape applies."""
+    if isinstance(result, dict):
+        return result
+    sc = getattr(result, "structured_content", None)
+    return sc if isinstance(sc, dict) else None
+
+
 def _trace_success_baseline(tool_name: str, elapsed: float,
-                             entries_before: int | None) -> None:
+                             entries_before: int | None, result=None) -> None:
     """Write a baseline tool_call entry if the tool didn't self-log.
 
     Subprocess tools self-log via core.executor._log_tool. reason_*/dair_*
     self-log via record_reason_call/record_dair_call. Pure-Python tools
     (correlate_*, accuracy_*, etc.) don't — this baseline makes them visible.
     Self-logging is detected by whether log._entries grew during the call.
+
+    The baseline honours the tool's OWN verdict: a wrapper that returned
+    `{"success": False, "gate": ...}` (a refused export_execution_log /
+    write_final_report) is logged as a failure carrying the gate id — a
+    refusal must never read as a successful run in the audit trail.
     """
     if entries_before is None:
         return
     try:
         from core.execution_log import log
         if len(log._entries) == entries_before:
+            payload = _result_payload(result) or {}
+            ok = payload.get("success", True) is not False
+            err = "" if ok else str(payload.get("error") or "")[:512]
             log.record_tool_call(
                 cmd=f"<py>:{tool_name}",
-                success=True,
+                success=ok,
                 truncated=False,
                 retries=0,
-                exit_code=0,
+                exit_code=0 if ok else 1,
+                stderr=err,
                 elapsed_seconds=elapsed,
                 input_call_ids=_parent_cids(),
+                gate=str(payload.get("gate") or "") if not ok else "",
             )
     except Exception as err:
         print(f"[TRUDI WARN] success-baseline log failed for {tool_name}: "
@@ -299,12 +272,20 @@ class NarrationMiddleware(Middleware):
         # 2. DAIR gate
         if tool_name not in DAIR_GATE_ALLOWLIST:
             should_block, reason = _gate_decision()
+            # A CORRECTION of an existing finding (supersedes=<cid>) is
+            # report-phase work — re-tiering, dropping an unprovable field —
+            # and must not be refused in Report; only NEW findings are.
+            if (should_block and tool_name.endswith("record_finding")
+                    and args.get("supersedes")):
+                should_block, reason = False, "finding correction (supersedes) allowed in Report"
             if should_block:
-                raise ToolError(
-                    f"Tool {tool_name} blocked: no active DAIR batch ({reason}). "
-                    f"Call dair_assess before forensic tools — its priority_tools "
-                    f"is the work order for the next batch."
-                )
+                # Record the block so a blocked-then-dropped tool is auditable.
+                try:
+                    from core.execution_log import log
+                    log.record_tool_blocked(tool_name, f"dair_phase_gate: {reason}")
+                except Exception:
+                    pass
+                raise ToolError(f"Tool {tool_name} blocked: {reason}.")
 
         if "_note" in (context.message.arguments or {}):
             new_message = context.message.model_copy(update={"arguments": args})
@@ -327,11 +308,18 @@ class NarrationMiddleware(Middleware):
             _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
             raise
         except Exception as e:
-            _trace_exception(tool_name, e, round(time.perf_counter() - start, 2))
+            _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
+            if _is_input_validation(e):
+                # A typed refusal shape, like the gates: name the fields so the
+                # agent fixes the kwarg instead of guessing from a 500.
+                raise ToolError(
+                    f"{tool_name} rejected its input (gate: input_validation): "
+                    f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
+                ) from e
             raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
 
         _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
-                                entries_before)
+                                entries_before, result)
 
         # 4. Forensic-knowledge enrichment — adds interpretive context to the
         #    result (caveats, does_not_prove, field/exit-code meanings, generic
@@ -345,7 +333,7 @@ class NarrationMiddleware(Middleware):
             if isinstance(result, dict):
                 result = enrich(tool_name, result)
             else:
-                sc = getattr(result, "structured_content", None)
+                sc = _result_payload(result)
                 if isinstance(sc, dict):
                     enriched = enrich(tool_name, dict(sc))
                     update = {"structured_content": enriched}

@@ -12,7 +12,7 @@ Built for the [Find Evil! hackathon](https://findevil.devpost.com/) — SANS Ins
 
 ## Contents
 
-**This README:** [How it works](#how-it-works) · [Prerequisites](#prerequisites) · [Setup](#setup) · [API keys](#api-keys) · [Starting a case](#starting-a-case) · [Live monitoring (experimental)](#live-monitoring--autonomous-response-experimental) · [What gets produced](#what-gets-produced) · [Trace dashboard](#trace-dashboard) · [Submission components](#find-evil-submission-components) · [Tool namespaces](#tool-namespaces) · [YARA rules](#bundled-yara-rules) · [Evidence constraints](#evidence-constraints) · [Test suite](#running-the-test-suite) · [Repository layout](#repository-layout) · [License](#license)
+**This README:** [How it works](#how-it-works) · [Prerequisites](#prerequisites) · [Setup](#setup) · [API keys](#api-keys) · [Running a local model](#running-a-local-model) · [Starting a case](#starting-a-case) · [Live monitoring (experimental)](#live-monitoring--autonomous-response-experimental) · [What gets produced](#what-gets-produced) · [Trace dashboard](#trace-dashboard) · [Documentation](#documentation) · [Tool namespaces](#tool-namespaces) · [YARA rules](#bundled-yara-rules) · [Evidence constraints](#evidence-constraints) · [Test suite](#running-the-test-suite) · [Repository layout](#repository-layout) · [License](#license)
 
 **Documentation:**
 
@@ -20,7 +20,7 @@ Built for the [Find Evil! hackathon](https://findevil.devpost.com/) — SANS Ins
 |-----|--------------|
 | [Try It Out](docs/try-it-out.md) | Step-by-step: browse a finished run (no key) or drive a fresh investigation end-to-end |
 | [Architecture](docs/architecture.md) | Components, MCP boundary, guardrail tiers, security boundaries ([Mermaid source](docs/architecture.mmd) · [diagram PNG](docs/media/architecture.png)) |
-| [Project Description](docs/project-description.md) | The Devpost story — design rationale, reasoning loop, gates, curiosity budget |
+| [Project Description](docs/project-description.md) | Design rationale — reasoning loop, gates, curiosity budget |
 | [Dataset Documentation](docs/datasets.md) | Every case's provenance, evidence source, findings, and answer key |
 | [Accuracy Report](docs/accuracy-report.md) | False positives, missed artifacts, hallucinations caught, confidence calibration, spoliation |
 | [Live-monitoring demo](demo/live-monitoring/README.md) | *(experimental)* Velociraptor + victim Docker stack and the auto-protect loop walkthrough |
@@ -42,9 +42,9 @@ TRUDI is a **three-model system** — one analyst and two independently-configur
 1. **Upstream** — at each Triage entry it generates a prioritized plan and competing hypotheses (including at least one non-leading actor/mechanism), binding which discriminating tools run first.
 2. **Downstream** — before any conclusion reaches the report it evaluates the finding, scores confidence, checks citations, and runs a pre-report gate — flagging unsupported claims, logical gaps, and alternative explanations.
 
-Both reasoning surfaces are swappable: `REASON_BACKEND` and `DAIR_BACKEND` each accept the Claude API (default), any OpenAI-compatible endpoint, or a local Foundation-Sec-8B-Reasoning server, and may point at different models. The models exchange structured `DIRECTIVES` blocks that bind tool selection for the next phase. Disagreements are resolved by a capped self-correction loop (max 3 iterations); unresolved items are reported as `UNCERTAIN` rather than dropped.
+Both reasoning surfaces are swappable and **first-class in both directions**: `REASON_BACKEND` and `DAIR_BACKEND` each accept the Claude API or any OpenAI-compatible / local endpoint — a thinking model such as **Qwen3** or **DeepSeek-R1**, or a security-tuned local model such as **Titus** — over vLLM / SGLang / llama.cpp, and the two surfaces may run on different models. The models exchange structured `DIRECTIVES` blocks that bind tool selection for the next phase. Disagreements are resolved by a capped self-correction loop (max 3 iterations); unresolved items are reported as `UNCERTAIN` rather than dropped.
 
-> **Find Evil! submission configuration:** the hackathon submission runs entirely on Claude — Claude Code (Opus) as the primary analyst, with **Opus** as both the reasoning (`REASON_BACKEND=claude`) and DAIR (`DAIR_BACKEND=claude`) models. No local model server is required.
+> **Backends:** run the reviewer and DAIR director on Claude (Opus) *or* on a local model — the harness is designed to hold analytical quality across backends, and both are documented as equals. See [Reasoning backends](#api-keys).
 
 ### Execution flow
 
@@ -94,10 +94,10 @@ Every tool call, DAIR call, reason call, and confirmed finding is written to a l
    |---------|--------|
    | `claude` (default) | `ANTHROPIC_API_KEY=sk-ant-...` — no server required |
    | `openai-compat` | `REASON_URL` / `DAIR_URL` + `REASON_API_KEY` / `DAIR_API_KEY` |
-   | Foundation-Sec (local) | `…_BACKEND=openai-compat` + `…_URL=http://localhost:8000` |
-   | Foundation-Sec (HF) | `…_BACKEND=openai-compat` + `…_URL=<hf-endpoint>` + `…_API_KEY=hf_...` |
+   | Local model | `…_BACKEND=openai-compat` + `…_URL=http://localhost:8000` + `…_MODEL=<id>` |
+   | Hosted (HF endpoint) | `…_BACKEND=openai-compat` + `…_URL=<hf-endpoint>` + `…_API_KEY=hf_...` |
 
-   The submission runs both on `claude` with Opus (see [How it works](#how-it-works)) — the simplest setup is to add an `ANTHROPIC_API_KEY` and you're done. TRUDI will start without a backend configured, but that is **not a supported way to evaluate it**: reason and DAIR calls are skipped and you're seeing a hollowed-out agent, not TRUDI.
+   The simplest setup is Claude for both (add an `ANTHROPIC_API_KEY` and you're done); running the reviewer + DAIR on a local model is equally supported (see [Reasoning backends](#api-keys)). Either way a backend is required — TRUDI will start without one, but that is **not a supported way to evaluate it**: reason and DAIR calls are skipped and you're seeing a hollowed-out agent, not TRUDI.
 
 ### System forensic packages
 
@@ -153,38 +153,90 @@ Edit `~/trudi/.env`. TRUDI runs without any keys, but **missing keys degrade the
 | `VIRUSTOTAL_API_KEY` | `enrich.vt_lookup_*` | Hash/IP/domain reputation lookups return "unconfigured"; everything else proceeds. |
 | `ABUSEIPDB_API_KEY` | `enrich.abuseipdb_check` | IP abuse scoring skipped; everything else proceeds. |
 
-> **Required for a hackathon entry run:** `ANTHROPIC_API_KEY`. The submission runs the primary analyst, the reviewer, and the DAIR director all on Claude/Opus (see [How it works](#how-it-works)), so this one key is what makes a run a *real* TRUDI run — the adversarial review and phase direction depend on it. The two enrichment keys are recommended (they add IOC corroboration) but optional and never block the investigation.
+> **A reasoning backend is required** — either `ANTHROPIC_API_KEY` (Claude) or a local / OpenAI-compatible endpoint (below). The adversarial review and phase direction depend on it; a run with no backend is a hollowed-out agent, not TRUDI. The two enrichment keys are recommended (they add IOC corroboration) but optional and never block the investigation.
 
 ```bash
 # IOC enrichment
 VIRUSTOTAL_API_KEY=your_key_here
 ABUSEIPDB_API_KEY=your_key_here
 
-# Reasoning backends — reviewer + DAIR director (both default to claude)
+# Reasoning backends — reviewer + DAIR director. Pick ONE of the two blocks below
+# for each (they may differ). Both backends are first-class.
+
+# (A) Claude backend — Opus for both:
 REASON_BACKEND=claude
 DAIR_BACKEND=claude
-ANTHROPIC_API_KEY=sk-ant-...          # Claude API — used by both when backend=claude
-
-# Submission default: Opus for both reasoning and DAIR
+ANTHROPIC_API_KEY=sk-ant-...          # used by both when backend=claude
 REASON_MODEL=claude-opus-4-8
 DAIR_MODEL=claude-opus-4-8
 
-# Or point either backend at an OpenAI-compatible / local endpoint:
+# (B) Local / OpenAI-compatible backend (see "Running a local model" below):
 # REASON_BACKEND=openai-compat
-# REASON_URL=https://api.openai.com/v1   # or http://localhost:8000 for local vLLM
-# REASON_API_KEY=sk-...
+# REASON_URL=http://localhost:8000     # or https://api.openai.com/v1
+# REASON_API_KEY=sk-...                # if the endpoint needs one
 # DAIR_BACKEND=openai-compat
-# DAIR_URL=http://localhost:8001         # may differ from REASON_URL
+# DAIR_URL=http://localhost:8000       # may differ from REASON_URL
 ```
 
-**Foundation-Sec (openai-compat backend, local vLLM):**
+### Running a local model
+
+The reviewer and DAIR director run on any local model behind an OpenAI-compatible server (vLLM / SGLang / llama.cpp). This is a supported, first-class configuration — TRUDI has been driven end-to-end on local backends including [**Titus-CybersecurityLLM**](https://huggingface.co/AlicanKiraz0/Titus-CybersecurityLLM-v1.0-Q4_K_M-No-MTP-GGUF) (a security-tuned GGUF) and general thinking models such as **Qwen3**, producing complete, gated reports. Set `REASON_BACKEND=openai-compat` / `DAIR_BACKEND=openai-compat` and the `…_URL` / `…_MODEL` for each (they may differ). Two families:
+
+**A security-tuned model over llama.cpp** — e.g. [Titus](https://huggingface.co/AlicanKiraz0/Titus-CybersecurityLLM-v1.0-Q4_K_M-No-MTP-GGUF), a quantized GGUF:
 ```bash
-pip install vllm
-vllm serve "fdtn-ai/Foundation-Sec-8B-Reasoning" \
-  --reasoning-parser minimax_m2 \
-  --quantization bitsandbytes --load-format bitsandbytes  # for <24 GB VRAM
+llama-server -m Titus-CybersecurityLLM-v1.0-Q4_K_M-No-MTP.gguf \
+  -c 32768 -np 1 --host 0.0.0.0 --port 8000
 # then set: REASON_BACKEND=openai-compat, REASON_URL=http://localhost:8000
 ```
+
+**Thinking models** (Qwen3, DeepSeek-R1, gpt-oss … over vLLM / SGLang / llama.cpp):
+
+Thinking models spend a chain-of-thought *before* the answer, and every server bills those
+tokens against `max_tokens`. TRUDI keeps thinking enabled and budgets for it instead:
+
+```bash
+REASON_BACKEND=openai-compat
+REASON_URL=http://localhost:8000
+REASON_MODEL=unsloth/Qwen3.8-27B-GGUF:Q4_K_M  # the id your server lists at GET /v1/models
+DAIR_BACKEND=openai-compat          # (auto-discovered from /v1/models if left unset)
+DAIR_URL=http://localhost:8000
+DAIR_MODEL=unsloth/Qwen3.8-27B-GGUF:Q4_K_M
+
+TRUDI_COMPAT_THINKING_BUDGET=8192   # extra output tokens reserved for the think phase
+TRUDI_COMPAT_MAX_TOKENS_CEILING=32768  # ≤ per-slot context (n_ctx / n_parallel) − ~5.5k prompt
+TRUDI_DAIR_MAX_TOKENS=8192          # DAIR's answer budget (default 4096). A very "chatty"
+                                    # thinking model can burn the whole budget on chain-of-
+                                    # thought and truncate the DAIR JSON — raise this (the
+                                    # request budget is TRUDI_DAIR_MAX_TOKENS + THINKING_BUDGET)
+TRUDI_REASON_TIMEOUT=1200           # a 27B at ~40 tok/s needs ~4 min for 10k tokens
+TRUDI_DAIR_TIMEOUT=1200
+# TRUDI_COMPAT_THINKING_GUIDANCE=   # brevity line appended to compat system prompts; "off" disables
+# TRUDI_COMPAT_NO_THINK_TOOLS=dair_assess,reason_cite_check,reason_confidence_score,reason_audit_findings  # default
+# TRUDI_COMPAT_EXTRA_BODY='{"chat_template_kwargs":{"enable_thinking":true}}'  # optional pass-through
+```
+
+Thinking is a per-surface switch: by default DAIR and the mechanical checks (`cite_check`,
+`confidence_score`, `audit_findings`) run with `enable_thinking=false` + `/no_think`, while
+`hypothesize` / `evaluate_finding` / `synthesize` / `plan` keep it. Measured on a 27B at 40 tok/s
+with thinking everywhere: hypothesize 8.6k tokens / 197 s, DAIR 14.6k tokens / 341 s. That
+matters because **Claude Code backgrounds any tool call running past
+`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` (default 120 s) and lets the agent continue without the
+result** — which silently breaks the DAIR-driven loop. Either keep every reason/DAIR call under
+that cutoff, or raise it in the case's `.claude/settings.json` (`"env": {"CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "0"}`
+disables backgrounding; pair with a per-server `"timeout"` in `.mcp.json`).
+
+Size the ceiling to the server: llama-server splits `-c` across `-np` slots, and concurrent
+reason + DAIR calls share the KV cache — a request that cannot fit returns HTTP 500
+`Context size has been exceeded` for *every* in-flight request. `-c 32768 -np 1` with
+`CEILING=26624` / `THINKING_BUDGET=12288` is a working baseline for a 27–35B thinking model.
+
+How it behaves: the request budget is `max_tokens + THINKING_BUDGET`. If the server returns
+`finish_reason=length` with an empty answer (the whole budget went to thinking), TRUDI retries
+once at double the budget (capped at the ceiling). Chain-of-thought in `reasoning_content` or
+`<think>…</think>` is captured as diagnostics (`backend_meta.reasoning_*` on the trace entry),
+never promoted to the answer. Failed calls record their cause on the `reason_call` / `dair_call`
+entry plus a `call_abandoned` entry. Set `TRUDI_COMPAT_THINKING_BUDGET=0` for non-thinking chat
+models (e.g. GPT-class) to use the legacy single-attempt path.
 
 ---
 
@@ -237,7 +289,7 @@ TRUDI will run autonomously from there. It will not ask for confirmation between
 
 ## Live monitoring & autonomous response (experimental)
 
-> **Status: in progress, not part of the Find Evil! submission.** This layer runs today but is experimental scaffolding; the judged submission is the read-only static investigator described above. It's documented here for completeness.
+> **Status: experimental.** This layer runs today but is scaffolding; the core of TRUDI is the read-only static investigator described above. It's documented here for completeness.
 
 Beyond static-image investigation, TRUDI can watch a live endpoint via Velociraptor and respond autonomously. This is the only mode where TRUDI writes to a system, and only *outside* the evidence boundary, through a separately gated path.
 
@@ -292,37 +344,32 @@ Every investigation writes a live JSON trace; the bundled dashboard renders it i
 ![TRUDI Investigation Graph](docs/media/dashboard-graph.png)
 -->
 
-> 📹 **Demo video:** [Find Evil! — TRUDI walkthrough](https://youtu.be/Dbx5DcH6V5E)
+> 📹 **Demo video:** [TRUDI walkthrough](https://youtu.be/Dbx5DcH6V5E)
 > · 📦 **Demo run bundle** (trace, report, console): [cases/vanko/](cases/vanko/README.md)
 
 ---
 
-## Find Evil! submission components
+## Documentation
 
-The eight required submission components and where each one lives. Items marked **Devpost** are entered on the [submission page](https://findevil.devpost.com/); everything else is in this repo and linked below.
+| Doc | What |
+|-----|------|
+| [Architecture](docs/architecture.md) | Components, MCP boundary, guardrail tiers, security boundaries ([Mermaid source](docs/architecture.mmd)) |
+| [Project description](docs/project-description.md) | Design rationale — the reasoning loop, gates, curiosity budget |
+| [Datasets](docs/datasets.md) | Each case's source, evidence pointer, and expected findings; runs bundled under [cases/](cases/) and installed to `~/cases/` for the dashboard |
+| [Accuracy report](docs/accuracy-report.md) | False positives, missed artifacts, hallucinations caught in testing, confidence calibration, and an evidence-integrity / spoliation section |
+| [Try it out](docs/try-it-out.md) | Browse a finished run in ~2 min (no key), or drive a fresh investigation end-to-end |
+| [Execution logs](cases/vanko/README.md) | A committed run's trace + report + console; every bundled case under [cases/](cases/) ships its full trace (`reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log`) |
+| [Demo video](https://youtu.be/Dbx5DcH6V5E) | End-to-end run walkthrough |
 
-| # | Component | Where |
-|---|-----------|-------|
-| 1 | Code Repository | This repo (MIT — see [LICENSE](LICENSE)) |
-| 2 | Demo Video | [YouTube](https://youtu.be/Dbx5DcH6V5E) (also on **Devpost**) |
-| 3 | Architecture Diagram | [docs/architecture.md](docs/architecture.md) · [Mermaid source](docs/architecture.mmd) |
-| 4 | Written Project Description | [docs/project-description.md](docs/project-description.md) (mirrors the **Devpost** story) |
-| 5 | Dataset Documentation | [docs/datasets.md](docs/datasets.md) — every case's source, evidence pointer, and findings; runs bundled under [cases/](cases/) and installed to `~/cases/` for the dashboard |
-| 6 | Accuracy Report | [docs/accuracy-report.md](docs/accuracy-report.md) — false positives, missed artifacts, hallucinations caught in testing, confidence calibration, and an evidence-integrity / spoliation section |
-| 7 | Try-It-Out Instructions | [docs/try-it-out.md](docs/try-it-out.md) — browse a finished run in ~2 min (no key) or drive a fresh investigation end-to-end; condensed in [Setup](#setup) + [Starting a case](#starting-a-case) |
-| 8 | Agent Execution Logs | Committed run trace + report + console at [cases/vanko/](cases/vanko/README.md); every bundled case under [cases/](cases/) ships its full trace, and runs export to `reports/<CASE_ID>_trace.{json,md}` via `misc.export_execution_log` |
+Experimental extras: [live-monitoring walkthrough](demo/live-monitoring/README.md) (Velociraptor + auto-protect) and [live-endpoint triage](docs/live-endpoint-testing.md) (read-only `live.*` over SSH).
 
-Supporting material (experimental, not judged): [demo/live-monitoring/README.md](demo/live-monitoring/README.md) (Velociraptor live-monitoring + auto-protect walkthrough), [docs/live-endpoint-testing.md](docs/live-endpoint-testing.md) (read-only `live.*` SSH triage). Plus [docs/media/](docs/media/README.md) (dashboard screenshots + demo video notes).
-
-> **For judges — what a full-quality run requires:** TRUDI is run with **Claude Code** plus an **`ANTHROPIC_API_KEY`**. With Opus driving the analyst, the `reason.*` reviewer, and the `dair.*` director (the submission configuration — see [How it works](#how-it-works)), every finding is hypothesis-tested, confidence-scored, citation-checked, and phase-directed. **Without the key, TRUDI degrades: the `reason.*` and `dair.*` calls are skipped** — findings are never adversarially challenged and phase direction falls back to a static path, so a keyless run does not reflect the submitted system. See [API keys](#api-keys) for the full degradation table. The two enrichment keys (VirusTotal, AbuseIPDB) are recommended but optional and never block a run.
->
-> Start with the [How it works](#how-it-works) overview, then **[Try It Out](docs/try-it-out.md)** — it walks you from clone to a browsable finished run in about two minutes (no key needed), then to a full fresh investigation. Every finding in an execution log (#8) links to the exact tool call that produced it — viewable live in the [Trace dashboard](#trace-dashboard).
+Every finding in an execution log links to the exact tool call that produced it — viewable live in the [Trace dashboard](#trace-dashboard). Start with [How it works](#how-it-works), then [Try it out](docs/try-it-out.md).
 
 ---
 
 ## Tool namespaces
 
-All forensic execution goes through the TRUDI MCP server — **24 namespaces** in total. Claude never calls binaries directly when an MCP tool exists.
+All forensic execution goes through the TRUDI MCP server — **25 namespaces** in total. Claude never calls binaries directly when an MCP tool exists.
 
 | Namespace | Domain | Key tools |
 |-----------|--------|-----------|
@@ -339,6 +386,7 @@ All forensic execution goes through the TRUDI MCP server — **24 namespaces** i
 | `net.*` | Network analysis | `tcpdump_read`, `tcpdump_extract_http`, `tcpdump_extract_dns`, `tcpdump_extract_ips`, `ngrep_search` |
 | `enrich.*` | Threat intel | `vt_lookup_hash`, `vt_lookup_ip`, `vt_lookup_domain`, `abuseipdb_check` |
 | `misc.*` | Windows artifacts | `evtx_dump`, `evtx_filter`, `regripper_hive`, `parse_scheduled_tasks`, `usbdeviceforensics`, `usnparser_parse`, `analyzeMFT_parse`, `hindsight_chrome`, `clamscan_file`, `pe_scanner`, `pdf_parser_analyze` |
+| `read.*` | Produced-output reads (traced, citable) | `read_output` (CSV/JSON/TXT under analysis/exports/reports — query, columns, where), `read_mail` (extracted mbox/.eml — message bodies, sender/recipient roster) |
 | `reason.*` | Adversarial review | `reason_plan`, `reason_hypothesize`, `reason_evaluate_finding`, `reason_confidence_score`, `reason_cite_check`, `reason_synthesize`, `reason_pre_report_check` |
 | `dair.*` | Phase director (state machine) | `dair_assess` |
 | `correlate.*` | Cross-tool correlation | `process_to_file`, `network_to_process`, `mitre_map`, `mitre_validate` |
@@ -351,7 +399,7 @@ All forensic execution goes through the TRUDI MCP server — **24 namespaces** i
 | `monitor.*` | Live-monitoring lifecycle | `baseline_capture`, `start_watcher`, `check_alerts`, `start_investigation`, `end_investigation` |
 | `respond.*` | **Gated** containment & response | `suggest_containment`, `approve_action`, `execute_action`, `revert_action` |
 
-> `live.*`, `velo.*`, `monitor.*`, and `respond.*` belong to the **experimental live-monitoring layer** (see [above](#live-monitoring--autonomous-response-experimental)) and are **not part of the Find Evil! submission**.
+> `live.*`, `velo.*`, `monitor.*`, and `respond.*` belong to the **experimental live-monitoring layer** (see [above](#live-monitoring--autonomous-response-experimental)) and are not part of the core static investigator.
 
 ---
 
@@ -382,10 +430,14 @@ All tool output is capped at 50 KB / 150 lines before being returned to the agen
 ```bash
 cd ~/trudi
 source ~/.venv/bin/activate
-pytest --cov --tb=short
+pytest -n auto --no-cov -q        # ~30 s on a many-core box (parallel, no coverage)
+pytest --cov --tb=short           # serial with coverage (CI shape; a few minutes)
 ```
 
-1,100+ tests. All tool calls are mocked — tests run without SIFT tools installed.
+1,700+ tests. All tool calls are mocked — tests run without SIFT tools installed.
+The suite is I/O-bound (every test writes a trace): tests run with the trace
+`fsync` off and a per-test `hook.lock` (`tests/conftest.py`), so `-n auto`
+scales linearly — and never contends with a live TRUDI session.
 
 ---
 
@@ -403,7 +455,7 @@ trudi/
 │   └── evidence/ analysis/ exports/ reports/
 ├── cases/                 ← bundled case studies (traces + reports, no evidence)
 │   └── <CASE>/            ← installed to ~/cases/ for the dashboard (see docs/datasets.md)
-├── docs/                  ← submission docs: architecture, accuracy-report, datasets,
+├── docs/                  ← docs: architecture, accuracy-report, datasets,
 │                            project-description + media/ (screenshots, demo video notes)
 ├── core/
 │   ├── executor.py        ← safe subprocess runner (retry, timeout, line cap)

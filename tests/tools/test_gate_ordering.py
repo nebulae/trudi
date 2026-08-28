@@ -5,9 +5,12 @@ from tools._gates import GATES, GateContext, run_gates
 
 EXPECTED_ORDER = [
     "mcp_routing",
+    "agent_authored_source",
     "dair_required",
     "lineage_required",
+    "refusal_rewording",
     "evidence_strength",
+    "tier_contract",
     "completeness",
     "attribution",
     "transfer",
@@ -27,7 +30,7 @@ def test_all_gates_return_none_or_dict():
     inspection — actual behaviour is exercised by tests/tools/test_misc.py."""
     from unittest.mock import MagicMock
     fake_log = MagicMock()
-    fake_log.index.return_value = MagicMock(by_call_id={}, by_type={}, by_tool={})
+    fake_log.index.return_value = MagicMock(by_call_id={}, by_type={"dair_call": [{"type": "dair_call"}]}, by_tool={})
     ctx = GateContext(
         description="benign test",
         confidence="UNCONFIRMED",
@@ -36,7 +39,7 @@ def test_all_gates_return_none_or_dict():
         linked_call_id=0,
         tested_hypothesis_id="",
         log=fake_log,
-        idx=MagicMock(by_call_id={}, by_type={}, by_tool={}, findings_by_linked={}, hypotheses_by_id={}),
+        idx=MagicMock(by_call_id={}, by_type={"dair_call": [{"type": "dair_call"}]}, by_tool={}, findings_by_linked={}, hypotheses_by_id={}),
         window=[{"type": "dair_call"}],
     )
     # UNCONFIRMED tier + dair_call in window → all gates should pass
@@ -58,7 +61,7 @@ def test_dair_required_fires_before_tier_checks():
         tested_hypothesis_id="",
         log=fake_log,
         idx=MagicMock(by_call_id={}, by_type={}, by_tool={}, findings_by_linked={}, hypotheses_by_id={}),
-        window=[],  # NO dair_call
+        window=[],  # NO dair_call anywhere
     )
     failure = run_gates(ctx)
     assert failure is not None
@@ -77,7 +80,7 @@ def test_evidence_strength_fires_after_dair_passes():
         linked_call_id=0,
         tested_hypothesis_id="",
         log=fake_log,
-        idx=MagicMock(by_call_id={}, by_type={}, by_tool={}, findings_by_linked={}, hypotheses_by_id={}),
+        idx=MagicMock(by_call_id={}, by_type={"dair_call": [{"type": "dair_call"}]}, by_tool={}, findings_by_linked={}, hypotheses_by_id={}),
         window=[{"type": "dair_call"}],
     )
     failure = run_gates(ctx)

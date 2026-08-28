@@ -32,14 +32,17 @@ def _run_tcpdump_ascii(cmd: list[str], timeout: int) -> dict:
     return raw
 
 
-def _record_structured_marker(tool_name: str, raw: dict, summary: dict | None = None) -> int | None:
-    """Record the MCP wrapper name, not only the underlying tcpdump command."""
+def _record_structured_marker(tool_name: str, raw: dict, summary: dict | None = None,
+                              session_artifact: bool = False) -> int | None:
+    """Record the MCP wrapper name, not only the underlying tcpdump command.
+    session_artifact=True stamps the marker the attribution gates read: this
+    output binds identities to source addresses / sessions."""
     try:
         import json
         from core.execution_log import log
 
         raw_id = raw.get("_trudi_call_id")
-        return log.record_tool_call(
+        cid = log.record_tool_call(
             cmd=f"<py>:{tool_name}",
             success=bool(raw.get("success")),
             truncated=False,
@@ -50,6 +53,9 @@ def _record_structured_marker(tool_name: str, raw: dict, summary: dict | None = 
             stdout_excerpt=json.dumps(summary or {}, sort_keys=True)[:600],
             input_call_ids=[raw_id] if raw_id else None,
         )
+        if cid and session_artifact and raw.get("success"):
+            log.annotate_tool_call(cid, session_artifact=True)
+        return cid
     except Exception as e:
         import sys
         print(f"[TRUDI WARN] structured marker failed for {tool_name}: {e}",
@@ -120,13 +126,15 @@ def ngrep_search(
     # one '#' per inspected packet, and on a large pcap that progress noise
     # fills the captured stdout buffer before any actual match line is emitted
     # — causing real matches to be invisible under `truncated: true` output.
+    from tools._exit_codes import policy
     cmd = ["ngrep", "-q", "-I", pcap_file]
     if case_insensitive:
         cmd.append("-i")
     cmd.append(pattern)
     if protocol:
         cmd.append(protocol)
-    return run(cmd, needs_sudo=True, timeout=120)
+    # ngrep exits 1 when nothing matched — a result, not a failure.
+    return run(cmd, needs_sudo=True, timeout=120, **policy("ngrep"))
 
 
 @mcp.tool()
@@ -338,8 +346,21 @@ def http_session_inventory(
         raw,
         {"session_count": summary["session_count"],
          "unique_emails": summary["unique_emails"][:10]},
+        session_artifact=True,
     )
     result["_trudi_call_id"] = marker_id or raw.get("_trudi_call_id")
+    # Registry feeder: the structured identities were previously returned to
+    # the model and then lost from the trace — annotate them so the identity
+    # registry (LogIndex.identities) and exhaustion checks can consume them.
+    if result["_trudi_call_id"]:
+        try:
+            from core.execution_log import log as _elog
+            _elog.annotate_tool_call(
+                result["_trudi_call_id"],
+                observed_identities=summary["unique_emails"][:200],
+            )
+        except Exception:
+            pass
 
     if output_path:
         assert_output_safe(output_path)
@@ -594,8 +615,25 @@ def pcap_identity_timeline(
             "roster_match_count": result["summary"]["roster_match_count"],
             "matched_by_person": matched_by_person,
         },
+        session_artifact=True,
     )
     result["_trudi_call_id"] = marker_id or raw.get("_trudi_call_id")
+    # Registry feeder: annotate every distinct identity value so the identity
+    # registry (LogIndex.identities) sees them — previously returned to the
+    # model and lost from the trace.
+    if result["_trudi_call_id"]:
+        try:
+            from core.execution_log import log as _elog
+            _vals = []
+            for _r in deduped:
+                if _r["value"] not in _vals:
+                    _vals.append(_r["value"])
+                if len(_vals) >= 200:
+                    break
+            _elog.annotate_tool_call(
+                result["_trudi_call_id"], observed_identities=_vals)
+        except Exception:
+            pass
 
     if output_path:
         assert_output_safe(output_path)

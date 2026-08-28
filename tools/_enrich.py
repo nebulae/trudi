@@ -12,34 +12,18 @@ the result unchanged.
 """
 from __future__ import annotations
 
-import functools
 import itertools
 from collections import defaultdict
-from pathlib import Path
 
-import yaml
-
-_FK_DIR = Path(__file__).resolve().parent.parent / "data" / "fk"
-
-# --- TRUDI tool -> FK artifact sheet (does_not_prove / misinterpretations) ----
-_ARTIFACT_MAP: dict[str, str] = {
-    "vol_userassist": "userassist",
-    "ez_appcompatcacheparser": "shimcache",
-    "ez_amcacheparser": "amcache",
-    "vol_amcache": "amcache",
-    "ez_pecmd": "prefetch",
-    "ez_mftecmd": "mft",
-    "ez_mftecmd_dir": "mft",
-    "ez_lecmd": "lnk_files",
-    "ez_jlecmd": "jump_lists",
-    "ez_rbcmd": "recycle_bin",
-    "ez_sbecmd": "shellbags",
-    "ez_evtxecmd": "event_logs_security",
-}
-
-# --- TRUDI tool -> FK tool sheet (caveats / field_meanings / exit_code_hints) --
-# Explicit overrides; every other vol_* falls through to the volatility3 sheet.
-_TOOL_MAP: dict[str, str] = {}
+# FK corpus access (tool→sheet maps, cached loaders, namespace normalizer) lives
+# in the shared tools._fk module so the completeness gates share one definition.
+from tools._fk import (
+    ARTIFACT_MAP as _ARTIFACT_MAP,
+    load_artifact as _load_artifact,
+    load_tool as _load_tool,
+    normalize_tool_name as _normalize_tool_name,
+    tool_stem_for_tool as _fk_tool_stem,
+)
 
 # --- Generic-tier scope ------------------------------------------------------
 # The generic tier (data_provenance untrusted-evidence tag + rotating discipline
@@ -64,30 +48,6 @@ def _is_evidence_tool(name: str) -> bool:
     if name.startswith(_CONTROL_PREFIXES):
         return False
     return name not in _CONTROL_TOOLS
-
-
-def _fk_tool_stem(tool_name: str) -> str | None:
-    if tool_name in _TOOL_MAP:
-        return _TOOL_MAP[tool_name]
-    if tool_name.startswith("vol_"):
-        return "volatility3"
-    return None
-
-
-@functools.lru_cache(maxsize=None)
-def _load_artifact(stem: str) -> dict:
-    for plat in ("windows", "linux", "macos"):
-        p = _FK_DIR / "artifacts" / plat / f"{stem}.yaml"
-        if p.is_file():
-            return yaml.safe_load(p.read_text()) or {}
-    return {}
-
-
-@functools.lru_cache(maxsize=None)
-def _load_tool(stem: str) -> dict:
-    for p in (_FK_DIR / "tools").rglob(f"{stem}.yaml"):
-        return yaml.safe_load(p.read_text()) or {}
-    return {}
 
 
 DISCIPLINE_REMINDERS = [
@@ -119,11 +79,8 @@ def enrich(tool_name: str, result: dict) -> dict:
     try:
         call_num = next(_call_counter)
         # Middleware passes namespace-DOUBLED registration names (e.g.
-        # "ez_ez_mftecmd", "vol_vol_pslist"). Collapse the doubled leading
-        # namespace so the single-namespace map keys match.
-        parts = tool_name.split("_", 2)
-        if len(parts) >= 2 and parts[0] == parts[1]:
-            tool_name = tool_name[len(parts[0]) + 1:]
+        # "ez_ez_mftecmd", "vol_vol_pslist"); collapse to single-namespace form.
+        tool_name = _normalize_tool_name(tool_name)
         # --- Generic tier: rides on every evidence-returning tool -----------
         #     (untrusted-evidence provenance tag + rotating discipline reminder)
         if _is_evidence_tool(tool_name):
@@ -165,7 +122,11 @@ def enrich(tool_name: str, result: dict) -> dict:
         # exit-code meaning (e.g. vol 1 = ran-but-failed/no-results; -1 = symbols not cached)
         ec = _exit_code_of(result)
         hints = tool.get("exit_code_hints") or {}
-        if ec is not None and ec in hints:
+        if result.get("exit_meaning"):
+            # The wrapper declared an exit policy (tools/_exit_codes.py) —
+            # single source of truth for that binary.
+            result["exit_code_meaning"] = result["exit_meaning"]
+        elif ec is not None and ec in hints:
             result["exit_code_meaning"] = hints[ec]
     except Exception:
         return result

@@ -1,4 +1,5 @@
 """EZ Tools (Eric Zimmerman) — Windows artifact parsers via .NET runtime."""
+import os
 from typing import Optional
 from fastmcp import FastMCP
 from core import run_dotnet, run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
@@ -8,11 +9,45 @@ mcp = FastMCP("eztools")
 
 EZ = "/opt/zimmermantools"
 
+# When an EZ Tool .dll is absent from a deployment, dotnet fails with a cryptic
+# "The application '<dll>' does not exist" / exit 145. Surface that as a clear
+# `tool_unavailable` result and, where the same artifact can be reached another
+# way, name the fallback so the agent redirects instead of dropping the step.
+_EZ_FALLBACKS = {
+    "PECmd.dll": (
+        "Prefetch parser unavailable — recover EXECUTION evidence from other "
+        "artifacts instead: UserAssist (ez.recmd_hive on the user's NTUSER.DAT), "
+        "Amcache (ez.amcacheparser), and AppCompatCache/ShimCache "
+        "(ez.appcompatcacheparser). Prefetch existence/last-run can also be read "
+        "from $MFT (ez.mftecmd on C:\\Windows\\Prefetch)."
+    ),
+    "AmcacheParser.dll": (
+        "Amcache parser unavailable — use UserAssist (ez.recmd_hive) and "
+        "AppCompatCache (ez.appcompatcacheparser) for execution/presence evidence."
+    ),
+    "AppCompatCacheParser.dll": (
+        "ShimCache parser unavailable — use Amcache (ez.amcacheparser) and "
+        "UserAssist (ez.recmd_hive) for presence/execution evidence."
+    ),
+}
+
 
 def _ez(dll: str, args: list[str], output_dir: Optional[str] = None, timeout: int = 300) -> dict:
     if output_dir:
         assert_output_safe(output_dir)
-    return run_dotnet(dll, args, timeout=timeout, output_dir=output_dir)
+    result = run_dotnet(dll, args, timeout=timeout, output_dir=output_dir)
+    # Missing-binary detection: the .dll not being on disk is the unambiguous
+    # signal (dotnet's exit 145 also fires for genuine runtime faults). Augment
+    # the recorded result — the failed tool_call still lands in the trace, but
+    # now with an actionable fallback instead of a raw dotnet stack.
+    if not result.get("success") and not os.path.exists(dll):
+        name = os.path.basename(dll)
+        result["tool_unavailable"] = True
+        result["error"] = f"{name} is not installed in this deployment ({dll} not found)"
+        fb = _EZ_FALLBACKS.get(name)
+        if fb:
+            result["fallback"] = fb
+    return result
 
 
 def _attach_evtx_coverage(result: dict, output_dir: str, output_file: str) -> None:
@@ -30,23 +65,42 @@ def _attach_evtx_coverage(result: dict, output_dir: str, output_file: str) -> No
         if not _os.path.exists(path):
             return
         start = end = None
+        session_ids: set = set()
+        from tools._gates._session import SESSION_EVENT_IDS
         with open(path, newline="", encoding="utf-8", errors="replace") as fh:
             rdr = _csv.DictReader(fh)
-            col = next((c for c in (rdr.fieldnames or [])
+            fields = rdr.fieldnames or []
+            col = next((c for c in fields
                         if c.lstrip("﻿").strip().lower() == "timecreated"), None)
-            if not col:
+            eid_col = next((c for c in fields
+                            if c.lstrip("﻿").strip().lower() == "eventid"), None)
+            if not col and not eid_col:
                 return
             for row in rdr:
-                ts = (row.get(col) or "").strip()
-                if not ts:
-                    continue
-                if start is None or ts < start:
-                    start = ts
-                if end is None or ts > end:
-                    end = ts
+                ts = (row.get(col) or "").strip() if col else ""
+                if ts:
+                    if start is None or ts < start:
+                        start = ts
+                    if end is None or ts > end:
+                        end = ts
+                if eid_col:
+                    try:
+                        eid = int((row.get(eid_col) or "").strip())
+                    except ValueError:
+                        continue
+                    if eid in SESSION_EVENT_IDS:
+                        session_ids.add(eid)
+        from core.execution_log import log
+        fields_out = {}
         if start and end:
-            from core.execution_log import log
-            log.annotate_tool_call(cid, coverage_window={"start": start, "end": end})
+            fields_out["coverage_window"] = {"start": start, "end": end}
+        if session_ids:
+            # Server-stamped marker: this parse holds logon/session events —
+            # what the attribution gates require for a principal binding.
+            fields_out["session_artifact"] = True
+            fields_out["session_event_ids"] = sorted(session_ids)
+        if fields_out:
+            log.annotate_tool_call(cid, **fields_out)
     except Exception:
         pass
 
@@ -142,16 +196,76 @@ def ez_recmd_dir(
     return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
 
 
+_HIVE_NAMES = ("ntuser.dat", "usrclass.dat", "sam", "system", "software", "security",
+               "amcache.hve", "default")
+
+
+def _find_hives(hives_dir: str, names=_HIVE_NAMES, max_hives: int = 64) -> list[str]:
+    """Registry hive files under `hives_dir` (case-insensitive, transaction
+    logs excluded), sorted, capped."""
+    out: list[str] = []
+    want = {n.lower() for n in names}
+    for dirpath, dirnames, filenames in os.walk(hives_dir, followlinks=False):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            low = fn.lower()
+            if low in want and not low.endswith((".log", ".log1", ".log2", ".regtrans-ms", ".blf")):
+                out.append(os.path.join(dirpath, fn))
+                if len(out) >= max_hives:
+                    return out
+    return out
+
+
 @mcp.tool()
 @output_safe
 def ez_recmd_batch(
     hives_dir: str,
     batch_file: str,
     output_dir: str,
+    per_hive: bool = True,
+    max_hives: int = 64,
 ) -> dict:
-    """Run a RECmd batch config against a directory of hives (targeted key extraction)."""
-    args = ["-d", hives_dir, "--bn", batch_file, "--csv", output_dir]
-    return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=DEFAULT_TIMEOUT)
+    """Run a RECmd batch config (targeted key extraction) over the hives under
+    `hives_dir`.
+
+    per_hive=True (default): enumerate the hive FILES (NTUSER.DAT, UsrClass.dat,
+    SAM, SYSTEM, SOFTWARE, SECURITY, Amcache.hve) under the tree and run RECmd
+    `-f <hive> --bn <batch>` per hive, each with the normal timeout, output under
+    `<output_dir>/<profile-or-parent>/`. One traced, citable call per hive;
+    failures are isolated. `-d <whole tree>` is what ran to the 1800 s timeout
+    twice on a full Users tree — kept behind per_hive=False for small dirs.
+    """
+    if not per_hive:
+        args = ["-d", hives_dir, "--bn", batch_file, "--csv", output_dir]
+        return _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=output_dir, timeout=VOL_TIMEOUT)
+    assert_output_safe(output_dir)
+    hives = _find_hives(hives_dir, max_hives=max(1, int(max_hives)))
+    if not hives:
+        return {"success": False, "error": f"no registry hives found under {hives_dir}",
+                "looked_for": list(_HIVE_NAMES)}
+    runs: list[dict] = []
+    for hive in hives:
+        parent = os.path.basename(os.path.dirname(hive)) or "root"
+        sub = os.path.join(output_dir, f"{parent}_{os.path.basename(hive)}".replace(" ", "_"))
+        args = ["-f", hive, "--bn", batch_file, "--csv", sub]
+        r = _ez(f"{EZ}/RECmd/RECmd.dll", args, output_dir=sub, timeout=DEFAULT_TIMEOUT)
+        runs.append({"hive": hive, "success": bool(r.get("success")), "output_dir": sub,
+                     "elapsed_seconds": r.get("elapsed_seconds"),
+                     "_trudi_call_id": r.get("_trudi_call_id"),
+                     "error": (r.get("error") or (r.get("stderr") or "")[:200]) if not r.get("success") else ""})
+        if r.get("tool_unavailable"):
+            return {"success": False, "tool_unavailable": True, "error": r.get("error"),
+                    "fallback": r.get("fallback"), "hives": runs}
+    ok = [x for x in runs if x["success"]]
+    return {
+        "success": bool(ok),
+        "hives_found": len(hives),
+        "hives_ok": len(ok),
+        "hives_failed": len(runs) - len(ok),
+        "capped": len(hives) >= max(1, int(max_hives)),
+        "hives": runs,
+        "output_dir": output_dir,
+    }
 
 
 # ── Amcache & AppCompat ───────────────────────────────────────────────────────

@@ -128,6 +128,10 @@
       <label><input type="checkbox" class="node-filter" value="dair_call" checked> <span class="legend-dot" style="background:var(--dair)"></span> DAIR phases</label>
       <label><input type="checkbox" class="node-filter" value="self_correction" checked> <span class="legend-dot" style="background:var(--self-correct)"></span> Self-corrections</label>
       <label><input type="checkbox" class="node-filter" value="curiosity_probe" checked> <span class="legend-dot" style="background:var(--curiosity)"></span> Curiosity probes</label>
+      <label><input type="checkbox" class="node-filter" value="finding_refused" checked> <span class="legend-dot" style="background:#ff6b6b;opacity:.6"></span> Refused findings</label>
+      <label><input type="checkbox" class="node-filter" value="disposition" checked> <span class="legend-dot" style="background:#b48cff;opacity:.6"></span> Dispositions</label>
+      <label><input type="checkbox" class="node-filter" value="tool_blocked"> <span class="legend-dot" style="background:#ffa86b"></span> Blocked tools</label>
+      <label><input type="checkbox" class="node-filter" value="reason_evidence_fetch"> <span class="legend-dot" style="background:#5ed1d1;opacity:.6"></span> Evidence fetches</label>
       <label><input type="checkbox" class="node-filter" value="tool_call"> <span class="legend-dot" style="background:var(--tool)"></span> Tool calls (noisy)</label>
       <label><input type="checkbox" class="node-filter" value="narration"> <span class="legend-dot" style="background:var(--tool)"></span> Agent notes</label>
     </div>
@@ -193,6 +197,7 @@ const State = {
       'reason_plan', 'reason_hypothesize', 'reason_evaluate_finding',
       'reason_confidence_score', 'reason_cite_check', 'reason_synthesize',
       'reason_pre_report_check', 'reason_audit_findings',
+      'finding_refused', 'disposition',
     ]),
     tiers: new Set(['CONFIRMED','LIKELY','SUSPECTED','UNCONFIRMED']),
   },
@@ -335,6 +340,22 @@ function nodeFor(entry) {
       color = '#8a93a6';
       kind = 'narration';
       break;
+    case 'finding_refused':
+      label = `#${cid} ⛔ ${(entry.detail_gate || entry.gate || 'refused')} ${(entry.description || '').slice(0, 32)}`;
+      color = '#ff6b6b';
+      break;
+    case 'tool_blocked':
+      label = `#${cid} ⛔ blocked ${entry.tool || ''}`;
+      color = '#ffa86b';
+      break;
+    case 'disposition':
+      label = `#${cid} 📌 ${entry.target_kind || ''}:${entry.target_id || ''} → ${entry.reason || ''}`;
+      color = '#b48cff';
+      break;
+    case 'reason_evidence_fetch':
+      label = `#${cid} 🔎 fetch ×${Array.isArray(entry.requests) ? entry.requests.length : 0}`;
+      color = '#5ed1d1';
+      break;
     default:
       return null;
   }
@@ -349,6 +370,10 @@ function nodeFor(entry) {
              : kind === 'self_correction' ? 'star'
              : kind === 'curiosity_probe' ? 'vee'
              : kind === 'narration' ? 'triangle'
+             : kind === 'finding_refused' ? 'octagon'
+             : kind === 'disposition' ? 'rhomboid'
+             : kind === 'tool_blocked' ? 'octagon'
+             : kind === 'reason_evidence_fetch' ? 'vee'
              : 'ellipse',
     },
   };
@@ -385,6 +410,35 @@ function edgesFor(entry, byCid, hypById) {
         });
       }
     }
+  }
+
+  // Phase-E entries: refusals point at what they cited, dispositions at their
+  // evidence, evidence fetches at the reason call they served.
+  if (entry.type === 'finding_refused' && Array.isArray(entry.input_call_ids)) {
+    for (const inp of entry.input_call_ids) {
+      if (byCid.has(inp)) {
+        edges.push({
+          data: { id: `eref${cid}_${inp}`, source: `n${cid}`, target: `n${inp}`, kind: 'refused-citing' },
+          style: { 'line-color': '#ff6b6b', 'target-arrow-color': '#ff6b6b', 'line-style': 'dotted', 'opacity': 0.6 },
+        });
+      }
+    }
+  }
+  if (entry.type === 'disposition' && Array.isArray(entry.evidence_call_ids)) {
+    for (const inp of entry.evidence_call_ids) {
+      if (byCid.has(inp)) {
+        edges.push({
+          data: { id: `edsp${cid}_${inp}`, source: `n${cid}`, target: `n${inp}`, kind: 'disposition-evidence' },
+          style: { 'line-color': '#b48cff', 'target-arrow-color': '#b48cff', 'line-style': 'dashed', 'opacity': 0.7 },
+        });
+      }
+    }
+  }
+  if (entry.type === 'reason_evidence_fetch' && entry.reason_call_id && byCid.has(entry.reason_call_id)) {
+    edges.push({
+      data: { id: `efch${cid}_${entry.reason_call_id}`, source: `n${cid}`, target: `n${entry.reason_call_id}`, kind: 'fetched-for' },
+      style: { 'line-color': '#5ed1d1', 'target-arrow-color': '#5ed1d1', 'line-style': 'dotted', 'opacity': 0.6 },
+    });
   }
 
   // Curiosity probes — link them to the artifacts they looked at (the

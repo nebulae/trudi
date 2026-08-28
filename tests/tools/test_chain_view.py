@@ -22,8 +22,13 @@ def test_chain_view_html_present():
     for token in [
         "kind-reason_plan", "kind-dair_call", "kind-tool_batch",
         "kind-reason_hypothesize", "kind-finding", "kind-self_correction",
+        "kind-finding_refused", "kind-disposition", "kind-tool_blocked",
+        "kind-reason_evidence_fetch",
     ]:
         assert token in body, f"block class {token} missing"
+    for kind in ["finding_refused", "disposition", "tool_blocked", "reason_evidence_fetch"]:
+        assert f'class="kind-filter" value="{kind}"' in body, f"filter for {kind} missing"
+        assert f"case '{kind}':" in body, f"blockTitle case for {kind} missing"
     # Wire kinds
     for kind in ["edge-supports", "edge-tests", "edge-consumes", "edge-instigates",
                  "edge-evaluates", "edge-directs"]:
@@ -102,3 +107,22 @@ def test_chain_view_blueprint_features():
     assert "Connections" in body
     assert "Inputs" in body
     assert "Output / Conclusion" in body
+
+
+def test_phase_e_entry_types_registered_in_all_views():
+    """finding_refused / reason_evidence_fetch / tool_blocked / disposition must
+    be filterable and rendered in every view — an unregistered type is
+    invisible (trace_viewer) or dropped from the graph (graph_view)."""
+    types = ["finding_refused", "reason_evidence_fetch", "tool_blocked", "disposition"]
+    tv = open(os.path.join(DASHBOARD_DIR, "trace_viewer.html")).read()
+    gv = open(os.path.join(DASHBOARD_DIR, "graph_view.html")).read()
+    for t in types:
+        assert f'class="type-filter" value="{t}"' in tv, f"trace_viewer filter {t}"
+        assert f"case '{t}':" in tv, f"trace_viewer entrySummary/detail case {t}"
+        assert f'class="node-filter" value="{t}"' in gv, f"graph_view filter {t}"
+        assert f"case '{t}':" in gv, f"graph_view nodeFor case {t}"
+    for fn in ["renderFindingRefused", "renderToolBlocked", "renderDisposition", "renderEvidenceFetch"]:
+        assert f"function {fn}(" in tv
+    # tool_call detail shows the Phase-E fields
+    for field in ["stdout_path", "stdout_chars", "exit_meaning", "output_path", "session_artifact"]:
+        assert field in tv, f"trace_viewer renderToolCall lacks {field}"

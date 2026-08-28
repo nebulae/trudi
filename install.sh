@@ -110,8 +110,11 @@ else
             warn "chainsaw archive corrupt — skipping (TRUDI works without it)"
         elif [ -f "$TMPDIR/chainsaw/chainsaw" ]; then
             sudo install -m 0755 "$TMPDIR/chainsaw/chainsaw" "$CHAINSAW_BIN"
+            # Create the share dir once, before either optional copy — so a
+            # release that ships mappings/ but no sigma/ (or vice versa) can't
+            # leave the parent missing and fail a copy under `set -e`.
+            sudo mkdir -p /usr/local/share/chainsaw
             if [ -d "$TMPDIR/chainsaw/sigma" ]; then
-                sudo mkdir -p /usr/local/share/chainsaw
                 sudo cp -r "$TMPDIR/chainsaw/sigma" /usr/local/share/chainsaw/sigma
             fi
             if [ -d "$TMPDIR/chainsaw/mappings" ]; then
@@ -260,7 +263,7 @@ step "Configuring environment"
 if [ ! -f "$TRUDI_DIR/.env" ]; then
     cp "$TRUDI_DIR/.env.example" "$TRUDI_DIR/.env"
     ok "Created .env from .env.example"
-    warn "Edit $TRUDI_DIR/.env to add API keys (VirusTotal, AbuseIPDB) and Foundation-Sec URL"
+    warn "Edit $TRUDI_DIR/.env to add API keys (VirusTotal, AbuseIPDB); set REASON_URL / DAIR_URL for a local reasoning backend"
 else
     ok ".env already exists — skipping"
 fi
@@ -297,52 +300,9 @@ if [ ! -f "$SETTINGS_FILE" ]; then
     echo '{"hooks":{}}' > "$SETTINGS_FILE"
 fi
 
-TRUDI_HOOKS_SRC="$HOOKS_SRC" python3 - <<'PYEOF'
-import json, os
-from pathlib import Path
-
-settings_path = Path.home() / ".claude/settings.json"
-hooks_src     = os.environ["TRUDI_HOOKS_SRC"]
-
-settings = json.loads(settings_path.read_text())
-settings.setdefault("hooks", {})
-
-# event -> hook script. All three ship in claude/hooks and run from the repo
-# path; each must be registered under its own event or the script sits inert
-# (forensic_audit = Stop trace flush; log_user_message = UserPromptSubmit,
-# which the operator_text_required approval gate depends on).
-HOOK_EVENTS = {
-    "PostToolUse":      "log_narration.py",
-    "Stop":             "forensic_audit.py",
-    "UserPromptSubmit": "log_user_message.py",
-}
-
-changed = False
-for event, script in HOOK_EVENTS.items():
-    desired = f"python3 {hooks_src}/{script}"
-    existing = settings["hooks"].setdefault(event, [])
-    # Self-heal: if a registration for this script exists but points anywhere
-    # other than the repo path (e.g. a stale ~/.claude/hooks copy), rewrite it.
-    matched = False
-    for h in existing:
-        for entry in h.get("hooks", []):
-            cmd = entry.get("command", "")
-            if cmd.endswith(script):
-                matched = True
-                if cmd != desired:
-                    entry["command"] = desired
-                    print(f"  {event} hook ({script}) re-pointed to repo path")
-                    changed = True
-                else:
-                    print(f"  {event} hook ({script}) already registered — skipping")
-    if not matched:
-        existing.append({"hooks": [{"type": "command", "command": desired}]})
-        print(f"  Registered {event} hook ({script})")
-        changed = True
-
-if changed:
-    settings_path.write_text(json.dumps(settings, indent=2))
-PYEOF
+# Registration + self-heal (command path, matcher) lives in
+# claude/hooks/_register_hooks.py so it is unit-tested; install.sh only calls it.
+python3 "$HOOKS_SRC/_register_hooks.py" "$HOOKS_SRC" "$SETTINGS_FILE"
 
 ok "Claude Code hooks configured (run from repo path)"
 
@@ -452,7 +412,7 @@ echo "    1. Edit $TRUDI_DIR/.env and set ANTHROPIC_API_KEY — REQUIRED for a f
 echo "       It powers the analyst, the reason.* reviewer, and the dair.* director."
 echo "       Without it TRUDI degrades: reason.* / dair.* calls are skipped, so findings"
 echo "       are never adversarially challenged. (VirusTotal / AbuseIPDB keys are optional.)"
-echo "       Submission default: REASON_MODEL=claude-opus-4-8, DAIR_MODEL=claude-opus-4-8"
+echo "       Default: REASON_MODEL=claude-opus-4-8, DAIR_MODEL=claude-opus-4-8 (or a local model, below)."
 echo ""
 echo "  Browse a finished investigation now (no key, no evidence needed):"
 echo "    ./dashboard.sh                 # serves ~/cases on http://127.0.0.1:8765"
@@ -463,9 +423,10 @@ echo "    # Edit ~/cases/<CASE_ID>/CLAUDE.md with evidence paths"
 echo "    cd ~/cases/<CASE_ID>"
 echo "    claude"
 echo ""
-echo "  Alternative reasoning backend — Foundation-Sec-8B (local vLLM, optional):"
-echo "    vllm serve \"fdtn-ai/Foundation-Sec-8B-Reasoning\" --reasoning-parser minimax_m2"
-echo "    then set REASON_BACKEND=openai-compat, REASON_URL=http://localhost:8000 in .env"
+echo "  Local reasoning backend (optional) — run the reviewer + DAIR on your own model:"
+echo "    a security-tuned GGUF (e.g. Titus-CybersecurityLLM) or a thinking model (Qwen3, DeepSeek-R1)"
+echo "    over vLLM / SGLang / llama.cpp, then set REASON_BACKEND=openai-compat + REASON_URL in .env."
+echo "    Details: README 'Running a local model'."
 echo ""
 echo "  Full walkthrough: docs/try-it-out.md"
 echo ""

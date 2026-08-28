@@ -2,10 +2,10 @@
 
 This gate enforces the CLAUDE.md truncated-output rule: an UNCONFIRMED
 finding cannot be linked to a tool_call whose output was truncated. The
-regression motivating the gate is NITROBA-2008, where the agent recorded
+regression motivating the gate: the agent recorded
 "no roster match in PCAP" against an ngrep call whose stdout was 600
 chars of '#' progress markers (truncated=True) and so missed 116 cleartext
-matches of `jcoachj@gmail.com`.
+matches of `jcoachj@gmail.example`.
 """
 from unittest.mock import MagicMock
 
@@ -30,7 +30,7 @@ def _ctx(*, tier: str, linked_call_id: int, by_call_id: dict) -> GateContext:
 
 
 def test_unconfirmed_linked_to_truncated_call_refused():
-    """The original NITROBA-2008 failure mode: UNCONFIRMED negative finding
+    """The original failure mode: UNCONFIRMED negative finding
     whose linked tool_call returned truncated output. Must refuse."""
     by_call_id = {
         49: {

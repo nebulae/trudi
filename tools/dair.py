@@ -9,7 +9,7 @@ Active phases for TRUDI (read-only forensic tool):
   Triage        — confirm initial IOCs, challenge for hallucinations, produce plan
   Collect       — gather raw artifacts per plan (ez.*, vol.*, tsk.*, strings.*)
   Analyze       — reason about collected artifacts; hypothesize on suspicious findings
-  Scan          — sweep for lateral movement and pivot hosts (yara.*, net.*, enrich.*)
+  Scan          — scoping: pursue each new IOC to depth — other hosts/network AND deeper on the same host (yara.*, net.*, enrich.*)
   Report        — terminal; emit Improve & Response recommendations
 
 Detection is the assumed trigger (investigation already started). Improve &
@@ -20,7 +20,9 @@ import re
 import json
 from fastmcp import FastMCP
 from core.paths import DAIR_TIMEOUT
-from tools.reasoning import _parse_directives, _cap_lines
+from tools.reasoning import _parse_directives, _cap_lines, _compat_chat
+from tools._llm_parse import (parse_result_block, result_instruction, RESULT_JSON,
+                              LEGACY_BLOCK, NONE as PARSE_NONE)
 from tools.tool_capabilities import (
     MANIFEST_VERSION,
     annotate_directives_with_manifest,
@@ -57,67 +59,145 @@ def _active_backend() -> str:
     return "claude"
 
 
-# ── Candidate pivot detection ────────────────────────────────────────────────
+# ── Candidate pivot detection (typed) ────────────────────────────────────────
 # DAIR records hosts/principals worth a follow-up look, but it does not mutate
-# phase transitions. Earlier versions force-pushed and drained pivot queues from
-# heuristic text extraction; the VANKO trace showed that a generic token
-# ("FINDINGS") could become a synthetic Triage target. Candidate pivots are
-# therefore audit metadata only. The model/agent may choose to investigate them,
-# but code never rewrites stack_action/next_phase from these regexes.
+# phase transitions. Candidate pivots are audit metadata only: the model/agent
+# may choose to investigate them, but code never rewrites stack_action/next_phase
+# from them.
 #
-# Two detection paths run by default and are case-agnostic:
-#   1. IPv4 — every host has one; the regex is rock-solid.
-#   2. UNC paths — \\HOSTNAME\share is unambiguously a host reference,
-#      regardless of the case's hostname naming convention.
-# A third optional path handles case-specific hostname patterns that don't
-# surface via UNC (e.g. bare "<prefix>-NN" mentions in narrative text): the
-# operator sets TRUDI_PIVOT_HOSTNAME_PREFIXES="<prefix1>,<prefix2>,..." in
-# .env and the prefix-based regex is compiled lazily inside
-# _extract_host_tokens so env-var changes take effect without a server restart.
+# The agent DECLARES what its batch observed — dair_assess(observed_hosts=[…],
+# observed_principals=[{name, cue, call_ids}]) — and DAIR diffs those typed
+# values against what the trace already knows. No regex runs over the
+# tool_results_summary prose: a capitalised word in a sentence can no longer
+# become a "principal", and a hostname naming convention needs no env var.
 
-# IPv4 address anywhere in the summary text.
-_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# Validators over a structured token space (an IPv4, a UNC host, a hostname).
+_IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+_UNC_HOST_RE = re.compile(r"^\\\\([A-Za-z0-9][\w.-]*)")
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 
-# UNC-path hostname extraction: captures the host portion of a \\HOST\share
-# reference. Works for both IP and DNS-name forms; the IP form is filtered
-# out downstream so it isn't double-counted.
-_UNC_HOST_RE = re.compile(r"\\\\([A-Za-z0-9][\w.-]*)")
+PRINCIPAL_CUES = ("created", "interactive_logon", "network_logon", "correspondent", "other")
+FORCED_CUES = frozenset({"created", "interactive_logon"})
 
-
-def _hostname_prefix_regex():
-    """Compile the case-specific hostname regex from TRUDI_PIVOT_HOSTNAME_PREFIXES.
-
-    Returns None if the env var is empty/unset (default case-agnostic mode —
-    only IPv4 + UNC-path detection runs). Compiled lazily on each call so
-    operators can adjust the env var between investigations without
-    bouncing the MCP server, and so tests can monkeypatch it cleanly.
-    """
-    raw = os.environ.get("TRUDI_PIVOT_HOSTNAME_PREFIXES", "")
-    prefixes = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
-    if not prefixes:
-        return None
-    return re.compile(
-        rf"\b(?:{'|'.join(re.escape(p) for p in prefixes)})[-_]?\d+\b",
-        re.IGNORECASE,
-    )
+# Built-in accounts are never a genuine new principal.
+from tools._gates._entities import BUILTIN_PRINCIPALS as _BUILTIN_PRINCIPALS  # one list
 
 
-# Tokens that look like hostnames but are forensic-jargon noise. Anything that
-# matches the prefix-based regex but appears in this set is dropped before
-# the new-host comparison. These words turn up in any Windows / DFIR case
-# regardless of naming scheme:
-#   - Forensic phase / tool jargon (scan, triage, system, registry, etc.)
-#   - Common AV product names that frequently appear in event logs
-#   - Networking and file-type tokens with digit suffixes that can match a
-#     hostname-shaped regex (tcp4, http2, json5, etc.)
-_PIVOT_STOP_WORDS = frozenset({
-    "scan", "triage", "windows", "system", "report", "phase", "stage",
-    "claude", "dair", "reason", "trudi", "mcp", "vol", "ez", "ntlm", "smb",
-    "tcp", "udp", "dns", "http", "https", "rdp", "log", "evtx", "csv",
-    "json", "xml", "mft", "pdf", "exe", "dll", "ps1", "bat", "vbs",
-    "amcache", "shimcache", "prefetch", "registry",
-    "mcafee", "windefend", "defender", "symantec", "crowdstrike", "sentinel",
-})
+def _norm_host(v: str) -> str:
+    """Canonical host key: UNC → host part; upper-case; '_' → '-'."""
+    v = str(v or "").strip()
+    m = _UNC_HOST_RE.match(v)
+    if m:
+        v = m.group(1)
+    return v.upper().replace("_", "-")
+
+
+def _is_external_ip(host: str) -> bool:
+    """A public (globally-routable, non-private) IP — an external party, never the
+    local subject host. Such a host is a genuine pivot even when surfaced during
+    Triage: the Triage pivot-exclusion covers the subject host / local network,
+    not an external actor connecting to it (an RDP source, C2, exfil endpoint)."""
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(str(host or "").strip())
+        return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+    except Exception:
+        return False
+
+
+def _validate_hosts(observed_hosts) -> tuple[list[str], list[str]]:
+    """(valid canonical hosts, rejected raw values)."""
+    ok, bad = [], []
+    for raw in observed_hosts or []:
+        v = str(raw or "").strip()
+        if not v:
+            continue
+        h = _norm_host(v)
+        if _IPV4_RE.match(h) or _HOSTNAME_RE.match(h):
+            if h not in ok:
+                ok.append(h)
+        else:
+            bad.append(v)
+    return ok, bad
+
+
+def _validate_principals(observed_principals) -> tuple[list[dict], list[str]]:
+    """(valid items {name, cue, call_ids, norm}, error messages)."""
+    from tools._gates._entities import norm_entity
+    ok, errs = [], []
+    for it in observed_principals or []:
+        if not isinstance(it, dict):
+            errs.append(f"observed_principals item must be an object: {it!r}")
+            continue
+        name = str(it.get("name") or "").strip()
+        cue = str(it.get("cue") or "other").strip().lower()
+        if not name:
+            errs.append("observed_principals item is missing name")
+            continue
+        if cue not in PRINCIPAL_CUES:
+            errs.append(f"observed_principals cue={cue!r} for {name!r} is not valid — one of: "
+                        f"{', '.join(PRINCIPAL_CUES)}")
+            continue
+        cids = []
+        for c in (it.get("call_ids") or []):
+            try:
+                if int(c):
+                    cids.append(int(c))
+            except (TypeError, ValueError):
+                pass
+        ok.append({"name": name, "cue": cue, "call_ids": sorted(set(cids)), "norm": norm_entity(name)})
+    return ok, errs
+
+
+def _known_hosts() -> set[str]:
+    """Hosts already surfaced: every prior dair_call's typed observed_hosts and
+    candidate host values."""
+    known: set[str] = set()
+    try:
+        from core.execution_log import log as _elog
+        for e in _elog._entries:
+            if e.get("type") != "dair_call":
+                continue
+            for h in e.get("observed_hosts") or []:
+                known.add(_norm_host(h))
+            for pv in e.get("candidate_pivots") or []:
+                if isinstance(pv, dict) and pv.get("kind") == "host" and pv.get("value"):
+                    known.add(_norm_host(pv["value"]))
+    except Exception as _read_err:
+        import sys as _sys
+        print(f"[TRUDI WARN] dair host-context read failed: {_read_err!r}", file=_sys.stderr)
+    return known
+
+
+def _known_principals() -> set[str]:
+    """Principals already known (normalized): prior typed observed_principals
+    and candidate values, every finding's principal/entities, the identity
+    registry (server-stamped observed_identities)."""
+    from tools._gates._entities import norm_entity
+    known: set[str] = set()
+    try:
+        from core.execution_log import log as _elog
+        for e in _elog._entries:
+            t = e.get("type")
+            if t == "dair_call":
+                for it in e.get("observed_principals") or []:
+                    if isinstance(it, dict) and it.get("name"):
+                        known.add(norm_entity(it["name"]))
+                for pv in e.get("candidate_pivots") or []:
+                    if isinstance(pv, dict) and pv.get("kind") == "principal" and pv.get("value"):
+                        known.add(norm_entity(pv["value"]))
+            elif t == "finding":
+                c = e.get("claim") or {}
+                known |= set(c.get("entities_norm") or [])
+                if c.get("principal_norm"):
+                    known.add(c["principal_norm"])
+        if getattr(_elog, "_path", None):
+            known |= {norm_entity(k) for k in _elog.index().identities.keys()}
+    except Exception as _read_err:
+        import sys as _sys
+        print(f"[TRUDI WARN] dair principal-context read failed: {_read_err!r}", file=_sys.stderr)
+    return {k for k in known if k}
 
 
 # ── Output defaults ───────────────────────────────────────────────────────────
@@ -178,228 +258,6 @@ def _parse_dair_assessment(raw: str) -> dict:
         return {**_EMPTY_ASSESSMENT, **parsed}
     except (json.JSONDecodeError, ValueError):
         return _EMPTY_ASSESSMENT.copy()
-
-
-def _extract_host_tokens(text: str) -> set[str]:
-    r"""Return the set of host references (IPs + hostnames) appearing in `text`.
-
-    Detection sources:
-      1. IPv4 addresses — always.
-      2. UNC-path hostnames — `\\HOST\share` patterns; case-agnostic and
-         unambiguous.
-      3. Case-specific hostname prefixes — only if
-         TRUDI_PIVOT_HOSTNAME_PREFIXES is set in the environment.
-
-    Hostnames are normalized to uppercase so the set comparison against
-    `case_context` is case-insensitive and matches how agents typically
-    write them in narrative text (BASE-RD-01).
-    """
-    if not text:
-        return set()
-    ips = set(_IPV4_RE.findall(text))
-    hostnames: set[str] = set()
-
-    # UNC-path host extraction. An IP in a UNC path is already counted via
-    # _IPV4_RE — skip those so they aren't double-counted as a hostname.
-    for h in _UNC_HOST_RE.findall(text):
-        if _IPV4_RE.fullmatch(h):
-            continue
-        norm = h.upper().replace("_", "-")
-        if norm.lower() in _PIVOT_STOP_WORDS:
-            continue
-        hostnames.add(norm)
-
-    # Optional case-specific prefix-based detection. Lazy compile so changes
-    # to TRUDI_PIVOT_HOSTNAME_PREFIXES take effect without a server restart.
-    prefix_re = _hostname_prefix_regex()
-    if prefix_re is not None:
-        for h in prefix_re.findall(text):
-            norm = h.upper().replace("_", "-")
-            # Stop-word filter (e.g. SCAN3, WINDOWS-1).
-            if norm.lower() in _PIVOT_STOP_WORDS:
-                continue
-            if norm.lower().split("-")[0] in _PIVOT_STOP_WORDS:
-                continue
-            hostnames.add(norm)
-
-    return ips | hostnames
-
-
-def _build_known_host_set(case_context: str) -> set[str]:
-    """Union of all hosts referenced in case_context plus every
-    investigation_focus from prior dair_call entries in the trace.
-
-    The "known" set represents hosts the investigation has already touched.
-    """
-    known: set[str] = set()
-    known |= _extract_host_tokens(case_context or "")
-    try:
-        from core.execution_log import log as _elog
-        for e in _elog._entries:
-            if e.get("type") != "dair_call":
-                continue
-            focus = e.get("investigation_focus") or ""
-            known |= _extract_host_tokens(focus)
-    except Exception as _read_err:
-        # Fail-open: if we can't read the trace, treat known set as
-        # case_context only. Worst case is a noisier push. Print so the
-        # operator sees the cause when investigating pivot-detection bugs.
-        import sys as _sys
-        print(f"[TRUDI WARN] dair host-context read failed: {_read_err!r}",
-              file=_sys.stderr)
-    return known
-
-
-# ── Principal (account / identity) candidate detection ───────────────────────
-# A new *host* is not the only thing worth surfacing for follow-up. A newly
-# surfaced *principal* — an account or identity whose controller has never been
-# established — is a candidate pivot too. These cues are recorded as
-# candidate_pivots; they never force a focused sub-Triage by themselves.
-
-# Built-in / generic tokens that are never a genuine new principal.
-_PRINCIPAL_STOP_WORDS = frozenset({
-    "administrator", "administrators", "admin", "admins", "guest",
-    "defaultaccount", "system", "localsystem", "networkservice", "localservice",
-    "homegroupuser", "homegroupuser$", "wdagutilityaccount", "trustedinstaller",
-    "account", "accounts", "user", "users", "username", "principal",
-    "creation", "created", "creates", "create", "new", "local", "named",
-    "called", "the", "this", "that", "was", "were", "is", "are", "an", "a",
-    "credential", "credentials", "name", "identity", "logon", "login",
-    # Pronouns / fillers that can sit immediately before an auth verb
-    # ("who logged in", "successfully authenticated") — never a principal name.
-    "who", "they", "he", "she", "someone", "and", "then", "also", "has",
-    "have", "had", "successfully", "remotely", "interactively", "session",
-    # Verbs / connectives that can follow a cue word once the auth-cue path
-    # reaches name extraction ("user logged in" must not yield 'logged').
-    "logged", "logging", "authenticated", "signed", "accessed", "connected",
-    "ran", "opened", "performed", "enabled", "disabled", "established",
-    "via", "from", "with", "network", "remote", "interactive",
-    "in", "on", "to", "at", "by", "of", "as", "out", "up",
-})
-
-# Does the text describe an account being *created* (vs merely mentioned)?
-_ACCOUNT_CREATION_CUE_RE = re.compile(
-    r"(?:\baccount\s+creat\w*|\bcreat\w+\b.{0,30}?\baccount\b"
-    r"|\bnew\s+(?:local\s+)?(?:admin\w*|user)\s+account\b"
-    r"|\bcovert\s+(?:local\s+)?(?:admin\w*|account)\b"
-    r"|\bbackdoor\s+account\b|\brogue\s+account\b"
-    r"|\bplanted\b.{0,20}?\baccount\b|\b4720\b)",
-    re.IGNORECASE,
-)
-
-# Tier A (forced push): a previously-unseen identity that AUTHENTICATES
-# INTERACTIVELY or over RDP — the highest-signal "second operator" cue. An
-# unknown identity doing an interactive / RemoteInteractive logon is almost
-# always a distinct human principal, so it earns the same forced Triage push
-# as a freshly-created account. (Creation-only detection missed exactly this:
-# a second principal who arrives by RDP rather than by creating an account.)
-_PRINCIPAL_INTERACTIVE_AUTH_CUE_RE = re.compile(
-    r"(?:\b4778\b|\b4779\b"
-    r"|\brdp\b|\bremote desktop\b|\bterminal services\b"
-    r"|\blogon type\s*(?:2|10)\b|\btype\s*(?:2|10)\b"
-    r"|\binteractive logon\b|\brdp session from\b"
-    r"|\blogged ?in\b|\bauthenticated\b|\bsigned ?in\b)",
-    re.IGNORECASE,
-)
-
-# Tier B: noisier first-appearances — network/service logon, a first-seen
-# correspondent. Recorded with cue="appearance" for audit/debugging.
-_PRINCIPAL_APPEARANCE_CUE_RE = re.compile(
-    r"(?:\b4624\b|\b4625\b"
-    r"|\blogon type\s*3\b|\btype\s*3\b"
-    r"|\bnew (?:correspondent|sender|recipient|account name)\b"
-    r"|\bfirst (?:appears|seen|observed)\b"
-    r"|\bpreviously[- ]unseen\b|\bunfamiliar (?:account|user|identity)\b)",
-    re.IGNORECASE,
-)
-
-# Capture a principal's *name* from creation/identity/authentication context.
-# Group 1 = name after a cue word (account/user/principal/named/called);
-# group 2 = a quoted/backticked name immediately preceding "account"/"admin";
-# group 3 = a name immediately preceding an auth verb ("svc_x logged in",
-# "maint_op authenticated") — needed because an interactive-logon summary often
-# leads with the name and has no adjacent cue word.
-_ACCOUNT_NAME_RE = re.compile(
-    r"(?:\b(?:account|user|username|principal|named|called|subject|suspect)\s*:?\s+[\"'`]?"
-    r"([A-Za-z][\w.$-]{1,40})[\"'`]?)"
-    r"|(?:[\"'`]([A-Za-z][\w.$-]{1,40})[\"'`]\s+(?:account|admin))"
-    r"|(?:\b([A-Za-z][\w.$-]{1,40})\s+(?:logged ?in|authenticated|signed ?in))",
-    re.IGNORECASE,
-)
-
-
-def _extract_principal_tokens(text: str, require_cue: bool = True,
-                              cue: str = "creation") -> set[str]:
-    """Return new-principal tokens (uppercased account names, ``RID<n>``,
-    SIDs) appearing in ``text``.
-
-    ``require_cue=True`` (summary side): only emit tokens when the text also
-    carries a *cue* that this is a genuine new principal, not an ordinary
-    mention. ``cue`` selects which cue families gate (precision ↓ as breadth ↑):
-
-      - ``"creation"`` (default, back-compat): account-*creation* only
-        (4720 / "account created" / "new admin account" / covert/backdoor).
-      - ``"forced"``: creation OR interactive/RDP authentication (logon type
-        2/10, 4778/4779, "logged in") — the Tier-A "second operator" cues that
-        warrant a forced Triage push.
-      - ``"appearance"``: Tier-B first-appearance only (network logon type 3,
-        generic 4624/4625, first-seen correspondent).
-      - ``"any"``: union of all three.
-
-    The default stays ``"creation"`` so the conservative behaviour is unchanged
-    for every existing caller; candidate collection opts into ``"forced"`` /
-    ``"appearance"`` explicitly. ``require_cue=False`` (known side): extract any
-    named principal from case_context / prior investigation_focus / pivot focus
-    lines so it is excluded from the new set (and so report-time harvesting can
-    read surfaced principals back).
-    """
-    if not text:
-        return set()
-    if require_cue:
-        creation = _ACCOUNT_CREATION_CUE_RE.search(text)
-        interactive = _PRINCIPAL_INTERACTIVE_AUTH_CUE_RE.search(text)
-        appearance = _PRINCIPAL_APPEARANCE_CUE_RE.search(text)
-        if cue == "creation":
-            hit = creation
-        elif cue == "forced":
-            hit = creation or interactive
-        elif cue == "appearance":
-            hit = appearance
-        else:  # "any"
-            hit = creation or interactive or appearance
-        if not hit:
-            return set()
-    out: set[str] = set()
-    for m in _ACCOUNT_NAME_RE.finditer(text):
-        name = m.group(1) or m.group(2) or m.group(3)
-        if name and name.lower() not in _PRINCIPAL_STOP_WORDS:
-            out.add(name.upper())
-    for rid in re.findall(r"\bRID\s*(\d{3,})\b", text, re.IGNORECASE):
-        out.add(f"RID{rid}")
-    for sid in re.findall(r"\bS-1-5-[\d-]+\b", text):
-        out.add(sid.upper())
-    return out
-
-
-def _build_known_principal_set(case_context: str) -> set[str]:
-    """Principals already named in case_context or any prior dair_call
-    investigation_focus — the set a new principal is measured against. Uses
-    cue-free extraction so a principal already under investigation (its
-    controller question recorded in a focus line) counts as known."""
-    known: set[str] = set()
-    known |= _extract_principal_tokens(case_context or "", require_cue=False)
-    try:
-        from core.execution_log import log as _elog
-        for e in _elog._entries:
-            if e.get("type") != "dair_call":
-                continue
-            focus = e.get("investigation_focus") or ""
-            known |= _extract_principal_tokens(focus, require_cue=False)
-    except Exception as _read_err:
-        import sys as _sys
-        print(f"[TRUDI WARN] dair principal-context read failed: {_read_err!r}",
-              file=_sys.stderr)
-    return known
 
 
 # Candidate-detection allow-list. Hosts/principals surfaced from these phases
@@ -470,73 +328,52 @@ def _ask_claude(system: str, user: str, max_tokens: int = 2048) -> dict:
         return {**_empty, "error": str(e)}
 
 
-def _ask_openai_compat(system: str, user: str) -> dict:
-    import httpx
+def _ask_openai_compat(system: str, user: str, max_tokens: int = 2048) -> dict:
+    """OpenAI-compatible backend via the shared thinking-aware client in
+    tools.reasoning (`_compat_chat`): honours the caller's max_tokens (this
+    path used to hard-code 2048 while MAX_TOKENS_DAIR is 4096), widens the
+    budget for a thinking model's chain-of-thought, retries once on a
+    budget-exhausted empty answer, and records every failure cause as a
+    `call_abandoned` trace entry."""
     _empty = {"success": False, "raw": "", "input_tokens": 0, "output_tokens": 0}
 
     if not DAIR_URL:
         return {**_empty, "error": "DAIR_URL not set for openai-compat backend"}
 
-    model = DAIR_MODEL or _DEFAULT_COMPAT_MODEL
-    headers = {"Authorization": f"Bearer {DAIR_API_KEY}"} if DAIR_API_KEY else {}
-    try:
-        from core.execution_log import log as _elog
-        _elog.record_call_initiated("dair_assess", "openai-compat", {"model": model, "url": DAIR_URL})
-    except Exception as _e:
-        import sys; print(f"[TRUDI WARN] record_call_initiated failed: {_e}", file=sys.stderr)
-    try:
-        resp = httpx.post(
-            f"{DAIR_URL.rstrip('/')}/v1/chat/completions",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                "max_tokens": 2048,
-            },
-            headers=headers,
-            timeout=DAIR_TIMEOUT,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        choice = body["choices"][0]["message"]
-        raw = choice.get("content") or choice.get("reasoning") or ""
-        if not raw:
-            return {**_empty, "error": "Model returned empty response"}
-        usage = body.get("usage", {})
-        return {
-            "success": True,
-            "raw": raw,
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-        }
-    except Exception as e:
-        try:
-            from core.execution_log import log as _elog
-            _elog.record_call_abandoned("dair_assess", str(e))
-        except Exception as _log_err:
-            # Best-effort — we're already in the failure path; surface to
-            # stderr so the operator sees the double-fault. Not routed
-            # through record_system_error because that path can fail for
-            # the same reason and we'd risk infinite recursion.
-            import sys as _sys
-            print(f"[TRUDI WARN] dair record_call_abandoned failed during "
-                  f"backend error: {_log_err!r}", file=_sys.stderr)
-        return {**_empty, "error": str(e)}
+    chat = _compat_chat(DAIR_URL, DAIR_API_KEY, DAIR_MODEL, system, user,
+                        max_tokens, DAIR_TIMEOUT, "dair_assess")
+    if not chat["ok"]:
+        return {**_empty, "error": chat["error"],
+                "input_tokens": chat["prompt_tokens"],
+                "output_tokens": chat["completion_tokens"],
+                "backend_meta": chat["meta"]}
+    return {
+        "success": True,
+        "raw": chat["text"],
+        "input_tokens": chat["prompt_tokens"],
+        "output_tokens": chat["completion_tokens"],
+        "backend_meta": chat["meta"],
+    }
 
 
 def _ask(system: str, user: str, max_tokens: int = 2048) -> dict:
     backend = _active_backend()
     if backend == "claude":
         return _ask_claude(system, user, max_tokens)
-    return _ask_openai_compat(system, user)
+    return _ask_openai_compat(system, user, max_tokens)
 
 
 def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
               inputs: dict | None = None,
               input_call_ids: list[int] | None = None,
-              candidate_pivots: list[dict] | None = None) -> int:
+              candidate_pivots: list[dict] | None = None,
+              error: str = "",
+              backend_meta: dict | None = None,
+              parse_path: str = "",
+              server_override: dict | None = None,
+              observed_principals: list[dict] | None = None,
+              observed_hosts: list[str] | None = None,
+              case_question: str = "") -> int:
     try:
         from core.execution_log import log
         return log.record_dair_call(
@@ -557,6 +394,13 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
             input_call_ids=input_call_ids,
             pending_pivots=assessment.get("pending_pivots") or None,
             candidate_pivots=candidate_pivots,
+            error=error or "",
+            backend_meta=backend_meta,
+            parse_path=parse_path,
+            server_override=server_override,
+            observed_principals=observed_principals,
+            observed_hosts=observed_hosts,
+            case_question=case_question,
         )
     except Exception as e:
         import sys
@@ -654,13 +498,14 @@ against any suspect list provided in case_context before advancing.
 connections, persistence mechanisms, TTPs. Each suspicious artifact should be \
 examined. A genuinely ambiguous artifact may require more collection before \
 proceeding. \
-PIVOT CANDIDATES: if Analyze surfaces a reference to a host or principal other \
-than the one under investigation — remote logon (4624 type 3/10), SMB session, \
-mapped drive, inbound RDP, \\\\HOST\\share path in a command line or registry \
-value, named pipe to a remote endpoint, newly-created account, or first-seen \
-identity — treat it as a candidate pivot in your analysis. Do not assume that \
-the phase stack must change automatically; prescribe explicit evidence-gathering \
-tools only when the candidate matters to the case question. \
+PIVOT CANDIDATES: a host or principal other than the one under investigation — \
+remote logon (4624 type 3/10), SMB session, mapped drive, inbound RDP, \
+\\\\HOST\\share path, named pipe to a remote endpoint, newly-created account, or \
+first-seen identity — is surfaced structurally: the investigator declares it typed \
+(observed_hosts / observed_principals) and dair_assess returns it in candidate_pivots. \
+You do not infer pivots from summary prose. When a returned candidate matters to the \
+case question, prescribe explicit evidence-gathering tools for it; never mutate the \
+phase stack merely because a candidate exists. \
 ALSO run anti-forensics detectors here when the relevant input artifacts exist: \
 af.af_timestomp_drift (after ez.mftecmd CSV), af.af_event_log_clear (after \
 ez.evtxecmd), af.af_sysmon_evasion (after ez.recmd_hive SYSTEM), af.af_usn_gaps \
@@ -697,15 +542,23 @@ live.live_read_file for small config artifacts (max 64KB cap)
   Scan     — live.live_yara_scan(rules_path, target_dir) for cross-host hunting
 The live.* tools route through SSH with fixed argv (no remote shell parsing); \
 findings can use their _trudi_call_id as linked_call_id like any other tool.
-  Scan     — exhaustive cross-host IOC sweep and propagation check: \
-yara.scan_directory across all collected disk/memory, net.tcpdump_extract_dns \
-for exfil signatures, enrich.vt_lookup_hash and enrich.abuseipdb_check for \
-hashes/IPs the agent had no earlier reason to look up. This phase is the \
-safety net for IOCs the per-host Analyze passes did not surface. Candidate \
-pivots discovered during Scan are advisory metadata; they do not create a \
-server-enforced queue. Advance to Report when the cross-host sweep is exhausted \
-and all case-relevant candidates have either been investigated or explicitly \
-parked as out of scope / evidence unavailable.
+  Scan     — SCOPING: pursue every newly-discovered IOC to depth. Scoping has \
+TWO senses, not one: (i) OTHER hosts / network scope — did this propagate? \
+(yara.scan_directory across all collected disk/memory, net.tcpdump_extract_dns \
+for exfil signatures, enrich.vt_lookup_hash / enrich.abuseipdb_check for \
+hashes/IPs); AND (ii) DEEPER investigation of the SAME host driven by a new IOC \
+surfaced in Triage/Collect/Analyze — a covert account (its $Recycle.Bin, \
+Desktop, LNKs, autoruns), a flagged injector-payload scheduled task (read the \
+payload, tie it to its device and author), an unexpected inbound logon source \
+(who operated it). A new IOC is FOLLOWED, not ticked and passed: scoping the \
+account-creation task means opening the %duck% payload and asking who ran it, \
+not recording that a task exists. Candidate pivots (hosts AND forced principals) \
+and flagged IOCs discovered anywhere are the scoping leads; they are advisory \
+metadata (they do not rewrite the phase stack), but each must be driven to a \
+finding or a typed disposition before Report — the server surfaces any left open \
+as a pre_report warning. Advance to Report when both senses are exhausted: the \
+cross-host sweep is done AND every case-relevant lead has been investigated or \
+explicitly parked (out of scope / evidence unavailable).
   Report   — terminal phase unless report review exposes unresolved evidence. \
 If reason.synthesize or reason.pre_report_check returns any BLOCKER / \
 ready_to_report=false issue that asks for missing evidence, do NOT try to satisfy \
@@ -810,12 +663,102 @@ Tool names in directives must use TRUDI MCP format: namespace.tool and must \
 come from the Tool Capability Manifest below. \
 Remember: priority_tools is the investigator's complete work order for this batch. \
 Make it specific and executable — every entry will be run before you see results.\
-"""
+""" + result_instruction(
+    '{"assessment": { … the DAIR_ASSESSMENT object … }, "challenges": [ … the '
+    'VERIFICATION_CHALLENGES array (Triage only) … ], "directives": { … the DIRECTIVES object … }}'
+)
 
 _DAIR_SYS = _DAIR_SYS + "\n\n" + format_tool_manifest_for_prompt()
 
 
 # ── MCP tool ──────────────────────────────────────────────────────────────────
+
+
+def _phases_entered(entries) -> set:
+    """Phases the investigation entered, counted ONLY from server-trusted
+    events: the backend's recommended pushes (next_phase, parsed server-side
+    from the DAIR model's answer, including server overrides) and the
+    server-gated max-pass-cap self_correction (its manual Collect push is
+    validated by the max_pass_cap gate). A dair entry's `current_phase` is
+    the model's echo of the agent-supplied phase_stack and is NOT counted —
+    an asserted stack must never satisfy phase coverage. Every investigation
+    starts in Triage."""
+    out: set = {"Triage"}
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        if (e.get("type") == "dair_call"
+                and str(e.get("stack_action") or "") == "push"
+                and e.get("transition_recommended")):
+            np = str(e.get("next_phase") or "").strip().capitalize()
+            if np:
+                out.add(np)
+        elif (e.get("type") == "self_correction"
+              and str(e.get("trigger") or "") == "dair_max_pass_cap"):
+            out.add("Collect")
+    return out
+
+
+def _is_live_monitoring_trace(entries) -> bool:
+    """Per-investigation live-monitoring traces (a SUCCESSFUL
+    monitor.start_investigation — the call itself refuses outside a
+    baselined live-monitoring case) run a compressed alert-response loop,
+    not the full static-case DAIR cycle."""
+    return any(isinstance(e, dict)
+               and "monitor_start_investigation" in str(e.get("cmd") or "")
+               and e.get("success") is not False
+               for e in entries or [])
+
+
+_MEM_EXT_RE = re.compile(r"\.(mem|dmp|vmem|lime|crash|hpak|aff4)$", re.IGNORECASE)
+_PCAP_EXT_RE = re.compile(r"\.(pcap|pcapng|cap)$", re.IGNORECASE)
+_DISK_EVIDENCE_RE = re.compile(r"\.(e01|dd|img|001|vhdx?|vmdk|ex01)$|cylr", re.IGNORECASE)
+
+
+def _evidence_types(trace_path) -> tuple:
+    """(memory_present, pcap_present) from the case evidence/ dir — each True or
+    False, or None when undeterminable (fail-open). Conservative on the RISKY
+    direction: only report an evidence type ABSENT when disk/other evidence is
+    present AND no file of that type (and, for memory, no ambiguous .raw) exists —
+    so vol.*/net.* are dropped only when we're confident the case cannot run them."""
+    if not trace_path:
+        return (None, None)
+    try:
+        from pathlib import Path as _P
+        evd = _P(trace_path).resolve().parent.parent / "evidence"
+        if not evd.is_dir():
+            return (None, None)
+        names, n = [], 0
+        for p in evd.rglob("*"):
+            names.append(p.name); n += 1
+            if n > 20000:
+                break
+        disk = any(_DISK_EVIDENCE_RE.search(x) for x in names)
+        mem_files = any(_MEM_EXT_RE.search(x) for x in names)
+        raw_amb = any(x.lower().endswith(".raw") for x in names)   # .raw: disk OR memory — ambiguous
+        pcap_files = any(_PCAP_EXT_RE.search(x) for x in names)
+        mem = True if mem_files else (False if (disk and not raw_amb) else None)
+        pcap = True if pcap_files else (False if disk else None)
+        return (mem, pcap)
+    except Exception:
+        return (None, None)
+
+
+def missing_report_phases(entries) -> list:
+    """Phases a static investigation must have transited before Report:
+    Collect AND Analyze always; Scan additionally when host candidate pivots
+    exist (a lead to other hosts demands the sweep). [] when satisfied or when
+    this is a live-monitoring investigation trace."""
+    if _is_live_monitoring_trace(entries):
+        return []
+    entered = _phases_entered(entries)
+    required = ["Collect", "Analyze"]
+    if any(isinstance(pv, dict) and str(pv.get("kind") or "").lower() == "host"
+           for e in (entries or []) if isinstance(e, dict) and e.get("type") == "dair_call"
+           for pv in (e.get("candidate_pivots") or [])):
+        required.append("Scan")
+    return [ph for ph in required if ph not in entered]
+
 
 @mcp.tool()
 def dair_assess(
@@ -823,6 +766,9 @@ def dair_assess(
     phase_stack: str = "[]",
     case_context: str = "",
     input_call_ids: list[int] | None = None,
+    observed_principals: list[dict] | None = None,
+    observed_hosts: list[str] | None = None,
+    case_question: str = "",
 ) -> dict:
     """
     Assess the current DAIR phase, challenge findings, and direct the next steps.
@@ -846,9 +792,21 @@ def dair_assess(
     stack_action "pop"   → remove top entry; resume parent phase
     stack_action "stay"  → no change to stack
 
+    observed_principals: TYPED declaration of the accounts/identities this
+        batch surfaced — [{"name": "svc_x", "cue": "created"|"interactive_logon"|
+        "network_logon"|"correspondent"|"other", "call_ids": [<cid>, …]}]. A
+        previously-unseen principal with cue created / interactive_logon is a
+        FORCED candidate pivot that must be dispositioned before Report
+        (bind it with a session artifact, or misc.record_disposition). DAIR
+        does not read principals out of the summary prose.
+    observed_hosts: TYPED declaration of hosts this batch surfaced (IPv4,
+        \\\\HOST\\share, or hostname). New ones become host candidate pivots.
+    case_question: the one-sentence case question (same as reason.plan's).
+
     Cycle: Triage → Collect → Analyze → Scan → Report. Candidate hosts or
     principals may be returned in candidate_pivots, but they are advisory
-    observations and do not alter stack_action or next_phase.
+    observations and do not alter stack_action or next_phase. DAIR refuses
+    next_phase="Report" server-side while the trace holds no finding entries.
 
     When stack_action is "push" and next_phase is "Triage": check
     verification_challenges for entries with verified=null and run the specified
@@ -902,62 +860,110 @@ def dair_assess(
     if not backend_result.get("success"):
         err = backend_result.get("error", "unknown error")
         result = {**_empty_result, "error": err}
-        _log_dair(_EMPTY_ASSESSMENT | {"directives": _parse_directives("")}, 0, 0,
-                  inputs=call_inputs, input_call_ids=input_call_ids)
+        _log_dair(_EMPTY_ASSESSMENT | {"directives": _parse_directives("")},
+                  backend_result.get("input_tokens", 0),
+                  backend_result.get("output_tokens", 0),
+                  inputs=call_inputs, input_call_ids=input_call_ids,
+                  error=err, backend_meta=backend_result.get("backend_meta"))
         result["_trudi_call_id"] = 0
         return result
 
     raw = backend_result["raw"]
-    challenges = _parse_challenges(raw)
-    assessment = _parse_dair_assessment(raw)
+    # Structured-first: RESULT {"assessment": {...}, "challenges": [...],
+    # "directives": {...}}; the legacy DAIR_ASSESSMENT / VERIFICATION_CHALLENGES
+    # blocks remain the fallback. parse_path records which one was used.
+    rb, _ = parse_result_block(raw)
+    parse_path = PARSE_NONE
+    if isinstance(rb, dict) and isinstance(rb.get("assessment"), dict):
+        assessment = {**_EMPTY_ASSESSMENT, **rb["assessment"]}
+        challenges = rb.get("challenges") if isinstance(rb.get("challenges"), list) else []
+        if isinstance(rb.get("directives"), dict) and rb["directives"]:
+            assessment["directives"] = dict(rb["directives"])
+        parse_path = RESULT_JSON
+    else:
+        challenges = _parse_challenges(raw)
+        assessment = _parse_dair_assessment(raw)
+        if re.search(r"DAIR_ASSESSMENT|VERIFICATION_CHALLENGES", raw or "", re.IGNORECASE):
+            parse_path = LEGACY_BLOCK
 
     # challenges from dedicated block take precedence over those embedded in assessment
     if challenges:
         assessment["verification_challenges"] = challenges
 
+    # Server-side: a challenge whose challenge_method ALREADY ran successfully
+    # in this trace is verified by that run — DAIR can re-issue challenges for
+    # tools that ran earlier, and the never-run check only counts runs AFTER
+    # the challenge. The verifying call is stamped so the auditor can follow it.
+    try:
+        from core.execution_log import log as _vlog
+        if getattr(_vlog, "_path", None):
+            from tools._gates.work_order import _binary_sig as _bsig
+            from tools._gates._evidence_calls import is_evidence_tool_call as _is_ev
+            from tools._gates.max_pass_cap import claim_tokens as _ctok, \
+                run_matches_challenge as _rmatch
+            _runs = [e for e in (getattr(_vlog, "_entries", None) or []) if _is_ev(e)]
+            for _c in assessment.get("verification_challenges") or []:
+                if not isinstance(_c, dict) or _c.get("verified") is not None:
+                    continue
+                _m = str(_c.get("challenge_method") or "").strip().split("(", 1)[0].strip()
+                if not _m or _m.split(".")[0].split("_")[0] in ("reason", "dair"):
+                    continue
+                _sig = _bsig(_m)
+                if len(_sig) < 3:
+                    continue
+                # Signature AND claim-token overlap: a bare `stat` of the
+                # image must not verify a claim about a registry value.
+                _toks = _ctok(_c.get("claim"))
+                _hit = next((int(e.get("call_id") or 0) for e in _runs
+                             if _rmatch(e, _sig, _toks)), None)
+                if _hit:
+                    _c["verified"] = True
+                    _c["verified_basis"] = "prior_run"
+                    _c["verified_by_call_id"] = _hit
+    except Exception:
+        pass
+
     candidate_pivots: list[dict] = []
+    ok_hosts, bad_hosts = _validate_hosts(observed_hosts)
+    ok_principals, principal_errs = _validate_principals(observed_principals)
+    typed_input_errors = ([f"observed_hosts value is not a host: {b!r}" for b in bad_hosts]
+                          + principal_errs)
 
-    # Cross-phase pivot observation. Any non-Triage phase may surface a host or
-    # principal worth follow-up, but this metadata must not rewrite the DAIR
-    # transition. The caller can inspect candidate_pivots and decide whether to
-    # investigate; the state machine remains model/agent-directed.
-    if current in _PIVOT_ELIGIBLE_PHASES:
-        summary_hosts = _extract_host_tokens(summary)
-        known_hosts = _build_known_host_set(context)
-        for h in sorted(summary_hosts - known_hosts):
-            candidate_pivots.append({
-                "kind": "host",
-                "value": h,
-                "source": "tool_results_summary",
-                "phase": current,
-            })
-
-        # A previously-unseen *principal* is also a follow-up candidate. The
-        # cue tier is preserved for audit/debugging, not control flow.
-        known_principals = _build_known_principal_set(context)
-        forced_principals = sorted(
-            _extract_principal_tokens(summary, cue="forced") - known_principals
-        )
-        appearance_principals = sorted(
-            _extract_principal_tokens(summary, cue="appearance")
-            - known_principals - set(forced_principals)
-        )
-        for p in forced_principals:
-            candidate_pivots.append({
-                "kind": "principal",
-                "value": p,
-                "source": "tool_results_summary",
-                "phase": current,
-                "cue": "forced",
-            })
-        for p in appearance_principals:
-            candidate_pivots.append({
-                "kind": "principal",
-                "value": p,
-                "source": "tool_results_summary",
-                "phase": current,
-                "cue": "appearance",
-            })
+    # Cross-phase pivot observation from the agent's TYPED declarations. Any
+    # non-Triage phase may surface a host or principal worth follow-up, but this
+    # metadata must not rewrite the DAIR transition.
+    #
+    # Triage is excluded because it is *about* the host/principal already under
+    # investigation — but that rationale does not cover a NEW external party or
+    # a newly-created/logged-on account surfaced during Triage (a front-loaded
+    # Triage that declares an external RDP source as a host must not silently
+    # drop it, or no Scan is ever required). An external (public) IP is not the
+    # subject host, and a created/interactive_logon principal is a distinct
+    # principal by definition — both pivot even at Triage. Per-item eligibility
+    # instead of a blanket phase gate.
+    _pivot_phase = current in _PIVOT_ELIGIBLE_PHASES
+    known_hosts = _known_hosts()
+    for h in ok_hosts:
+        if h in known_hosts:
+            continue
+        if not (_pivot_phase or _is_external_ip(h)):
+            continue
+        candidate_pivots.append({
+            "kind": "host", "value": h, "source": "observed_hosts", "phase": current,
+        })
+    known_principals = _known_principals()
+    for it in ok_principals:
+        n = it["norm"]
+        if not n or n in known_principals or it["name"].lower() in _BUILTIN_PRINCIPALS:
+            continue
+        forced = it["cue"] in FORCED_CUES
+        if not (_pivot_phase or forced):
+            continue
+        candidate_pivots.append({
+            "kind": "principal", "value": it["name"], "source": "observed_principals",
+            "phase": current, "cue": "forced" if forced else "appearance",
+            "declared_cue": it["cue"], "call_ids": it["call_ids"],
+        })
 
     # Guard: if all triage challenges resolved true but the assessment JSON failed
     # to parse (phase_rationale empty = _EMPTY_ASSESSMENT fallback), auto-satisfy.
@@ -991,15 +997,274 @@ def dair_assess(
             _parse_directives(raw)
         )
 
+    # Server-side refusal: Report with ZERO findings in the trace is never a
+    # valid transition — a report has nothing to say. The model's decision is
+    # overridden, the override is persisted on the entry, and the work order
+    # asks for findings.
+    server_override = None
+    try:
+        from core.execution_log import log as _flog
+        _n_findings = len((_flog.index().by_type.get("finding") or [])) if getattr(_flog, "_path", None) else 0
+    except Exception:
+        _n_findings = 0
+    if assessment.get("next_phase") == "Report" and _n_findings == 0:
+        server_override = {"kind": "report_refused_zero_findings",
+                           "detail": "no finding entries in trace",
+                           "model_next_phase": "Report",
+                           "model_stack_action": assessment.get("stack_action")}
+        assessment["transition_recommended"] = False
+        assessment["next_phase"] = ""
+        assessment["stack_action"] = "stay"
+        assessment["transition_rationale"] = (
+            "Server override: Report refused — the trace holds no finding entries. "
+            "Record findings (misc.record_finding with a typed claim) from a collection "
+            "phase, then re-assess."
+        )
+        d = assessment.get("directives") or {}
+        pt = [t for t in (d.get("priority_tools") or []) if t != "misc.record_finding"]
+        d["priority_tools"] = ["misc.record_finding"] + pt
+        assessment["directives"] = d
+
+    # Server-side refusal: Report before the investigation has transited its
+    # collection/analysis phases is a methodology violation — a report written
+    # from Triage alone skipped the systematic enumeration the phases exist to
+    # force. Phase history is read from the trace's dair entries, never from
+    # agent prose.
+    _missing_phases: list = []
+    if assessment.get("next_phase") == "Report":
+        try:
+            from core.execution_log import log as _phlog
+            if getattr(_phlog, "_path", None):
+                _missing_phases = missing_report_phases(getattr(_phlog, "_entries", None) or [])
+        except Exception:
+            _missing_phases = []
+    if assessment.get("next_phase") == "Report" and _missing_phases and server_override is None:
+        server_override = {"kind": "report_refused_phase_coverage",
+                           "detail": f"phases never entered: {', '.join(_missing_phases)}",
+                           "model_next_phase": "Report",
+                           "model_stack_action": assessment.get("stack_action")}
+        _next = _missing_phases[0]
+        assessment["transition_recommended"] = True
+        assessment["next_phase"] = _next
+        assessment["stack_action"] = "push"
+        assessment["transition_rationale"] = (
+            f"Server override: Report refused — the investigation never entered "
+            f"{', '.join(_missing_phases)}. A defensible report requires the full "
+            f"DAIR cycle (Triage → Collect → Analyze{' → Scan' if 'Scan' in _missing_phases else ''} "
+            f"→ Report); transitioning to {_next} to run the systematic collection "
+            f"the phase exists for."
+        )
+
+    # Triage must not absorb the Collect work order: a model that emits
+    # next_phase=Collect while keeping stack_action=stay is the contradiction —
+    # collection then runs under a single Triage frame, hosts declared there
+    # never become candidate pivots, and the dair history stays all-Triage.
+    # When verification is complete (genuine parse, no open challenge), coerce
+    # the push so collection runs IN Collect. Server coercion of stack_action
+    # is the established pattern (phase_coverage, work_order_incomplete).
+    if (server_override is None
+            and str(assessment.get("current_phase")) == "Triage"
+            and str(assessment.get("stack_action")) == "stay"
+            and str(assessment.get("next_phase")) == "Collect"
+            and assessment.get("phase_rationale")):
+        _ch_a = [c for c in (assessment.get("verification_challenges") or [])
+                 if isinstance(c, dict)]
+        if not any(c.get("verified") is None for c in _ch_a):
+            assessment["transition_recommended"] = True
+            assessment["stack_action"] = "push"
+            assessment["transition_rationale"] = (
+                "Server override: Triage points to Collect and verification is "
+                "complete (no open challenge) — advancing so the collection work "
+                "order runs in Collect, not under a single Triage frame. Collection "
+                "does not happen in Triage.")
+            server_override = {
+                "kind": "triage_points_to_collect",
+                "detail": "next=Collect + verification complete → push Triage→Collect"}
+
+    # Phase-aware handling of an empty work order in a non-Report phase (the
+    # director's prompt forbids it, but models emit it and stall). Each phase
+    # has a distinct duty, so the response is phase-specific, never a blanket
+    # "backfill collection":
+    #   Triage  — VERIFICATION, not collection. Empty ⇒ IOC challenges resolved ⇒
+    #             ADVANCE to Collect. Collection never happens in Triage.
+    #   Collect — the collection phase. Empty ⇒ BACKFILL from uncovered lifecycle
+    #             phases; advance to Analyze only when coverage is complete.
+    #   Analyze — reasoning. Empty ⇒ advance to SCAN while scoping leads remain
+    #             (unresolved pivots / flagged IOCs — deeper same-host OR other
+    #             host), else Report.
+    #   Scan    — scoping. Empty ⇒ leads all resolved ⇒ advance to Report.
+    # The director then always returns directives or advances — never a bare stall.
+    if (server_override is None
+            and str(assessment.get("stack_action")) == "stay"
+            and str(assessment.get("current_phase") or "") not in ("Report", "")
+            and not (assessment.get("directives") or {}).get("priority_tools")):
+        try:
+            from tools._gates._lifecycle import prescribe_for_gaps
+            from tools._gates._scoping import open_scoping_leads
+            _entries3 = getattr(_flog, "_entries", None) or []
+            _cur3 = str(assessment.get("current_phase") or "")
+
+            def _advance3(nxt, kind, detail, rationale):
+                assessment["transition_recommended"] = True
+                assessment["next_phase"] = nxt
+                assessment["stack_action"] = "push"
+                assessment["transition_rationale"] = rationale
+                return {"kind": kind, "detail": detail}
+
+            if _cur3 == "Triage":
+                # Triage is verification — advance, never backfill collection here.
+                # BUT only when verification is genuinely complete: the assessment
+                # actually parsed (a malformed/fallback assessment is not evidence
+                # of anything) AND no verification challenge is still open
+                # (verified is None). Otherwise leave the stack alone — the agent
+                # keeps working the challenges / re-assesses; the max-pass cap
+                # handles a genuine stall. This prevents a parse failure or a
+                # pending challenge from being read as "verification done".
+                _ch3 = [c for c in (assessment.get("verification_challenges") or [])
+                        if isinstance(c, dict)]
+                _open_ch3 = any(c.get("verified") is None for c in _ch3)
+                # A non-empty phase_rationale = a genuine parse (empty rationale is
+                # the _EMPTY_ASSESSMENT fallback — same convention the auto-satisfy
+                # guard uses). Never read a fallback assessment as "verification done".
+                if assessment.get("phase_rationale") and not _open_ch3:
+                    server_override = _advance3(
+                        "Collect", "triage_verification_complete",
+                        "empty Triage work order — verification done; advancing to Collect",
+                        "Server override: Triage verification complete (no open challenges in "
+                        "the work order) — advancing to Collect, where the systematic attack-"
+                        "lifecycle collection belongs. Collection does not happen in Triage.")
+            elif _cur3 == "Collect":
+                _backfill = prescribe_for_gaps(_entries3)
+                if _backfill:
+                    server_override = {"kind": "lifecycle_backfill",
+                                       "detail": f"empty Collect work order backfilled from "
+                                                 f"uncovered lifecycle phases: {', '.join(_backfill)}"}
+                    _d3 = assessment.get("directives") or {}
+                    _d3["priority_tools"] = _backfill
+                    assessment["directives"] = _d3
+                    assessment["investigation_focus"] = (
+                        "Examine the uncovered attack-lifecycle phase(s) — persistence, "
+                        "privilege escalation, lateral movement, evidence of execution, "
+                        "exfiltration — with the prescribed tools.")
+                else:
+                    server_override = _advance3(
+                        "Analyze", "lifecycle_complete_advance",
+                        "attack-lifecycle coverage complete; advancing to Analyze",
+                        "Server override: empty Collect work order with complete attack-"
+                        "lifecycle coverage — collection is done; advancing to Analyze.")
+            elif _cur3 == "Analyze":
+                _leads3 = open_scoping_leads(_entries3)
+                if _leads3:
+                    _shown = ", ".join(f"{l['kind']}:{l['value']}" for l in _leads3[:5])
+                    server_override = _advance3(
+                        "Scan", "analyze_to_scan_scoping",
+                        f"open scoping leads: {_shown}",
+                        "Server override: empty Analyze work order but scoping leads remain "
+                        f"({_shown}) — advancing to Scan to pursue them to depth (deeper on "
+                        "this host, or another host) before Report. Scan is scoping: a new "
+                        "IOC is followed, not ticked and passed.")
+                else:
+                    server_override = _advance3(
+                        "Report", "analyze_to_report",
+                        "Analyze complete; no open scoping leads; advancing to Report",
+                        "Server override: empty Analyze work order and no open scoping leads "
+                        "— advancing to Report.")
+            elif _cur3 == "Scan":
+                _leads3 = open_scoping_leads(_entries3)
+                if not _leads3:
+                    server_override = _advance3(
+                        "Report", "scan_complete_advance",
+                        "scoping complete; no open leads; advancing to Report",
+                        "Server override: empty Scan work order and no open scoping leads "
+                        "— scoping is done; advancing to Report.")
+                # else: leave the stall to the normal cap; open leads mean the
+                # agent still has scoping work the director already surfaced.
+        except Exception as _e3:
+            import sys as _sys3
+            print(f"[TRUDI WARN] phase-aware layer3 failed: {_e3}", file=_sys3.stderr)
+
+    # Evidence-aware prescription: the backend prescribes from a generic playbook
+    # and can list tools that need an evidence type this case lacks — vol.* (a
+    # memory image) or pcap-based net.* (a network capture) on a disk-only case.
+    # Drop those from the work order so the agent isn't handed tools it cannot run
+    # (and the work-order gates don't force it to disposition them). Conservative
+    # + fail-open: only drops when the type is confidently absent.
+    try:
+        _mem, _pcap = _evidence_types(getattr(_flog, "_path", None))
+        _d0 = assessment.get("directives") or {}
+        _pt0 = list(_d0.get("priority_tools") or [])
+        if _pt0 and (_mem is False or _pcap is False):
+            _dropped, _kept = [], []
+            for _t in _pt0:
+                _tl = str(_t).lower().replace(".", "_")
+                if _mem is False and (_tl.startswith("vol_") or _tl.startswith("volatility")
+                                      or _tl.startswith("rekall")):
+                    _dropped.append(_t); continue
+                if _pcap is False and re.match(r"net_(tcpdump|ngrep|http_session|tcpxtract|pcap)", _tl):
+                    _dropped.append(_t); continue
+                _kept.append(_t)
+            if _dropped:
+                _d0["priority_tools"] = _kept
+                assessment["directives"] = _d0
+                assessment["prescription_filtered"] = _dropped
+    except Exception:
+        pass
+
+    # Work-order completion on advance. A phase is left only when its work
+    # order is done — a transition (push/pop) while the PRIOR dair_call's
+    # priority_tools are neither run nor dispositioned is refused and the tools
+    # re-issued. The unrun_priority_tools audit applied per-transition; Report
+    # transitions are already governed by phase coverage + pre_report.
+    if (server_override is None and assessment.get("transition_recommended")
+            and str(assessment.get("stack_action")) in ("push", "pop")
+            and str(assessment.get("next_phase") or "") != "Report"):
+        try:
+            from tools._gates.work_order import unrun_from_list, _display as _display6
+            _entries6 = getattr(_flog, "_entries", None) or []
+            _prior = [e for e in _entries6 if e.get("type") == "dair_call"]
+            _prior_pt = ((_prior[-1].get("directives") or {}).get("priority_tools")) if _prior else []
+            _outstanding = unrun_from_list(_entries6, _prior_pt)
+            if _outstanding:
+                server_override = {"kind": "work_order_incomplete",
+                                   "detail": f"unrun prescribed tools: {', '.join(_outstanding)}",
+                                   "model_next_phase": assessment.get("next_phase"),
+                                   "model_stack_action": assessment.get("stack_action")}
+                assessment["transition_recommended"] = False
+                assessment["stack_action"] = "stay"
+                _d6 = assessment.get("directives") or {}
+                _cur = list(_d6.get("priority_tools") or [])
+                _d6["priority_tools"] = _outstanding + [t for t in _cur
+                                                        if _display6(t) not in _outstanding]
+                assessment["directives"] = _d6
+                assessment["transition_rationale"] = (
+                    f"Server override: work order incomplete — {len(_outstanding)} tool(s) "
+                    f"DAIR prescribed for this phase were never run or dispositioned "
+                    f"({', '.join(_outstanding)}). A phase is entered to execute its work "
+                    f"order, not to be passed through: run each, or settle it with "
+                    f"misc.record_disposition(target_kind=\"tool\", reason=\"inapplicable\"|"
+                    f"\"absent_from_evidence\"), before advancing."
+                )
+        except Exception as _e6:
+            import sys as _sys6
+            print(f"[TRUDI WARN] work-order advance gate failed: {_e6}", file=_sys6.stderr)
+
     tok_in  = backend_result.get("input_tokens", 0)
     tok_out = backend_result.get("output_tokens", 0)
     call_id = _log_dair(assessment, tok_in, tok_out, inputs=call_inputs,
                         input_call_ids=input_call_ids,
-                        candidate_pivots=candidate_pivots)
+                        candidate_pivots=candidate_pivots,
+                        backend_meta=backend_result.get("backend_meta"),
+                        parse_path=parse_path, server_override=server_override,
+                        observed_principals=[{k: v for k, v in it.items() if k != "norm"}
+                                             for it in ok_principals] or None,
+                        observed_hosts=ok_hosts or None,
+                        case_question=case_question or "")
 
     result = {
         **assessment,
         "success": True,
+        "server_override": server_override,
+        "typed_input_errors": typed_input_errors,
         "input_tokens": tok_in,
         "output_tokens": tok_out,
         "_trudi_call_id": call_id,

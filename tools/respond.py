@@ -87,7 +87,9 @@ def _load_finding(finding_id: int) -> Optional[dict]:
     except Exception:  # noqa: BLE001
         return None
     entry = idx.by_call_id.get(int(finding_id))
-    if entry is None or entry.get("type") not in ("finding", "agent_message"):
+    # narration entries are type 'investigation_narration' — 'agent_message'
+    # never existed as an entry type.
+    if entry is None or entry.get("type") not in ("finding", "investigation_narration"):
         return None
     return entry
 

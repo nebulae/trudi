@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 
 
-MANIFEST_VERSION = "2026-06-11.2"
+MANIFEST_VERSION = "2026-08-25.1"
 
 
 _CAPABILITIES: list[dict] = [
@@ -27,6 +27,20 @@ _CAPABILITIES: list[dict] = [
             "reason.cite_check",
             "reason.synthesize",
             "reason.pre_report_check",
+        ],
+    },
+    {
+        "id": "produced_output_reads",
+        "phases": ["Collect", "Analyze", "Scan", "Report"],
+        "evidence": ["all"],
+        "purpose": ("Traced, citable reads of PRODUCED output — CSV/JSON/TXT under "
+                    "analysis|exports|reports (read.read_output: query/columns/where) "
+                    "and extracted mbox/.eml mail stores (read.read_mail: message "
+                    "BODIES, sender/recipient roster). Replaces bash "
+                    "python/jq/cat/mailbox, whose reads are untraced and uncitable."),
+        "tools": [
+            "read.read_output",
+            "read.read_mail",
         ],
     },
     {
@@ -97,6 +111,21 @@ _CAPABILITIES: list[dict] = [
             "misc.evtx_dump",
             "misc.chainsaw_hunt",
             "live.live_event_log_tail",
+        ],
+    },
+    {
+        "id": "comms_stores",
+        "phases": ["Collect", "Analyze"],
+        "evidence": ["disk", "mounted_fs"],
+        "purpose": ("Extract and enumerate communications stores — mail OST/PST "
+                    "(readpst/pff_export) and chat/messenger sqlite "
+                    "(chat_db_export: messages, file-transfer trail, full "
+                    "sender/recipient roster). Mandatory before any "
+                    "recipient/dissemination conclusion."),
+        "tools": [
+            "misc.readpst_extract",
+            "misc.pff_export",
+            "misc.chat_db_export",
         ],
     },
     {

@@ -266,3 +266,61 @@ class TestHashdeepTools:
         cmd = mock_run.call_args[0][0]
         assert "md5deep" in cmd
         assert "-r" in cmd
+
+
+class TestHashDirectoryBounded:
+    """H-1: hash_directory is capped, resumable, cache-backed and traced —
+    it used to walk a whole profile for 12+ minutes with nothing in the trace."""
+
+    def _tree(self, tmp_path, n=12):
+        d = tmp_path / "prof"
+        (d / "sub").mkdir(parents=True)
+        for i in range(n):
+            (d / ("sub" if i % 2 else "") / f"f{i:02d}.bin").write_bytes(bytes([i]) * (100 + i))
+        return d
+
+    def test_max_files_cap_is_partial_and_resumable(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.hashing._HASH_CACHE_PATH", str(tmp_path / "hc.json"))
+        monkeypatch.setattr("tools.hashing._HASH_CACHE", None)
+        d = self._tree(tmp_path)
+        r1 = hash_directory(str(d), max_files=5)
+        assert r1["success"] and r1["truncated"] and r1["truncation_reason"] == "max_files"
+        assert r1["file_count"] == 5 and r1["next_start_path"]
+        r2 = hash_directory(str(d), max_files=100, start_after=r1["next_start_path"])
+        assert not r2["truncated"]
+        seen = {h["file"] for h in r1["hashes"]} | {h["file"] for h in r2["hashes"]}
+        assert len(seen) == 12 and r1["next_start_path"] in seen
+
+    def test_max_bytes_and_skip_large(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.hashing._HASH_CACHE_PATH", str(tmp_path / "hc.json"))
+        monkeypatch.setattr("tools.hashing._HASH_CACHE", None)
+        d = self._tree(tmp_path, n=6)
+        (d / "big.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+        r = hash_directory(str(d), skip_larger_than_mb=1, max_bytes=250)
+        assert r["skipped"] and r["skipped"][0]["reason"] == "larger_than_cap"
+        assert r["truncated"] and r["truncation_reason"] == "max_bytes"
+
+    def test_cache_is_reused_and_run_is_traced(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.hashing._HASH_CACHE_PATH", str(tmp_path / "hc.json"))
+        monkeypatch.setattr("tools.hashing._HASH_CACHE", None)
+        d = self._tree(tmp_path, n=4)
+        r1 = hash_directory(str(d), algorithm="md5")
+        assert r1["cache_hits"] == 0 and r1["bytes_hashed"] > 0
+        r2 = hash_directory(str(d), algorithm="sha1")      # same files, cached digests
+        assert r2["cache_hits"] == 4 and r2["bytes_hashed"] == 0
+        assert {h["sha1"] for h in r2["hashes"]} == {
+            hashlib.sha1(open(h["file"], "rb").read()).hexdigest() for h in r1["hashes"]}
+        from core.execution_log import log
+        inits = [e for e in log._entries if e.get("type") == "call_initiated" and e.get("tool") == "hash_directory"]
+        assert inits and inits[-1]["inputs"]["max_files"] == 5000
+
+    def test_max_seconds_cap(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("tools.hashing._HASH_CACHE_PATH", str(tmp_path / "hc.json"))
+        monkeypatch.setattr("tools.hashing._HASH_CACHE", None)
+        d = self._tree(tmp_path, n=8)
+        import tools.hashing as H
+        ticks = iter([0.0, 0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+        monkeypatch.setattr(H.time if hasattr(H, "time") else __import__("time"), "monotonic",
+                            lambda: next(ticks, 100.0))
+        r = hash_directory(str(d), max_seconds=10)
+        assert r["truncated"] and r["truncation_reason"] == "max_seconds" and r["file_count"] >= 1

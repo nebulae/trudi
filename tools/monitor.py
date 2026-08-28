@@ -765,6 +765,14 @@ def start_investigation(case_id: str,
             "success": False,
             "error": "alert_ids cannot be empty",
         }
+    # Live-monitoring scope: a per-investigation trace is only valid inside a
+    # baselined live-monitoring case (the same check respond.* enforces).
+    # Without it, one call on a static case would both hijack the active
+    # trace and exempt the run from the full-DAIR-cycle report requirement.
+    from response import gates as response_gates
+    refusal = response_gates.check_live_monitoring_scope(case_id)
+    if refusal is not None:
+        return refusal
 
     _ensure_investigation_layout(case_id)
     trace_path = _investigation_trace_path(case_id, investigation_id)

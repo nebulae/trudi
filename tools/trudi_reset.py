@@ -18,7 +18,7 @@ What it does (under the shared fcntl lock so no in-flight write races):
     2. Removes <case_dir>/analysis/<CASE>_trace.json (unless --keep-trace)
     3. Removes <case_dir>/analysis/dashboard.url
     4. Clears ~/.cache/trudi/session.json
-    5. Clears ~/.cache/trudi/hook_state.json
+    5. Clears ~/.cache/trudi/hook_state.json and session_owner.json
     6. Resets ~/.cache/trudi/call_id.counter to {"next": 1}
     7. Preserves ~/.cache/trudi/hash_cache.json (evidence-hash memoisation,
        no investigative state)
@@ -40,7 +40,41 @@ _LOCK_FILE = os.path.join(_CACHE_DIR, "hook.lock")
 _COUNTER_FILE = os.path.join(_CACHE_DIR, "call_id.counter")
 _SESSION_FILE = os.path.join(_CACHE_DIR, "session.json")
 _HOOK_STATE_FILE = os.path.join(_CACHE_DIR, "hook_state.json")
+_SESSION_OWNER_FILE = os.path.join(_CACHE_DIR, "session_owner.json")
 _OUTPUT_DIRS = ("analysis", "exports", "reports")
+# Same TTL the hooks use to decide a claim is alive (claude/hooks/_session_owner.py).
+_OWNER_TTL_SEC = int(os.environ.get("TRUDI_OWNER_TTL_SEC") or "600")
+
+
+def _live_owner(case_dir: str | None = None) -> dict | None:
+    """The session currently owning the trace beacon, if its claim is within
+    the TTL — resetting underneath it loses that session's hook-authored trace
+    entries (they live only on disk) and silences its hooks (beacon cleared).
+    Scoped to `case_dir`: the owner file is machine-global, so a live claim on
+    ANOTHER case's trace must not block this reset."""
+    if case_dir:
+        try:
+            with open(_SESSION_FILE) as f:
+                beacon_path = os.path.abspath(json.load(f).get("path") or "")
+        except (OSError, ValueError):
+            return None                      # no active beacon → nothing to protect
+        root = os.path.abspath(case_dir) + os.sep
+        if not beacon_path.startswith(root):
+            return None                      # the live investigation is a different case
+    try:
+        with open(_SESSION_OWNER_FILE) as f:
+            o = json.load(f)
+    except (OSError, ValueError):
+        return None
+    ts = o.get("last_seen") or o.get("claimed_ts") or ""
+    try:
+        seen = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return None
+    age = (datetime.datetime.now(datetime.timezone.utc) - seen).total_seconds()
+    return {**o, "age_sec": int(age)} if age <= _OWNER_TTL_SEC else None
 
 
 def _detect_case_id(case_dir: str) -> str | None:
@@ -149,8 +183,9 @@ def _purge_outputs(case_dir: str, no_backup: bool) -> tuple[str | None, list[str
 
 
 def reset(case_dir: str, keep_trace: bool = False, no_backup: bool = False,
-          purge_outputs: bool = False) -> dict:
-    """Perform the reset. Returns a result dict with what was done."""
+          purge_outputs: bool = False, force: bool = False) -> dict:
+    """Perform the reset. Returns a result dict with what was done. Refuses
+    while a live session owns the beacon unless force=True."""
     case_dir = os.path.abspath(os.path.expanduser(case_dir))
     if not os.path.isdir(case_dir):
         return {"success": False, "error": f"case_dir not a directory: {case_dir}"}
@@ -169,6 +204,20 @@ def reset(case_dir: str, keep_trace: bool = False, no_backup: bool = False,
     lock_fp = open(_LOCK_FILE, "w")
     try:
         fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+
+        # 0. Never reset underneath a live investigation session of THIS case.
+        owner = _live_owner(case_dir)
+        if owner and not force:
+            result["success"] = False
+            result["error"] = (
+                f"refusing: session {owner.get('session_id')} is a LIVE owner of the "
+                f"active trace (last hook {owner['age_sec']}s ago). Resetting under a "
+                f"running investigation loses its hook-authored trace entries and "
+                f"silences its hooks. Stop that session first, or pass --force."
+            )
+            return result
+        if owner and force:
+            actions.append(f"WARN: --force over live owner session {owner.get('session_id')}")
 
         # 1. Backup + remove case outputs
         backup_dir = None
@@ -197,15 +246,30 @@ def reset(case_dir: str, keep_trace: bool = False, no_backup: bool = False,
                         except OSError as e:
                             actions.append(f"WARN: failed to remove {p}: {e}")
 
-        # 4-5. Cache files cleared
+        # 4-5. Cache files cleared — but ONLY when the machine-global beacon
+        # points at THIS case (or at nothing): a reset of case A must never
+        # silence case B's live hooks / owner claim.
+        beacon_case = None
+        try:
+            with open(_SESSION_FILE) as f:
+                beacon_case = os.path.abspath(json.load(f).get("path") or "") or None
+        except (OSError, ValueError):
+            beacon_case = None
+        root = os.path.abspath(case_dir) + os.sep
+        foreign = bool(beacon_case) and not beacon_case.startswith(root)
         for p, label in [(_SESSION_FILE, "session.json"),
-                         (_HOOK_STATE_FILE, "hook_state.json")]:
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                    actions.append(f"cleared {label}")
-                except OSError as e:
-                    actions.append(f"WARN: failed to clear {label}: {e}")
+                         (_HOOK_STATE_FILE, "hook_state.json"),
+                         (_SESSION_OWNER_FILE, "session_owner.json")]:
+            if not os.path.exists(p):
+                continue
+            if foreign and not force:
+                actions.append(f"kept {label} (beacon belongs to another case: {beacon_case})")
+                continue
+            try:
+                os.remove(p)
+                actions.append(f"cleared {label}")
+            except OSError as e:
+                actions.append(f"WARN: failed to clear {label}: {e}")
 
         # 6. Counter reset (atomic via temp file + rename)
         tmp = _COUNTER_FILE + ".tmp"
@@ -250,10 +314,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Also clear analysis/, exports/, and reports/. "
                              "Backed up into the same .trace-backups/<ts>/ tree "
                              "unless --no-backup is set.")
+    parser.add_argument("--force", action="store_true",
+                        help="Reset even though a live session owns the trace beacon "
+                             "(its hook-authored entries will be lost).")
     args = parser.parse_args(argv)
 
     result = reset(args.case_dir, keep_trace=args.keep_trace,
-                   no_backup=args.no_backup, purge_outputs=args.purge_outputs)
+                   no_backup=args.no_backup, purge_outputs=args.purge_outputs,
+                   force=args.force)
     if not result["success"]:
         print(f"ERROR: {result.get('error')}", file=sys.stderr)
         return 1

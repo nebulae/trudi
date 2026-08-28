@@ -108,13 +108,20 @@ def live_recent_logins(host: str, hours: int = 24) -> dict:
     """journalctl ssh logins within the last `hours` hours + lastlog snapshot."""
     if hours < 1 or hours > 720:
         return {"success": False, "error": "hours must be between 1 and 720"}
-    return ssh_run(
+    r = ssh_run(
         host,
         ["sh", "-c",
          f"echo ===SSHD===; journalctl _COMM=sshd --since '{hours} hours ago' --no-pager | tail -200; "
          f"echo ===LASTLOG===; lastlog"],
         timeout=60,
     )
+    try:
+        if r.get("success") and r.get("_trudi_call_id"):
+            from core.execution_log import log
+            log.annotate_tool_call(r["_trudi_call_id"], session_artifact=True)
+    except Exception:
+        pass
+    return r
 
 
 # ── Persistence surface ──────────────────────────────────────────────────────

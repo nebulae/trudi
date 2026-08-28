@@ -274,6 +274,10 @@
   .block.kind-self_correction         { border-left-color: var(--self-correct); }
   .block.kind-curiosity_probe         { border-left-color: var(--curiosity); }
   .block.kind-narration               { border-left-color: var(--fg-dim); }
+  .block.kind-finding_refused         { border-left-color: var(--err); border-left-style: dashed; }
+  .block.kind-tool_blocked            { border-left-color: var(--warn); border-left-style: dashed; }
+  .block.kind-disposition             { border-left-color: var(--dair); border-left-style: double; }
+  .block.kind-reason_evidence_fetch   { border-left-color: var(--curiosity); border-left-style: dotted; }
 
   /* Tier pill on findings */
   .tier-pill {
@@ -346,6 +350,10 @@
       <label><input type="checkbox" class="kind-filter" value="finding" checked> <span class="legend-dot" style="background:var(--finding-confirmed)"></span> Findings</label>
       <label><input type="checkbox" class="kind-filter" value="self_correction" checked> <span class="legend-dot" style="background:var(--self-correct)"></span> Self-corrections</label>
       <label><input type="checkbox" class="kind-filter" value="curiosity_probe" checked> <span class="legend-dot" style="background:var(--curiosity)"></span> Curiosity probes</label>
+      <label><input type="checkbox" class="kind-filter" value="finding_refused" checked> <span class="legend-dot" style="background:var(--err);opacity:.6"></span> Refused findings</label>
+      <label><input type="checkbox" class="kind-filter" value="disposition" checked> <span class="legend-dot" style="background:var(--dair);opacity:.6"></span> Dispositions</label>
+      <label><input type="checkbox" class="kind-filter" value="tool_blocked" checked> <span class="legend-dot" style="background:var(--warn)"></span> Blocked tools</label>
+      <label><input type="checkbox" class="kind-filter" value="reason_evidence_fetch"> <span class="legend-dot" style="background:var(--curiosity);opacity:.6"></span> Evidence fetches</label>
       <label><input type="checkbox" class="kind-filter" value="narration"> <span class="legend-dot" style="background:var(--fg-dim)"></span> Agent notes</label>
       <label><input type="checkbox" id="show-hook-ops"> <span class="legend-dot" style="background:var(--fg-dim);opacity:0.5"></span> Agent shell ops (Bash/Read/Edit)</label>
     </div>
@@ -413,6 +421,7 @@ const State = {
       'reason_confidence_score', 'reason_cite_check',
       'reason_synthesize', 'reason_pre_report_check', 'reason_audit_findings',
       'finding', 'self_correction', 'curiosity_probe',
+      'finding_refused', 'disposition', 'tool_blocked',
     ]),
     showHookOps: false,  // PostToolUse hook entries (Bash/Read/Edit/Write) — off by default
   },
@@ -785,6 +794,10 @@ function blockTitle(b) {
     case 'self_correction':         return `self-correction · ${e.trigger || ''}`;
     case 'curiosity_probe':         return `🔍 curiosity probe${e.seeded_by ? ' · ' + e.seeded_by : ''}`;
     case 'narration':               return 'agent note';
+    case 'finding_refused':         return `⛔ refused · ${e.detail_gate || e.gate || ''}`;
+    case 'tool_blocked':            return `⛔ blocked · ${e.tool || ''}`;
+    case 'disposition':             return `📌 disposition · ${e.target_kind || ''} → ${e.reason || ''}`;
+    case 'reason_evidence_fetch':   return `🔎 evidence fetch · for #${e.reason_call_id || '?'}`;
     default:                        return e.type || 'entry';
   }
 }
@@ -1307,12 +1320,33 @@ function renderEntryDetail(e, kind, lines) {
       lines.push(`<div class="d-row"><b>probed</b>: ${e.input_call_ids.map(c => `<a class="d-link" onclick="focusBlock('${State.blockOfCid.get(c) || ''}')">#${c}</a>`).join(' ')}</div>`);
     }
     lines.push('<div class="d-row" style="color:var(--fg-dim);">Self-directed read-only look — no evidentiary weight until its call_id flows into a finding.</div>');
+  } else if (kind === 'finding_refused') {
+    lines.push(`<div class="d-row"><b>tier</b>: ${escapeHtml((e.tier || '').toUpperCase())}</div>`);
+    lines.push(`<div class="d-row"><b>gate</b>: ${escapeHtml(e.detail_gate || e.gate || '')}</div>`);
+    if (e.claim && e.claim.act) lines.push(`<div class="d-row"><b>claim</b>: ${escapeHtml([e.claim.kind, e.claim.category, e.claim.act].filter(Boolean).join('|'))}</div>`);
+    if (Array.isArray(e.cited_call_ids) && e.cited_call_ids.length) {
+      lines.push(`<div class="d-row"><b>cited</b>: ${e.cited_call_ids.map(c => `<a class="d-link" onclick="focusBlock('${State.blockOfCid.get(c) || ''}')">#${c}</a>`).join(' ')}</div>`);
+    }
+  } else if (kind === 'tool_blocked') {
+    lines.push(`<div class="d-row"><b>tool</b>: ${escapeHtml(e.tool || '')}</div>`);
+    lines.push(`<div class="d-row"><b>reason</b>: ${escapeHtml(e.reason || '')}</div>`);
+  } else if (kind === 'disposition') {
+    lines.push(`<div class="d-row"><b>target</b>: ${escapeHtml(e.target_kind || '')} ${escapeHtml(e.target_id || '')}</div>`);
+    lines.push(`<div class="d-row"><b>reason</b>: ${escapeHtml(e.reason || '')}</div>`);
+    if (Array.isArray(e.evidence_call_ids) && e.evidence_call_ids.length) {
+      lines.push(`<div class="d-row"><b>evidence</b>: ${e.evidence_call_ids.map(c => `<a class="d-link" onclick="focusBlock('${State.blockOfCid.get(c) || ''}')">#${c}</a>`).join(' ')}</div>`);
+    }
+    if (e.window) lines.push(`<div class="d-row"><b>window</b>: ${escapeHtml(JSON.stringify(e.window))}</div>`);
+  } else if (kind === 'reason_evidence_fetch') {
+    for (const r of (e.requests || [])) {
+      lines.push(`<div class="d-row"><b>#${r.call_id}</b> '${escapeHtml(r.query || '')}' → ${r.rows_returned || 0} rows${r.status && r.status !== 'ok' ? ' [' + escapeHtml(r.status) + ']' : ''}</div>`);
+    }
   } else {
     lines.push('<div class="d-row" style="color:var(--fg-dim);">(no captured inputs)</div>');
   }
 
   // BODY / CONCLUSION
-  const body = e.conclusion || e.description || e.content || e.new_belief || e.probe_rationale || '';
+  const body = e.conclusion || e.description || e.content || e.new_belief || e.probe_rationale || e.note || e.reason || '';
   if (body) {
     lines.push('<div class="d-section">Output / Conclusion</div>');
     lines.push(`<div class="d-row">${escapeHtml(body)}</div>`);

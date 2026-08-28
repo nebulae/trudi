@@ -14,6 +14,8 @@ def test_manifest_exposes_core_dair_tools():
         "strings.stat_file",
         "yara.scan_directory",
         "coverage.coverage_report",
+        "read.read_output",
+        "read.read_mail",
     ):
         assert tool in allowed
         assert capability_for_tool(tool)

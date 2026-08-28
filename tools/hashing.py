@@ -110,20 +110,63 @@ def hash_file(file_path: str) -> dict:
     return result
 
 
+_CACHED_ALGOS = ("md5", "sha1", "sha256")
+
+
+def _iter_files(directory: str, recursive: bool, start_after: str = ""):
+    """Deterministic (sorted) walk so a capped run can be resumed from
+    `next_start_path`. Yields absolute file paths; symlinks are not followed."""
+    root = os.path.abspath(directory)
+    # Hidden entries are skipped, as the previous glob("**/*") walk did.
+    if not recursive:
+        try:
+            names = sorted(n for n in os.listdir(root) if not n.startswith("."))
+        except OSError:
+            return
+        for n in names:
+            p = os.path.join(root, n)
+            if os.path.isfile(p) and not os.path.islink(p) and p > start_after:
+                yield p
+        return
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for n in sorted(f for f in filenames if not f.startswith(".")):
+            p = os.path.join(dirpath, n)
+            if p <= start_after:
+                continue
+            if os.path.isfile(p) and not os.path.islink(p):
+                yield p
+
+
 @mcp.tool()
 @output_safe
-@with_tool_timeout(HASH_TIMEOUT, label="hash_directory")
 def hash_directory(
     directory: str,
     recursive: bool = True,
     algorithm: str = "sha256",
     output_manifest: Optional[str] = None,
+    max_files: int = 5000,
+    max_bytes: int = 2 * 1024 * 1024 * 1024,
+    max_seconds: Optional[int] = None,
+    skip_larger_than_mb: int = 512,
+    start_after: str = "",
 ) -> dict:
     """
-    Hash all files in a directory.
-    algorithm: md5, sha1, sha256, sha512.
-    output_manifest: optional path to write hash manifest CSV.
+    Hash the files in a directory — BOUNDED and resumable.
+    algorithm: md5, sha1, sha256, sha512 (md5/sha1/sha256 go through the
+        per-file hash cache shared with hash_file).
+    max_files / max_bytes / max_seconds: stop when any cap is reached and
+        return the PARTIAL manifest with `truncated=True`, `truncation_reason`
+        and `next_start_path` — call again with `start_after=<that path>` to
+        continue. max_seconds defaults to HASH_TIMEOUT-5.
+    skip_larger_than_mb: files above this size are listed in `skipped`, not read.
+    output_manifest: optional CSV under analysis/exports (partial runs append).
+
+    Why bounded: a recursive hash of a whole user profile (AppData, browser
+    caches…) previously ran for 12+ minutes in-process with nothing in the
+    trace, past the client's patience, and the work was orphaned.
     """
+    import time
     from core.paths import assert_output_safe
     if output_manifest:
         assert_output_safe(output_manifest)
@@ -136,41 +179,118 @@ def hash_directory(
     }
     if algorithm not in algo_map:
         return {"success": False, "error": f"Unknown algorithm: {algorithm}"}
+    if not os.path.isdir(directory):
+        return {"success": False, "error": f"not a directory: {directory}"}
 
-    hasher_cls = algo_map[algorithm]
-    results = []
-    errors = []
-    pattern = "**/*" if recursive else "*"
-    files = glob.glob(os.path.join(directory, pattern), recursive=recursive)
+    budget_s = int(max_seconds) if max_seconds else max(5, int(HASH_TIMEOUT) - 5)
+    max_files = max(1, int(max_files))
+    max_bytes = max(1, int(max_bytes))
+    skip_bytes = max(0, int(skip_larger_than_mb)) * 1024 * 1024
+    deadline = time.monotonic() + budget_s
+    start = time.monotonic()
 
-    for fpath in files:
-        if not os.path.isfile(fpath):
-            continue
+    # Start marker: the trace shows what is running while the walk is in
+    # progress (a long in-process tool used to be invisible until it returned).
+    try:
+        from core.execution_log import log as _elog
+        _elog.record_call_initiated("hash_directory", "in-process", {
+            "directory": directory, "algorithm": algorithm, "max_files": max_files,
+            "max_bytes": max_bytes, "max_seconds": budget_s})
+    except Exception:
+        pass
+
+    results, errors, skipped = [], [], []
+    bytes_hashed = 0
+    truncation_reason = ""
+    last_done = ""                  # last path fully handled → resume point
+    cache_hits = 0
+    cache_dirty = False
+    cache = _load_hash_cache() if algorithm in _CACHED_ALGOS else None
+
+    for fpath in _iter_files(directory, recursive, start_after):
+        # Caps are checked BEFORE a file is touched; `next_start_path` is the
+        # last path completed, so `start_after=next_start_path` resumes
+        # exactly where this run stopped (nothing skipped, nothing repeated).
+        if len(results) + len(errors) + len(skipped) >= max_files:
+            truncation_reason = "max_files"
+            break
+        if time.monotonic() > deadline:
+            truncation_reason = "max_seconds"
+            break
+        if bytes_hashed >= max_bytes:
+            truncation_reason = "max_bytes"
+            break
+        last_done = fpath
         try:
-            h = hasher_cls()
-            with open(fpath, "rb") as f:
-                for chunk in iter(lambda: f.read(65536), b""):
-                    h.update(chunk)
-            results.append({"file": fpath, algorithm: h.hexdigest()})
+            st = os.stat(fpath)
+        except OSError as e:
+            errors.append({"file": fpath, "error": str(e)})
+            continue
+        if skip_bytes and st.st_size > skip_bytes:
+            skipped.append({"file": fpath, "size_bytes": st.st_size, "reason": "larger_than_cap"})
+            continue
+        key = _cache_key(st, fpath)
+        if cache is not None:
+            hit = cache.get(key)
+            if hit and hit.get(algorithm):
+                results.append({"file": fpath, algorithm: hit[algorithm], "cache_hit": True})
+                cache_hits += 1
+                continue
+        try:
+            if cache is not None:
+                md5, sha1, sha256 = hashlib.md5(), hashlib.sha1(), hashlib.sha256()
+                with open(fpath, "rb") as f:
+                    for chunk in iter(lambda: f.read(65536), b""):
+                        md5.update(chunk); sha1.update(chunk); sha256.update(chunk)
+                        bytes_hashed += len(chunk)
+                digests = {"md5": md5.hexdigest(), "sha1": sha1.hexdigest(),
+                           "sha256": sha256.hexdigest()}
+                cache[key] = {"success": True, "size_bytes": st.st_size, **digests}
+                cache_dirty = True
+                results.append({"file": fpath, algorithm: digests[algorithm]})
+            else:
+                h = algo_map[algorithm]()
+                with open(fpath, "rb") as f:
+                    for chunk in iter(lambda: f.read(65536), b""):
+                        h.update(chunk)
+                        bytes_hashed += len(chunk)
+                results.append({"file": fpath, algorithm: h.hexdigest()})
         except Exception as e:
             errors.append({"file": fpath, "error": str(e)})
 
+    if cache is not None and cache_dirty:
+        with _HASH_CACHE_LOCK:
+            _save_hash_cache(cache)
+
     if output_manifest:
         import csv
-        with open(output_manifest, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["file", algorithm])
-            writer.writeheader()
+        mode = "a" if (start_after and os.path.exists(output_manifest)) else "w"
+        with open(output_manifest, mode, newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["file", algorithm], extrasaction="ignore")
+            if mode == "w":
+                writer.writeheader()
             writer.writerows(results)
 
-    return {
+    out = {
         "success": True,
         "directory": directory,
         "algorithm": algorithm,
         "file_count": len(results),
         "hashes": results,
         "errors": errors,
+        "skipped": skipped,
+        "bytes_hashed": bytes_hashed,
+        "cache_hits": cache_hits,
+        "elapsed_seconds": round(time.monotonic() - start, 2),
         "manifest": output_manifest,
+        "truncated": bool(truncation_reason),
     }
+    if truncation_reason:
+        out["truncation_reason"] = truncation_reason
+        out["next_start_path"] = last_done
+        out["note"] = (f"Stopped at {truncation_reason} — partial manifest. Re-call with "
+                       f"start_after={last_done!r} to continue, or narrow the directory.")
+    return out
 
 
 @mcp.tool()

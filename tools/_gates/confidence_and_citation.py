@@ -34,9 +34,10 @@ def check(ctx) -> Optional[dict]:
     # ── R1 fast path ──────────────────────────────────────────────────────
     # If supporting_evidence was supplied inline, run a DETERMINISTIC citation
     # check instead of requiring two 8B-model round-trips (confidence_score +
-    # cite_check). CONFIRMED's tier guard is confirmed_requires_supported_evaluate
-    # (runs just before this gate); LIKELY trusts the agent tier + citation
-    # check. This also sidesteps the description-substring matching of the
+    # cite_check). The tier guard for BOTH CONFIRMED and LIKELY is
+    # confirmed_requires_supported_evaluate (runs just before this gate) — a
+    # SUPPORTED reviewer verdict is required above SUSPECTED. This also
+    # sidesteps the description-substring matching of the
     # legacy path, so re-wording a finding no longer invalidates a prior check.
     if (ctx.supporting_evidence or "").strip():
         from ._citation import deterministic_cite_check
@@ -81,7 +82,7 @@ def check(ctx) -> Optional[dict]:
                 f"last 30 trace entries that (a) matched the description and "
                 f"(b) was fresh (not reused from an earlier identical finding). "
                 f"Call reason.confidence_score(finding=..., supporting_evidence=..., "
-                f"intended_tier='{ctx.tier}') first, then re-record."
+                f"act=..., input_call_ids=[...]) first, then re-record."
             ),
             "description": ctx.description,
             "confidence": ctx.confidence,
@@ -89,21 +90,25 @@ def check(ctx) -> Optional[dict]:
             "missing_check": "reason_confidence_score",
         }
 
-    # Parse the tier the reviewer assigned; refuse if it's lower than requested.
-    cs_conclusion = (cs_entry.get("conclusion") or "")
-    cs_tier_match = re.search(
-        r'"tier"\s*:\s*"(CONFIRMED|LIKELY|SUSPECTED|UNCONFIRMED)"',
-        cs_conclusion,
-        re.IGNORECASE,
-    )
-    if not cs_tier_match:
+    # The tier the reviewer assigned: the typed `tier` stamped on the entry
+    # (RESULT block / parsed CONFIDENCE_SCORE) first; conclusion-text regex only
+    # for traces that predate the stamp.
+    assigned = str(cs_entry.get("tier") or "").upper()
+    if assigned not in _RANK:
+        cs_conclusion = (cs_entry.get("conclusion") or "")
         cs_tier_match = re.search(
-            r"\bTIER\s*[:=]\s*(CONFIRMED|LIKELY|SUSPECTED|UNCONFIRMED)\b",
+            r'"tier"\s*:\s*"(CONFIRMED|LIKELY|SUSPECTED|UNCONFIRMED)"',
             cs_conclusion,
             re.IGNORECASE,
         )
-    if cs_tier_match:
-        assigned = cs_tier_match.group(1).upper()
+        if not cs_tier_match:
+            cs_tier_match = re.search(
+                r"\bTIER\s*[:=]\s*(CONFIRMED|LIKELY|SUSPECTED|UNCONFIRMED)\b",
+                cs_conclusion,
+                re.IGNORECASE,
+            )
+        assigned = cs_tier_match.group(1).upper() if cs_tier_match else ""
+    if assigned:
         if _RANK.get(assigned, 0) < _RANK.get(ctx.tier, 0):
             return {
                 "success": False,
@@ -135,8 +140,13 @@ def check(ctx) -> Optional[dict]:
             "missing_check": "reason_cite_check",
         }
 
-    cc_conclusion = (cc_entry.get("conclusion") or "").upper()
-    if "UNCITED_CLAIMS_PRESENT" in cc_conclusion or "INSUFFICIENT_EVIDENCE" in cc_conclusion:
+    cc_verdict = str(cc_entry.get("cite_verdict") or "").upper()
+    if not cc_verdict:
+        cc_conclusion = (cc_entry.get("conclusion") or "").upper()
+        cc_verdict = ("UNCITED_CLAIMS_PRESENT" if "UNCITED_CLAIMS_PRESENT" in cc_conclusion
+                      else "INSUFFICIENT_EVIDENCE" if "INSUFFICIENT_EVIDENCE" in cc_conclusion
+                      else "")
+    if cc_verdict in ("UNCITED_CLAIMS_PRESENT", "INSUFFICIENT_EVIDENCE"):
         return {
             "success": False,
             "error": (

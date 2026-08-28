@@ -10,10 +10,13 @@ artifact can always miss; a complete enumeration cannot.
 Detection rests on that completeness — every device is returned as a row (class,
 vendor, product, VID:PID, interfaces, first/last seen), so even a device this
 module does not classify is present and visible for the agent or a human to judge.
-On top of the full inventory it raises one vendor-agnostic STRUCTURAL flag: a
-single physical device that exposes BOTH a keyboard/HID interface AND mass storage
-— a keystroke-injector profile (e.g. a BadUSB with an on-board payload partition).
-The flag is a hint; the inventory completeness is what's load-bearing.
+On top of the full inventory it raises a keystroke-injector flag via two lenses:
+(1) a vendor-agnostic STRUCTURAL profile — a single physical device exposing BOTH
+a keyboard/HID interface AND mass storage (a BadUSB with an on-board payload
+partition); and (2) an IDENTITY profile — a self-identifying injector product/
+vendor name (Rubber Ducky, Bash Bunny, Malduino, …) or a known BadUSB VID:PID,
+which catches a storage-only device whose HID interface was never separately
+logged. The flag is a hint; the inventory completeness is what's load-bearing.
 """
 from __future__ import annotations
 
@@ -156,7 +159,7 @@ def parse_device_install_log(path: str) -> dict:
         d["device_class"] = "+".join(sorted(classes)) if classes else d["device_class"]
         d["interfaces"] = sorted(d["interfaces"])
         d["actions"] = sorted(d["actions"])
-        reasons = _flag_reasons(classes)
+        reasons = _flag_reasons(classes, d)
         if reasons:
             d = {**d, "flag_reasons": reasons}
             flagged.append(d)
@@ -173,13 +176,55 @@ def parse_device_install_log(path: str) -> dict:
     }
 
 
-def _flag_reasons(classes: set) -> list[str]:
-    """Vendor-agnostic structural flag: one physical device exposing BOTH a
-    keyboard/HID interface AND mass storage — a keystroke-injector with an
-    on-board payload partition. Structural property, not a name/VID lookup, so it
-    is not tied to any specific device or case."""
+# Self-identifying keystroke-injector / BadUSB product & vendor name tokens.
+# Such devices frequently enumerate ONLY as mass storage — their HID/keyboard
+# interface is often not separately logged in setupapi.dev.log — so the structural
+# HID+storage lens alone cannot see them. A self-identifying label is a reliable,
+# low-false-positive catch: ordinary storage is not named "Rubber Ducky" or "Bash
+# Bunny". Recall-first by design: a flag is a HINT that forces the analyst to
+# disposition the device, not an automatic conviction, so occasionally surfacing a
+# legitimately injector-branded peripheral for a one-line benign disposition is the
+# safe trade.
+_INJECTOR_NAME_RE = re.compile(
+    r"(rubber[\s_-]?ducky|ducky[\s_-]?storage|\bducky\b|hak5|bash[\s_-]?bunny"
+    r"|shark[\s_-]?jack|malduino|digispark|\bo\.?mg\b|omg[\s_-]?cable"
+    r"|\bwhid\b|cactus[\s_-]?whid|pico[\s_-]?ducky|evil[\s_-]?crow"
+    r"|usb[\s_-]?ninja|p4wnp1)",
+    re.IGNORECASE,
+)
+
+# Extensible hook for known BadUSB VID:PID pairs (a device presents these
+# regardless of the label it advertises). Deliberately EMPTY by default: a VID
+# alone is never sufficient — injector firmware often presents a generic
+# chip-vendor or shared hobby-board VID used by many benign devices, so shipping
+# unverified pairs would tar legitimate hardware. Add specific, verified lowercase
+# (vid, pid) pairs here per environment.
+_INJECTOR_VIDPID: set[tuple[str, str]] = set()
+
+
+def _flag_reasons(classes: set, device: dict) -> list[str]:
+    """Reasons a device matches a keystroke-injector / BadUSB profile.
+
+    Two independent lenses (a device need match only one):
+      1. STRUCTURAL (vendor-agnostic): one physical device exposing BOTH a
+         keyboard/HID interface AND mass storage — an injector with an on-board
+         payload partition.
+      2. IDENTITY: a self-identifying injector product/vendor name token, or a
+         known BadUSB VID:PID. Catches a storage-only device whose HID interface
+         was never separately logged — which the structural lens cannot see.
+    """
+    reasons: list[str] = []
     has_hid = "HID" in classes
     has_storage = bool({"USBSTOR", "STORAGE"} & classes)
     if has_hid and has_storage:
-        return ["composite HID + mass-storage device (keystroke-injector profile)"]
-    return []
+        reasons.append("composite HID + mass-storage device (keystroke-injector profile)")
+
+    haystack = " ".join(str(device.get(k, "")) for k in ("vendor", "product", "identity"))
+    nm = _INJECTOR_NAME_RE.search(haystack)
+    if nm:
+        reasons.append(f"self-identifying keystroke-injector name token: '{nm.group(1)}'")
+
+    if (device.get("vid", ""), device.get("pid", "")) in _INJECTOR_VIDPID:
+        reasons.append(f"known BadUSB VID:PID {device.get('vid')}:{device.get('pid')}")
+
+    return reasons

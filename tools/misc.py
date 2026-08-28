@@ -1,7 +1,7 @@
 """Miscellaneous SIFT tools — evtx parsing, registry, USN journal, AV, browser forensics.
 
-Also includes the email-forensics, packer-detection, capability-analysis, Office-macro,
-Sigma-hunt, and batch-execution helpers added under the post-hackathon expansion plan.
+Also includes email-forensics, packer-detection, capability-analysis, Office-macro,
+Sigma-hunt, and batch-execution helpers.
 """
 import os
 import re
@@ -22,17 +22,53 @@ def _bin_or_warn(name: str) -> Optional[str]:
 
 # ── Event log parsing (python-evtx) ──────────────────────────────────────────
 
+_EVTX_MAGIC = b"ElfFile\x00"   # EVTX file header, offset 0
+_EVT_MAGIC = b"LfLe"           # legacy EVT: ELF_LOG_SIGNATURE at offset 4
+
+
+def _sniff_event_log(path: str) -> str:
+    """'evtx' | 'evt' | 'unknown'. Lenient: an unreadable/missing file or an
+    unrecognised header is 'unknown' and the caller proceeds as before, so
+    only a POSITIVE legacy-EVT detection changes behaviour."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return "unknown"
+    if head.startswith(_EVTX_MAGIC):
+        return "evtx"
+    if len(head) >= 8 and head[4:8] == _EVT_MAGIC:
+        return "evt"
+    return "unknown"
+
+
 @mcp.tool()
 @output_safe
 def evtx_dump(evtx_file: str, output_path: Optional[str] = None) -> dict:
     """
-    Dump an EVTX file to XML using python-evtx.
-    Useful for inspection without EZ Tools or for piping to grep.
+    Dump a Windows event log to text. EVTX (Vista+) is rendered to XML via
+    python-evtx; legacy EVT (NT/2000/XP/2003, "LfLe" header) is routed to
+    libevt's `evtexport`, because python-evtx parses only the binary-XML
+    EVTX format and, handed an EVT file, exits 0 with an empty <Events/>
+    document — a silent false negative that makes an XP-era event log look
+    empty. The result carries `log_format` so the caller knows which parser
+    produced it.
     """
-    cmd = ["/usr/local/bin/evtx_dump.py", evtx_file]
+    fmt = _sniff_event_log(evtx_file)
+    if fmt == "evt":
+        cmd = ["evtexport", "-m", "all", evtx_file]
+    else:
+        cmd = ["/usr/local/bin/evtx_dump.py", evtx_file]
     if output_path:
-        return run_with_output_file(cmd, output_path=output_path, mode="w", timeout=300)
-    return run(cmd, timeout=300)
+        r = run_with_output_file(cmd, output_path=output_path, mode="w", timeout=300)
+    else:
+        r = run(cmd, timeout=300)
+    if isinstance(r, dict):
+        r["log_format"] = fmt
+        if fmt == "evt":
+            r["note"] = ("legacy EVT parsed with libevt evtexport (text records, not "
+                         "EVTX XML); ez.evtxecmd / misc.evtx_filter do not apply")
+    return r
 
 
 @mcp.tool()
@@ -44,12 +80,11 @@ def evtx_filter(evtx_file: str, event_ids: str,
     Stream-filter an EVTX for specific event IDs without buffering the
     entire XML dump in memory.
 
-    The previous implementation called subprocess.run(capture_output=True)
-    on evtx_dump.py for the whole file — for an 18 MB Security.evtx that
-    expands to hundreds of MB of XML before any filtering can start,
-    blowing both memory and the client tool-timeout. This version pipes
-    evtx_dump.py through a line-by-line state machine that keeps only the
-    current Event in a small buffer and accumulates matches as it goes.
+    Buffering the whole evtx_dump.py XML output before filtering can expand a
+    large Security.evtx to hundreds of MB and blow both memory and the client
+    tool-timeout. This pipes evtx_dump.py through a line-by-line state machine
+    that keeps only the current Event in a small buffer and accumulates matches
+    as it goes.
 
     event_ids: comma-separated event IDs e.g. '4624,4625,4688,4698'.
     max_results: stop streaming after this many matches (default 200).
@@ -67,6 +102,20 @@ def evtx_filter(evtx_file: str, event_ids: str,
     if not ids:
         return {"success": False, "error": "no valid event_ids parsed",
                 "event_ids_requested": []}
+
+    # python-evtx cannot read legacy EVT; streaming it would yield zero
+    # events and look like an empty log. Refuse loudly instead.
+    if _sniff_event_log(evtx_file) == "evt":
+        return {
+            "success": False,
+            "error": (f"{evtx_file} is a legacy EVT log (NT/2000/XP/2003); "
+                      "python-evtx parses EVTX only, so an ID filter here would "
+                      "return zero events regardless of content"),
+            "log_format": "evt",
+            "hint": "Use misc.evtx_dump (routes EVT to libevt evtexport) and grep the text records.",
+            "event_ids_requested": sorted(ids),
+            "events_scanned": 0, "matches": [],
+        }
 
     cmd = ["/usr/local/bin/evtx_dump.py", evtx_file]
     id_pattern = re.compile(r"<EventID[^>]*>(\d+)</EventID>")
@@ -165,16 +214,32 @@ def evtx_filter(evtx_file: str, event_ids: str,
     stderr_text = "\n".join(stderr_buf)[:512]
     success = events_scanned > 0 or bool(results)
 
-    _log_tool({
+    # Persist the MATCHED events to the sidecar: a finding citing this call
+    # must let the reviewer fetch the rows it vouches for; an empty stdout
+    # would read as a COMPLETE source whose misses imply absence.
+    _joined = "\n".join(results)
+    _tc = {
         "success": success,
-        "stdout": "",
+        "stdout": _joined[:600],
+        "_stdout_full": _joined,
+        "_stdout_chars": len(_joined),
         "stderr": stderr_text,
         "exit_code": proc.returncode if proc.returncode is not None else -1,
         "truncated": cap_hit or timed_out,
         "cmd": " ".join(cmd),
         "retries": 0,
         "elapsed_seconds": elapsed,
-    })
+    }
+    _log_tool(_tc)
+    try:
+        from tools._gates._session import SESSION_EVENT_IDS
+        _sess = sorted(ids & SESSION_EVENT_IDS)
+        if success and results and _sess and _tc.get("_trudi_call_id"):
+            from core.execution_log import log as _elog
+            _elog.annotate_tool_call(_tc["_trudi_call_id"], session_artifact=True,
+                                     session_event_ids=_sess)
+    except Exception:
+        pass
 
     return {
         "success": success,
@@ -260,22 +325,45 @@ def analyzemft_parse(mft_path: str, output_csv: str) -> dict:
 def hindsight_chrome(
     profile_path: str,
     output_dir: str,
-    output_format: str = "json",
+    output_format: str = "jsonl",
 ) -> dict:
     """
     Parse Chrome/Chromium browser history, cookies, cache, and extensions using Hindsight.
     profile_path: path to Chrome 'Default' profile directory.
-    output_format: 'json', 'sqlite', 'csv'.
+    output_format: 'jsonl' (default, one record per line — parseable), 'sqlite',
+        or 'xlsx'. These are the only formats hindsight accepts; common aliases
+        ('json'→'jsonl', 'csv'/'xls'→'xlsx') are mapped, anything else falls
+        back to 'jsonl' rather than failing on an invalid -f choice.
     """
     import os
+    _VALID = {"jsonl", "sqlite", "xlsx"}
+    _ALIAS = {"json": "jsonl", "csv": "xlsx", "xls": "xlsx", "db": "sqlite", "sqlite3": "sqlite"}
+    fmt = (output_format or "").strip().lower()
+    fmt = _ALIAS.get(fmt, fmt)
+    if fmt not in _VALID:
+        fmt = "jsonl"
     output_file = os.path.join(output_dir, "hindsight_chrome")
     cmd = [
         "/usr/local/bin/hindsight.py",
         "-i", profile_path,
         "-o", output_file,
-        "-f", output_format,
+        "-f", fmt,
+        # Explicit log location: hindsight's default log path is resolved by
+        # the tool itself and landed somewhere unwritable in two runs
+        # (logging.basicConfig FileHandler crash before any parsing).
+        "-l", os.path.join(output_dir, "hindsight.log"),
     ]
-    return run(cmd, timeout=300, output_dir=output_dir)
+    # cwd=output_dir: hindsight opens its log relative to the working
+    # directory and crashes in FileHandler otherwise; the directory must
+    # exist BEFORE Popen(cwd=…) or the spawn itself fails.
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError:
+        pass
+    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir)
+    if isinstance(r, dict):
+        r["output_format"] = fmt
+    return r
 
 
 # ── AV scanning ──────────────────────────────────────────────────────────────
@@ -283,19 +371,23 @@ def hindsight_chrome(
 @mcp.tool()
 @output_safe
 def clamscan_file(file_path: str) -> dict:
-    """Scan a file for malware using ClamAV."""
-    return run(["clamscan", "--no-summary", file_path], timeout=120)
+    """Scan a file for malware using ClamAV. Exit 1 = infected (a RESULT,
+    logged success=True with exit_meaning); exit 2 = error."""
+    from tools._exit_codes import policy
+    return run(["clamscan", "--no-summary", file_path], timeout=120,
+               **policy("clamscan"))
 
 
 @mcp.tool()
 @output_safe
 def clamscan_directory(directory: str, recursive: bool = True) -> dict:
     """Scan a directory for malware using ClamAV."""
+    from tools._exit_codes import policy
     cmd = ["clamscan", "--no-summary"]
     if recursive:
         cmd.append("-r")
     cmd.append(directory)
-    return run(cmd, timeout=1800)
+    return run(cmd, timeout=1800, **policy("clamscan"))
 
 
 # ── USB device forensics ──────────────────────────────────────────────────────
@@ -311,6 +403,123 @@ def usbdeviceforensics(registry_path: str, output_path: Optional[str] = None) ->
         assert_output_safe(output_path)
     cmd = ["/usr/local/bin/usbdeviceforensics", registry_path]
     return run(cmd, timeout=60)
+
+
+@mcp.tool()
+@output_safe
+def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -> dict:
+    """Export a chat/messenger sqlite store (Skype main.db, WhatsApp
+    msgstore.db) to normalized CSVs — the comms channel the mail extractors
+    (readpst/pff_export) do not cover, and a first-class exfil channel
+    (message bodies AND the Transfers file-transfer trail).
+
+    ENUMERATE, DON'T SEARCH: the whole Messages/Transfers tables are exported
+    (one row each), plus a participants roster, so a correspondent or file
+    transfer cannot be missed by grepping the wrong string. The db is opened
+    STRICTLY read-only (sqlite immutable URI — no -wal/-shm sidecars, no
+    locks), safe against read-only evidence mounts; an uncheckpointed -wal
+    sibling is surfaced as a warning.
+
+    db_path:   the store on the mounted image (e.g. .../AppData/Roaming/Skype/
+               <account>/main.db). Read-only.
+    output_dir: CSV destination (default ./exports/chat/); must be under
+               analysis/exports/reports.
+    chat_app:  auto | skype | whatsapp.
+
+    Read the produced CSVs with read.read_output. Returns _trudi_call_id for
+    record_finding; participants are annotated onto the trace entry so
+    correspondent-exhaustion checks can consume them.
+    """
+    import csv as _csv
+    from core.executor import _log_tool
+    from core.chat_db import parse_chat_db
+
+    out_dir = output_dir or os.path.join(".", "exports", "chat")
+    assert_output_safe(out_dir)
+
+    parsed = parse_chat_db(db_path, chat_app=chat_app)
+    output_paths: dict = {}
+    if parsed.get("success"):
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            specs = (
+                ("messages.csv", parsed.get("messages", []),
+                 ["ts_utc", "author", "author_display", "chat", "partner", "body"]),
+                ("transfers.csv", parsed.get("transfers", []),
+                 ["start_utc", "finish_utc", "partner", "partner_display",
+                  "filename", "filesize", "status"]),
+                ("participants.csv",
+                 [{"participant": p} for p in parsed.get("participants", [])],
+                 ["participant"]),
+            )
+            for name, rows, header in specs:
+                p = os.path.join(out_dir, name)
+                with open(p, "w", newline="", encoding="utf-8") as fh:
+                    w = _csv.DictWriter(fh, fieldnames=header)
+                    w.writeheader()
+                    for r in rows:
+                        w.writerow({k: r.get(k, "") for k in header})
+                output_paths[name] = p
+        except OSError as e:
+            parsed["warning"] = f"CSV write failed: {e}"
+
+    cov = parsed.get("coverage_window")
+    parts = parsed.get("participants", [])
+    if parsed.get("success"):
+        summary = (f"{parsed.get('app')}: {parsed.get('message_count', 0)} messages, "
+                   f"{parsed.get('transfer_count', 0)} file transfers, "
+                   f"{len(parts)} participants, coverage "
+                   f"{(cov or {}).get('start', '?')} -> {(cov or {}).get('end', '?')}")
+        if parsed.get("warning"):
+            summary += f"\n⚠ {parsed['warning']}"
+    else:
+        summary = parsed.get("error", "chat db export failed")
+
+    # Self-log with the SOURCE DB PATH in cmd — the comms-coverage and
+    # chat_messenger manifest regexes match on it (main.db/msgstore/skype/...),
+    # so this call satisfies them with no gate edits. Failed attempts are
+    # logged too: the attempt is part of the audit trail.
+    result = {"success": parsed.get("success", False), "stdout": summary,
+              "stderr": "" if parsed.get("success") else parsed.get("error", ""),
+              "exit_code": 0 if parsed.get("success") else 1, "truncated": False,
+              "retries": 0, "elapsed_seconds": 0.0,
+              "cmd": f"misc.chat_db_export {db_path}"}
+    _log_tool(result)
+    cid = result.get("_trudi_call_id")
+    if cid and parsed.get("success"):
+        try:
+            from core.execution_log import log
+            log.annotate_tool_call(
+                cid,
+                chat_db_export=True,
+                coverage_window=cov,
+                message_count=parsed.get("message_count", 0),
+                transfer_count=parsed.get("transfer_count", 0),
+                # tier-contract marker: the Transfers table is a transfer artifact
+                transfer_artifact=True if int(parsed.get("transfer_count") or 0) > 0 else None,
+                participant_count=len(parts),
+                observed_correspondents=parts[:200],
+                correspondents_partial=len(parts) > 200,
+            )
+        except Exception:
+            pass
+
+    return {
+        "success": parsed.get("success", False),
+        "error": parsed.get("error"),
+        "warning": parsed.get("warning"),
+        "_trudi_call_id": cid,
+        "app": parsed.get("app"),
+        "partial": parsed.get("partial", False),
+        "wal_present": parsed.get("wal_present", False),
+        "message_count": parsed.get("message_count", 0),
+        "transfer_count": parsed.get("transfer_count", 0),
+        "participant_count": len(parts),
+        "participants_preview": parts[:40],
+        "coverage_window": cov,
+        "output_paths": output_paths,
+        "summary": summary,
+    }
 
 
 @mcp.tool()
@@ -414,25 +623,67 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
 @output_safe
 def parse_scheduled_tasks(tasks_dir: str) -> dict:
     """
-    List and read Windows Scheduled Task XML files from disk.
+    List and read Windows Scheduled Task XML files from disk — the persistence
+    look an injected task lives in (no 4698 event when task-auditing is off).
     tasks_dir: path to Windows/System32/Tasks/ on a mounted volume.
+
+    Windows task XML is UTF-16; it is decoded here. Each task is scanned for
+    keystroke-injector PAYLOAD signatures (%duck%/%bunny%/hak5, hidden/encoded
+    PowerShell) — flagged as a LEAD (presence flags a payload; absence supports
+    the benign reading). Self-logged as a citable tool_call.
     """
     import os
-    results = []
-    errors = []
-    try:
-        for root, dirs, files in os.walk(tasks_dir):
+    from tools._gates._scheduled_tasks import INJECTOR_PAYLOAD_RE
+    from core.executor import _log_tool
+    results, errors, injector_tasks = [], [], []
+
+    def _decode(fpath):
+        with open(fpath, "rb") as f:
+            raw = f.read(16384)
+        for enc in ("utf-16", "utf-8", "latin-1"):
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        return raw.decode("latin-1", "replace")
+
+    ok = os.path.isdir(tasks_dir)
+    if ok:
+        for root, _dirs, files in os.walk(tasks_dir):
             for fname in files:
                 fpath = os.path.join(root, fname)
                 try:
-                    with open(fpath, "r", errors="replace") as f:
-                        content = f.read(8192)
-                    results.append({"task": fpath.replace(tasks_dir, ""), "content": content})
+                    content = _decode(fpath)
+                    rel = fpath.replace(tasks_dir, "")
+                    entry = {"task": rel, "content": content[:8192]}
+                    if INJECTOR_PAYLOAD_RE.search(content):
+                        entry["injector_payload"] = True
+                        injector_tasks.append(rel)
+                    results.append(entry)
                 except Exception as e:
                     errors.append({"task": fpath, "error": str(e)})
-        return {"success": True, "task_count": len(results), "tasks": results, "errors": errors}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+
+    summary = (f"{len(results)} scheduled tasks; "
+               f"{len(injector_tasks)} with injector-payload signatures"
+               + (f": {injector_tasks[:5]}" if injector_tasks else ""))
+    tc = {"success": ok, "stdout": summary, "stderr": "" if ok else f"not a directory: {tasks_dir}",
+          "exit_code": 0 if ok else 1, "truncated": False, "retries": 0,
+          "elapsed_seconds": 0.0, "cmd": f"misc.parse_scheduled_tasks {tasks_dir}",
+          "_stdout_full": summary + "\n" + "\n".join(r["task"] for r in results),
+          "_stdout_chars": None}
+    try:
+        _log_tool(tc)
+        cid = tc.get("_trudi_call_id")
+        if cid and injector_tasks:
+            from core.execution_log import log as _elog
+            _elog.annotate_tool_call(cid, injector_payload_tasks=injector_tasks[:50])
+    except Exception:
+        cid = None
+    if not ok:
+        return {"success": False, "error": f"not a directory: {tasks_dir}",
+                "_trudi_call_id": cid}
+    return {"success": True, "_trudi_call_id": cid, "task_count": len(results),
+            "injector_payload_tasks": injector_tasks, "tasks": results, "errors": errors}
 
 
 # ── PDF analysis ──────────────────────────────────────────────────────────────
@@ -513,8 +764,18 @@ def _pre_report_ready_gate() -> dict | None:
             "missing_check": "reason_pre_report_check",
         }
     conclusion = (pre_report_entry.get("conclusion") or "")
-    ready_match = re.search(r"READY_TO_REPORT:\s*(true|false)", conclusion, re.IGNORECASE)
-    is_ready = bool(ready_match and ready_match.group(1).lower() == "true")
+    if "ready_to_report" not in pre_report_entry:
+        return {
+            "success": False,
+            "error": (
+                "refused: the most recent reason.pre_report_check entry predates the "
+                "typed ready_to_report flag — re-run reason.pre_report_check() before "
+                "exporting the trace or writing the final report."
+            ),
+            "gate": "pre_report_check_required",
+            "missing_check": "reason_pre_report_check",
+        }
+    is_ready = pre_report_entry.get("ready_to_report") is True
     if not is_ready:
         return {
             "success": False,
@@ -738,6 +999,193 @@ def record_curiosity_probe(
 
 
 @mcp.tool()
+def record_disposition(
+    target_kind: str,
+    target_id: str,
+    reason: str,
+    evidence_call_ids: list[int] | None = None,
+    note: str = "",
+    window: dict | None = None,
+    input_call_ids: list[int] | None = None,
+) -> dict:
+    """
+    Record a TYPED disposition — the only way to settle a lead, source, tool,
+    verification challenge, principal, correspondent, device, hypothesis or host
+    without a finding. Gates and reason.pre_report_check look these up by
+    (target_kind, target_id); prose such as "absent from evidence" or
+    "controller unknown" in a finding/narration is NOT read.
+
+    target_kind: source | tool | challenge | principal | correspondent | device |
+                 hypothesis | host | destruction_scope
+    target_id:   source → manifest source id (from the refusal); tool → the MCP
+                 tool name (e.g. "ez.pecmd"); challenge → "<dair_call_id>:<challenge
+                 claim>"; principal / correspondent / host / device → the identity
+                 (any spelling; normalized server-side); hypothesis → H-id;
+                 destruction_scope → the finding call_id.
+    reason:      absent_from_evidence | inapplicable | out_of_scope | noise |
+                 excluded | not_a_principal | controller_unknown |
+                 evidence_unavailable | ruled_out | refuted | undetermined
+                 (each target_kind accepts a subset — the refusal lists it).
+    evidence_call_ids: REQUIRED for excluded / ruled_out / refuted /
+                 not_a_principal — the evidence tool calls that establish it.
+    window:      {start, end} ISO dates the disposition covers (device rule-outs).
+    """
+    from core.execution_log import log
+    from tools._gates import _dispositions as D
+    from tools._gates._evidence_calls import is_evidence_tool_call
+    msg = D.validate(target_kind, target_id, reason)
+    if msg:
+        return {"success": False, "error": msg, "gate": "typed_disposition",
+                "target_kinds": list(D.TARGET_KINDS), "reasons": list(D.REASONS)}
+    idx = log.index()
+    if not (idx.by_type.get("dair_call") or []):
+        return {"success": False, "gate": "dair_required",
+                "error": "Dispositions only exist inside an active DAIR investigation "
+                         "(no dair_assess call in the trace). Call dair_assess first."}
+    rs = reason.strip().lower()
+    tk = target_kind.strip().lower()
+    cids = sorted({int(c) for c in (evidence_call_ids or []) if c})
+    if rs in D.EVIDENCE_REQUIRED:
+        bad = [c for c in cids if not is_evidence_tool_call(idx.by_call_id.get(c) or {})]
+        if not cids or bad:
+            return {"success": False, "gate": "typed_disposition",
+                    "missing": ["evidence_call_ids"],
+                    "error": (f"reason={rs!r} asserts a fact about the evidence — pass "
+                              f"evidence_call_ids=[<_trudi_call_id>, ...] of the successful "
+                              f"evidence tool calls that establish it"
+                              + (f" (not evidence tool calls: {bad})" if bad else ""))}
+    # Evidence cited to settle a question must BEAR ON that question's class
+    # and window. A device rule-out answers "did this device act at install/
+    # creation time?" — later-operation artifacts (RDP sessions, FTP logs, mail
+    # reads) describe how an account was USED and cannot settle it. The check
+    # is over evidence CLASS and WINDOW only — never the direction of the
+    # conclusion: the same classes serve to rule the device in or out.
+    if tk == "device" and rs == "ruled_out":
+        if not isinstance(window, dict) or not window.get("start") or not window.get("end"):
+            return {"success": False, "gate": "typed_disposition",
+                    "missing": ["window"],
+                    "error": ("device ruled_out settles a mechanism at install/creation "
+                              "time — pass window={\"start\", \"end\"} (ISO dates) the "
+                              "rule-out covers")}
+        from tools._gates._tiering import classify_entry
+        # Classes that describe the DEVICE ITSELF (its install/connection
+        # record) — an account-creation or session event describes what an
+        # account did, not what the device is; a generic registry parse is too
+        # broad to bear on a specific device.
+        _DEVICE_CLASSES = {"device_install", "usb_storage"}
+        classes = set()
+        for c in cids:
+            classes |= classify_entry(idx.by_call_id.get(c) or {})
+        # Ruling out a FLAGGED keystroke-injector cannot skip the look for
+        # what an injection leaves behind. Symmetric — the scheduled-task /
+        # autorun enumeration either supports the rule-out (no injection
+        # artifacts) or refutes it (an injector-payload task).
+        from tools._gates._scheduled_tasks import tasks_examined, flagged_injector_present
+        _entries_now = getattr(log, "_entries", None) or []
+        if flagged_injector_present(_entries_now) and not tasks_examined(_entries_now, idx):
+            return {"success": False, "gate": "typed_disposition",
+                    "detail_gate": "injector_ruleout_requires_task_look",
+                    "error": ("ruling out a FLAGGED keystroke-injector requires having "
+                              "examined where an injection leaves traces: enumerate "
+                              "\\Windows\\System32\\Tasks and the SOFTWARE TaskCache "
+                              "(misc.parse_scheduled_tasks / vol.scheduled_tasks) — or "
+                              "record misc.record_disposition(target_kind=\"source\", "
+                              "target_id=\"scheduled_tasks\", reason=\"absent_from_evidence\") "
+                              "— before ruling the device out. A hidden PowerShell task off "
+                              "a removable/%duck% path is the injection; not looking is not "
+                              "a rule-out.")}
+        if not (classes & _DEVICE_CLASSES):
+            return {"success": False, "gate": "typed_disposition",
+                    "detail_gate": "disposition_evidence_relevance",
+                    "error": (f"device ruled_out requires evidence bearing on the device's "
+                              f"install/creation record — none of the cited calls carries a "
+                              f"device-mechanism artifact class "
+                              f"({', '.join(sorted(_DEVICE_CLASSES))}); the cited classes are "
+                              f"{{{', '.join(sorted(classes)) or 'none'}}}. Later-operation "
+                              f"artifacts (sessions, transfer logs, mail) describe how an "
+                              f"account was USED, not how it was created — cite the "
+                              f"setupapi/USB-registry/event evidence for the window, or do "
+                              f"not rule the device out.")}
+    else:
+        unknown = [c for c in cids if c not in idx.by_call_id]
+        if unknown:
+            return {"success": False, "gate": "typed_disposition",
+                    "error": f"evidence_call_ids not in trace: {unknown}"}
+    # An ENGAGED correspondent (the subject wrote to them, a chat participant,
+    # or a case-roster match) cannot be settled reason="noise": "noise" asserts
+    # inbound spam/clutter, and mislabelling would sweep a real recipient out of
+    # the recipient-exhaustion duty. Steer to out_of_scope or excluded — this
+    # constrains the LABEL, not the conclusion. Mirrors the pre-report check's
+    # engagement predicate (wrote_to / chat / roster), so single-target and
+    # batch dispositions both inherit it.
+    if tk == "correspondent" and rs == "noise":
+        from tools._gates._entities import entity_matches as _emx
+        tnorm = target_id.strip().lower()
+        crec = (getattr(idx, "correspondents", {}) or {}).get(tnorm) or {}
+        wrote_to = int(crec.get("to") or 0) > 0
+        chat = any("chat" in str(s) for s in (crec.get("sources") or []))
+        roster = any(_emx(tnorm, t) for t in (getattr(idx, "roster", {}) or {}))
+        if wrote_to or chat or roster:
+            why = ("the subject WROTE TO this address" if wrote_to
+                   else "this is a chat participant" if chat
+                   else "this matches the case roster")
+            return {"success": False, "gate": "typed_disposition",
+                    "detail_gate": "engaged_correspondent_not_noise",
+                    "error": (
+                        f"{target_id} is an ENGAGED correspondent ({why}) — reason=\"noise\" "
+                        f"asserts inbound spam/clutter, which cannot be true for an address "
+                        f"the subject engaged or the roster names, and would sweep a possible "
+                        f"recipient out of the exhaustion duty by mislabel. Settle it "
+                        f"out_of_scope (relevant channel, not this case) or excluded (evidence "
+                        f"rules it out), or reference it in a finding — do not label an engaged "
+                        f"correspondent noise.")}
+
+    # A near-alias correspondent (same domain, same-length local part, one
+    # character apart from another observed correspondent) cannot be EXCLUDED on
+    # a roster/senders listing. Excluding asserts it is uninvolved — for a
+    # near-twin of an engaged address that must rest on reading ITS messages,
+    # not an assumed typo. Require a body read (read.read_mail mode=messages)
+    # that queried this address among the cited evidence. Symmetric: the same
+    # read can equally prove the pair distinct.
+    if tk == "correspondent" and rs in ("excluded", "out_of_scope", "noise"):
+        tnorm = target_id.strip().lower()
+        corr = getattr(idx, "correspondents", {}) or {}
+
+        def _near(a, b):
+            if "@" not in a or "@" not in b:
+                return False
+            la, da = a.rsplit("@", 1)
+            lb, db = b.rsplit("@", 1)
+            return (da == db and len(la) == len(lb) and la != lb
+                    and sum(1 for x, y in zip(la, lb) if x != y) == 1)
+
+        if any(_near(tnorm, other) for other in corr if other != tnorm):
+            local = tnorm.split("@", 1)[0]
+            stems = {tnorm} | {local[i:i + 4] for i in range(max(1, len(local) - 3))}
+            body_read = any(
+                "read.read_mail" in (cmd := str((idx.by_call_id.get(c) or {}).get("cmd", "")).lower())
+                and "mode=messages" in cmd and any(s in cmd for s in stems)
+                for c in cids)
+            if not body_read:
+                return {
+                    "success": False, "gate": "typed_disposition",
+                    "detail_gate": "near_alias_needs_body_read",
+                    "error": (
+                        f"{target_id} is a near-alias (one character apart, same domain) "
+                        f"of another observed correspondent — settling it {rs!r} dismisses "
+                        f"it, which for a near-twin of an engaged address must rest on "
+                        f"reading ITS messages, not an assumed typo. Cite a read.read_mail "
+                        f"mode=messages call that queried {target_id} (field=body) among "
+                        f"evidence_call_ids, or resolve the pair with a finding — do not "
+                        f"dismiss it on a roster/senders listing.")}
+    cid = log.record_disposition(target_kind, target_id, reason, evidence_call_ids=cids,
+                                 note=note, window=window, input_call_ids=input_call_ids)
+    return {"success": True, "call_id": cid, "_trudi_call_id": cid,
+            "target_kind": target_kind.strip().lower(),
+            "target_norm": D.normalize_target(target_kind, target_id), "reason": rs}
+
+
+@mcp.tool()
 @output_safe
 def record_finding(
     description: str,
@@ -747,10 +1195,38 @@ def record_finding(
     tested_hypothesis_id: str = "",
     input_call_ids: list[int] | None = None,
     supporting_evidence: str = "",
+    supersedes: int = 0,
+    claim_kind: str = "",
+    category: str = "",
+    entities: list[str] | None = None,
+    channel: str = "",
+    window: dict | None = None,
+    act: str = "",
+    actor_kind: str = "",
+    actor: str = "",
+    principal: str = "",
+    recipients: list[str] | None = None,
+    scope: list[str] | None = None,
+    session_type: str = "",
+    threat_actor: str = "",
+    techniques: list[str] | None = None,
+    artifacts: list[str] | None = None,
+    session_binding_call_ids: list[int] | None = None,
+    transfer_call_ids: list[int] | None = None,
+    receipt_call_ids: list[int] | None = None,
+    rule_outs: list[dict] | None = None,
+    resolves: str = "",
+    answers_case_question: bool = False,
 ) -> dict:
     """
     Record a confirmed finding to the execution trace.
     confidence: CONFIRMED / LIKELY / SUSPECTED / UNCONFIRMED.
+    supersedes: call_id of an earlier finding this record replaces (e.g. re-tier
+                a LIKELY finding to CONFIRMED after new evidence earns a SUPPORTED
+                evaluate). The old entry is marked superseded; the report and
+                accuracy layer then count only this final tier. Runs the full
+                gate set, so an upward re-tier still needs its SUPPORTED
+                reason.evaluate_finding + citation.
     source: tool or artifact that produced the finding e.g. 'vol.psscan', 'ez.mftecmd'.
     linked_call_id: the _trudi_call_id value from the tool result that produced this
                     finding — enables judges to trace any finding back to its source
@@ -764,6 +1240,28 @@ def record_finding(
                     Omit it only to use the legacy path (those two reason calls
                     must precede the record). CONFIRMED still also needs a
                     SUPPORTED reason.evaluate_finding either way.
+    TYPED CLAIM (tools/_gates/_claims.py) — declare what the finding asserts;
+                    gates key ONLY on these fields, never on your wording.
+                    REQUIRED for CONFIRMED / LIKELY / UNCONFIRMED (SUSPECTED optional):
+                      claim_kind  'positive'|'negative'
+                      category    'exfil'|'logon_auth'|'identity'|'persistence'|
+                                  'device_initial_access'|'execution'|'delivery'|
+                                  'destruction'|'attribution'|'other'
+                      act         'presence'|'execution'|'timeline'|'account_creation'|
+                                  'persistence_install'|'logon'|'egress'|'delivery'|
+                                  'possession'|'c2'|'lateral_movement'|'credential_access'|
+                                  'destruction'|'attribution'|'other'
+                    Conditional: act='egress' ⇒ channel ('removable'|'cloud'|'email'|
+                    'web'|'ftp'|'chat'|'c2'|'other') and transfer_call_ids (the
+                    transfer artifact entries); act in delivery/possession ⇒
+                    recipients (+ receipt_call_ids); actor_kind='human' ⇒ actor;
+                    principal ⇒ actor_kind human|unknown and session_binding_call_ids
+                    (the logon/session artifact entries binding it); a negative in
+                    logon_auth / device_initial_access ⇒ window {start,end}.
+                    Optional: entities, scope (sources searched, negatives),
+                    session_type, threat_actor, techniques, artifacts, rule_outs
+                    [{what, call_ids}], resolves ('confirmed'|'refuted' for
+                    tested_hypothesis_id), answers_case_question.
     input_call_ids: N:M upstream lineage. If omitted, it is auto-inferred from the
                     recent tool/reason results (stamped lineage_inferred); pass it
                     explicitly for precise provenance.
@@ -780,9 +1278,15 @@ def record_finding(
         exist inside an active DAIR-directed investigation.
       - `lineage_required`: findings must cite upstream trace call IDs, either
         explicitly or via the auto-inferred recent-input path.
+      - `tier_contract`: the tier a CONFIRMED/LIKELY finding asks for must be
+        reachable from the ARTIFACT CLASSES its cited calls carry
+        (data/fk/tiering.yaml — deterministic, never the reviewer's opinion).
+        The refusal carries `tier_achievable` and `tier_path` (the missing
+        classes and the tools that produce them); a success carries
+        `tier_achievable` and, when you under-asked, `tier_headroom`.
       - `evidence_strength`: confidence tier, linked evidence, ATT&CK IDs,
-        SUPPORTED evaluation for CONFIRMED findings, citation support for
-        CONFIRMED/LIKELY findings, and required hypothesis review.
+        SUPPORTED fact-check evaluation for CONFIRMED/LIKELY findings, citation
+        support for CONFIRMED/LIKELY findings, and required hypothesis review.
       - `completeness`: absence/unknown claims must not rely on truncated output,
         and case-inverting absence claims require a complete source manifest plus
         coverage over the claimed time window.
@@ -795,17 +1299,28 @@ def record_finding(
     from core.execution_log import log
     from tools._gates import GateContext, run_gates
 
-    # R4: auto-infer lineage when the agent omits it. The trace already knows
-    # which recent tool/reason results preceded this finding — hand-typing the
-    # foreign keys is a footgun (out-of-order / fabricated cids were a recurring
-    # refusal). Inference is recorded as lineage_inferred so the audit shows the
-    # edge was derived, not declared. Explicit input_call_ids always win.
+    # Auto-infer lineage when the agent omits it. The trace already knows which
+    # recent tool/reason results preceded this finding, and hand-typing the
+    # foreign keys is a footgun (out-of-order / fabricated cids). Inference is
+    # recorded as lineage_inferred so the audit shows the edge was derived, not
+    # declared. Explicit input_call_ids always win.
     lineage_inferred = False
     if not input_call_ids:
         _auto = _infer_input_call_ids(log.last_n_window(30))
         if _auto:
             input_call_ids = _auto
             lineage_inferred = True
+
+    # Typed claim — normalized once; gates key on this declared structure only.
+    from tools._gates._claims import normalize_claim, declared as _claim_declared
+    claim = normalize_claim(
+        claim_kind=claim_kind, category=category, entities=entities, channel=channel,
+        window=window, act=act, actor_kind=actor_kind, actor=actor, principal=principal,
+        recipients=recipients, scope=scope, session_type=session_type,
+        threat_actor=threat_actor, techniques=techniques, artifacts=artifacts,
+        session_binding_call_ids=session_binding_call_ids,
+        transfer_call_ids=transfer_call_ids, receipt_call_ids=receipt_call_ids,
+        rule_outs=rule_outs, resolves=resolves, answers_case_question=answers_case_question)
 
     ctx = GateContext(
         description=description,
@@ -819,10 +1334,32 @@ def record_finding(
         window=log.last_n_window(30),
         input_call_ids=list(input_call_ids) if input_call_ids else [],
         supporting_evidence=supporting_evidence or "",
+        claim=claim,
     )
 
     failure = run_gates(ctx)
     if failure is not None:
+        # Refusal ledger — the single write site (record_agent_message delegates
+        # here, so batched findings get exactly one entry each). The
+        # refusal_rewording gate reads these to refuse a re-record that only
+        # changed the wording.
+        try:
+            log.record_finding_refused(
+                description, ctx.tier, failure.get("gate", ""),
+                failure.get("detail_gate", ""),
+                claim=claim if _claim_declared(claim) else None,
+                input_call_ids=ctx.input_call_ids or None,
+                cited_call_ids=[*(ctx.input_call_ids or []),
+                                *([linked_call_id] if linked_call_id else [])],
+                extra={k: failure[k] for k in ("evaluate_verdict", "evaluate_match",
+                                               "claim_mismatch", "tier_achievable",
+                                               "tier_path", "artifact_classes",
+                                               "missing") if k in failure},
+                tested_hypothesis_id=tested_hypothesis_id or "",
+                error=str(failure.get("error") or ""),
+            )
+        except Exception:
+            pass
         return failure
 
     # Carry every gate-matched call_id onto the finding entry as an explicit
@@ -846,13 +1383,36 @@ def record_finding(
         gate_metadata["citation_mode"] = ctx.citation_mode
     if lineage_inferred:
         gate_metadata["lineage_inferred"] = True
+    if ctx.tier_achievable:
+        # Deterministic tier contract: what the cited artifact classes
+        # reach, stamped for the audit whatever tier was recorded.
+        gate_metadata["tier_achievable"] = ctx.tier_achievable
+        gate_metadata["tier_rule"] = ctx.tier_rule
+        gate_metadata["artifact_classes"] = ctx.artifact_classes
 
     log.record_finding(
         description, confidence, source, linked_call_id, tested_hypothesis_id,
         gate_metadata=gate_metadata,
         input_call_ids=input_call_ids,
+        supersedes=supersedes,
+        supporting_evidence=supporting_evidence or "",
+        claim=claim if _claim_declared(claim) else None,
     )
     result = {"success": True, "description": description, "confidence": confidence}
+    if ctx.tier_achievable:
+        from tools._gates._tiering import _RANK as _TRANK
+        result["tier_achievable"] = ctx.tier_achievable
+        result["artifact_classes"] = ctx.artifact_classes
+        if _TRANK.get(ctx.tier_achievable, 0) > _TRANK.get(ctx.tier, 0):
+            result["tier_headroom"] = (
+                f"tier–evidence concordance: recorded {ctx.tier}; the cited artifact "
+                f"classes reach {ctx.tier_achievable} (rule {ctx.tier_rule}). The tier "
+                f"must match the evidence in both directions — re-examine and either "
+                f"re-record at {ctx.tier_achievable} (supersedes=<this call_id>) or "
+                f"leave a documented reason. This is arithmetic, not an instruction "
+                f"to strengthen a conclusion.")
+    if supersedes:
+        result["supersedes"] = int(supersedes)
     if ctx.validated_techniques:
         result["validated_techniques"] = ctx.validated_techniques
     if gate_metadata:
@@ -860,6 +1420,40 @@ def record_finding(
             k: v for k, v in gate_metadata.items()
             if k.startswith("gated_by_")
         }
+    # warn-early: FK-driven corroboration completeness. Non-blocking advisory on
+    # a valid CONFIRMED/LIKELY finding whose grounding artifact's corroborators
+    # (per the FK sheet) never ran — a nudge while collection is still possible.
+    # The hard block is reason.pre_report_check. Fail-open: never breaks a finding.
+    try:
+        from tools._gates.fk_corroboration import note_for_finding
+        note = note_for_finding(
+            tier=ctx.tier, description=description, source=source, idx=ctx.idx, claim=claim)
+        if note:
+            result["completeness_note"] = note
+    except Exception:
+        pass
+    # warn-early: atomicity advisory. Non-blocking nudge when a CONFIRMED/LIKELY
+    # description bundles multiple distinct claims, which would share one
+    # linked_call_id and lose per-claim traceability. Fail-open.
+    if ctx.tier in {"CONFIRMED", "LIKELY"}:
+        try:
+            from tools._gates.atomicity import atomicity_note
+            anote = atomicity_note(description)
+            if anote:
+                result["atomicity_note"] = anote
+        except Exception:
+            pass
+    # warn-early: lineage content check. Non-blocking nudge when a finding
+    # quotes concrete artifact values that appear in NONE of its cited call_ids'
+    # evidence — a mis-transcribed call_id that lineage_required cannot catch
+    # (it only checks the id exists). Fail-open.
+    try:
+        from tools._gates.lineage_content import lineage_content_note
+        lnote = lineage_content_note(ctx)
+        if lnote:
+            result["lineage_content_note"] = lnote
+    except Exception:
+        pass
     return result
 
 
@@ -888,6 +1482,14 @@ def record_self_correction(
                     (the calls whose results made you change your mind).
     """
     from core.execution_log import log
+    if trigger == "dair_max_pass_cap":
+        # The cap may not override OPEN verification challenges (operator
+        # decision): refuse while the latest dair_assess still carries a
+        # verified:null challenge whose challenge_method has not run.
+        from tools._gates.max_pass_cap import max_pass_cap_gate
+        refusal = max_pass_cap_gate(log)
+        if refusal is not None:
+            return refusal
     cid = log.record_self_correction(
         trigger, prior_belief, new_belief, evidence, linked_call_id,
         input_call_ids=input_call_ids,
@@ -950,9 +1552,106 @@ def write_final_report(output_path: str, content: str) -> dict:
 
     assert_output_safe(output_path)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    from core.execution_log import log
+    # H-6: synthesize blockers that pre_report_check demoted to warnings (round
+    # 2+ with no new evidence) are carried into the report verbatim, so the
+    # reader sees what the reviewer could not settle. Appended server-side —
+    # the agent cannot leave them out.
+    limitations: list = []
+    try:
+        for e in reversed(log._entries):
+            if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
+                limitations = list(e.get("synthesize_blockers_unresolved") or [])
+                break
+    except Exception:
+        limitations = []
+    # The evidence-registry inventory (correspondents / identities /
+    # surfaced principals with their status) is rendered into the report
+    # server-side — everything the checks did not require a disposition for
+    # is still SHOWN, so relevance scoping never hides an identity.
+    inventory: dict = {}
+    lifecycle: dict = {}
+    try:
+        for e in reversed(log._entries):
+            if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
+                inventory = dict(e.get("registry_inventory") or {})
+                lifecycle = dict(e.get("lifecycle_coverage") or {})
+                break
+    except Exception:
+        inventory = {}
+
+    # Attack-lifecycle coverage table — per phase, whether the
+    # investigation established it, ruled it out, examined its sources, or never
+    # looked. Rendered so every report states its own coverage of the five DFIR
+    # goals (never a demand that an attack exist).
+    if lifecycle and "attack-lifecycle coverage" not in content.lower():
+        _order = ["persistence", "privilege_escalation", "lateral_movement", "execution", "exfil"]
+        _lbl = {"established": "established", "ruled_out": "ruled out",
+                "examined": "examined (no verdict)", "not_examined": "NOT examined"}
+        _sec = ["\n\n## Attack-lifecycle coverage",
+                "Coverage of the five DFIR goals for this investigation. A phase is covered "
+                "by establishing it, ruling it out with a grounded negative, or examining its "
+                "artifact sources; `NOT examined` marks a blind spot.",
+                "\n| phase | status | sources examined |\n|---|---|---|"]
+        for _pid in _order:
+            _c = lifecycle.get(_pid)
+            if not _c:
+                continue
+            _sec.append(f"| {_c.get('label', _pid)} | {_lbl.get(_c.get('status'), _c.get('status',''))} "
+                        f"| {len(_c.get('sources_examined') or [])}/{_c.get('sources_total', 0)} |")
+        content = content.rstrip() + "\n".join(_sec) + "\n"
+    inv_rows = 0
+    if inventory and "registry inventory" not in content.lower():
+        sec = ["\n\n## Evidence registry inventory",
+               "Every correspondent, identity and surfaced principal the parsed stores and "
+               "the investigation registered, with how it was settled. Items marked "
+               "`inventory` matched no case roster, were not engaged and were not forced — "
+               "they were not required to be dispositioned and are listed for completeness."]
+        corr = inventory.get("correspondents") or []
+        if corr:
+            sec.append("\n### Correspondents (mail / chat stores)\n")
+            sec.append("| address | from | to | sources | status |\n|---|---|---|---|---|")
+            for r in corr:
+                sec.append(f"| {r.get('address','')} | {r.get('from', '')} | {r.get('to', '')} | "
+                           f"{', '.join(r.get('sources') or [])} | {r.get('status','')} |")
+                inv_rows += 1
+        ids = inventory.get("identities") or []
+        if ids:
+            sec.append("\n### Identities (PCAP / structured extractors)\n")
+            sec.append("| identity | first call | status |\n|---|---|---|")
+            for r in ids:
+                sec.append(f"| {r.get('value','')} | {r.get('first_cid','')} | {r.get('status','')} |")
+                inv_rows += 1
+        prs = inventory.get("principals") or []
+        if prs:
+            sec.append("\n### Surfaced principals\n")
+            sec.append("| principal | how | status |\n|---|---|---|")
+            for r in prs:
+                sec.append(f"| {r.get('value','')} | {r.get('how','')} | {r.get('status','')} |")
+                inv_rows += 1
+        leads = inventory.get("alias_leads") or []
+        if leads:
+            sec.append("\n### Near-alias correspondent pairs (unresolved — one character apart)\n")
+            sec.append("| address A | address B |\n|---|---|")
+            for r in leads:
+                sec.append(f"| {r.get('a','')} | {r.get('b','')} |")
+                inv_rows += 1
+        roster = inventory.get("roster") or []
+        if roster:
+            sec.append(f"\nCase roster terms used for relevance: {len(roster)} "
+                       f"(derived by misc.knowns_pattern_generate).")
+        if inv_rows:
+            content = content.rstrip() + "\n".join(sec) + "\n"
+    appended = 0
+    if limitations and "reviewer limitations" not in content.lower():
+        content = (content.rstrip() + "\n\n## Reviewer limitations (unresolved synthesize blockers)\n"
+                   "The adversarial reviewer raised the following points that could not be settled "
+                   "with the evidence in scope; the recorded tiers already reflect the evaluate "
+                   "reviewer's caps.\n"
+                   + "\n".join(f"- {b}" for b in limitations) + "\n")
+        appended = len(limitations)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(content)
-    from core.execution_log import log
     cid = log.record_tool_call(
         cmd=f"<py>:misc_write_final_report {output_path}",
         success=True,
@@ -960,10 +1659,22 @@ def write_final_report(output_path: str, content: str) -> dict:
         retries=0,
         exit_code=0,
     )
+    if limitations or inv_rows:
+        try:
+            # appended = the server added the section; present = the agent
+            # already wrote one (the typed list is still on the pre_report entry).
+            log.annotate_tool_call(cid, limitations_appended=appended or None,
+                                   limitations_present=len(limitations) or None,
+                                   inventory_rows_appended=inv_rows or None)
+        except Exception:
+            pass
     return {
         "success": True,
         "output_path": output_path,
         "bytes_written": len(content.encode("utf-8")),
+        "limitations_appended": appended,
+        "limitations_present": len(limitations),
+        "inventory_rows_appended": inv_rows,
         "_trudi_call_id": cid,
     }
 
@@ -974,6 +1685,7 @@ def record_agent_message(
     content: str,
     input_call_ids: list[int] | None = None,
     findings: list[dict] | None = None,
+    dispositions: list[dict] | None = None,
 ) -> dict:
     """
     Log the orchestrator's analysis or interpretation to the execution trace,
@@ -996,10 +1708,46 @@ def record_agent_message(
     Use the `findings=[…]` parameter whenever your analysis contains factual claims
     (CONFIRMED behavior, attribution, attacker tooling, exfiltration channel, etc.).
     Prose-only analysis is for reasoning and direction; facts go through `findings`.
+
+    dispositions: optional list to settle many leads at once — one round-trip
+              instead of one misc.record_disposition call each. Each is
+              {target_kind, target_id, reason, evidence_call_ids?, note?, window?}.
+              Every entry runs the SAME per-target gates as misc.record_disposition
+              (nothing is loosened); per-entry results and any_disposition_refused
+              come back. Use it to clear a batch of inapplicable tools or inventory
+              correspondents without a call-per-target grind.
     """
     from core.execution_log import log
     cid = log.record_agent_message(content, input_call_ids)
     result: dict = {"success": True, "call_id": cid}
+
+    # Batch dispositions (mirrors findings=[…]) — one round-trip to settle many
+    # tools/correspondents/sources instead of one call each. Each entry runs the
+    # SAME per-target gates as misc.record_disposition (relevance, near-alias,
+    # evidence-required, injector rule-out), so nothing is loosened; per-entry
+    # results come back so the agent can react to any refusal.
+    if dispositions:
+        disp_out: list[dict] = []
+        any_disp_failed = False
+        for d in dispositions:
+            d_cids = d.get("input_call_ids")
+            if d_cids is None:
+                d_cids = input_call_ids
+            r = record_disposition(
+                target_kind=d.get("target_kind", "") or "",
+                target_id=d.get("target_id", "") or "",
+                reason=d.get("reason", "") or "",
+                evidence_call_ids=d.get("evidence_call_ids") or None,
+                note=d.get("note", "") or "",
+                window=d.get("window") or None,
+                input_call_ids=d_cids,
+            )
+            disp_out.append(r)
+            if not r.get("success"):
+                any_disp_failed = True
+        result["dispositions"] = disp_out
+        result["any_disposition_refused"] = any_disp_failed
+
     if not findings:
         return result
 
@@ -1020,6 +1768,32 @@ def record_agent_message(
             linked_call_id=int(f.get("linked_call_id") or 0),
             tested_hypothesis_id=f.get("tested_hypothesis_id", "") or "",
             input_call_ids=f_input_cids,
+            # Forward supporting_evidence so batched findings can hit the
+            # deterministic evidence fast path.
+            supporting_evidence=f.get("supporting_evidence", "") or "",
+            supersedes=int(f.get("supersedes") or 0),
+            # Typed-claim fields — batched findings must not silently lose them.
+            claim_kind=f.get("claim_kind", "") or "",
+            category=f.get("category", "") or "",
+            entities=f.get("entities") or [],
+            channel=f.get("channel", "") or "",
+            window=f.get("window") or {},
+            act=f.get("act", "") or "",
+            actor_kind=f.get("actor_kind", "") or "",
+            actor=f.get("actor", "") or "",
+            principal=f.get("principal", "") or "",
+            recipients=f.get("recipients") or [],
+            scope=f.get("scope") or [],
+            session_type=f.get("session_type", "") or "",
+            threat_actor=f.get("threat_actor", "") or "",
+            techniques=f.get("techniques") or [],
+            artifacts=f.get("artifacts") or [],
+            session_binding_call_ids=f.get("session_binding_call_ids") or [],
+            transfer_call_ids=f.get("transfer_call_ids") or [],
+            receipt_call_ids=f.get("receipt_call_ids") or [],
+            rule_outs=f.get("rule_outs") or [],
+            resolves=f.get("resolves", "") or "",
+            answers_case_question=bool(f.get("answers_case_question")),
         )
         findings_out.append(r)
         if not r.get("success"):
@@ -1100,7 +1874,20 @@ def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     if not binary:
         return {"success": False, "error": "pffexport not installed — apt install pff-tools"}
     os.makedirs(output_dir, exist_ok=True)
-    return run([binary, "-m", mode, "-t", output_dir, pst_path], timeout=1800)
+    # -q: quiet — suppress the progress banner from stdout. pffexport APPENDS
+    # ".export" to the -t target, so the real output tree is
+    # `<output_dir>.export/` (a call reporting output_dir left it empty and the
+    # agent read "no mail" — a false-absence episode). Surface the true path
+    # and a read hint so read.read_mail is pointed at the tree that exists.
+    r = run([binary, "-q", "-m", mode, "-t", output_dir, pst_path], timeout=1800)
+    if isinstance(r, dict) and r.get("success"):
+        actual = output_dir + ".export"
+        r["output_path"] = actual if os.path.isdir(actual) else output_dir
+        r["layout"] = "pffexport_items"
+        r["read_hint"] = (f"read.read_mail over {r['output_path']} — pffexport item tree "
+                          f"(MessageNNNNN/ dirs), consumed natively; or use "
+                          f"misc.readpst_extract for an mbox.")
+    return r
 
 
 @mcp.tool()
@@ -1115,7 +1902,9 @@ def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) ->
     if not binary:
         return {"success": False, "error": "readpst not installed — sudo apt install pst-utils"}
     os.makedirs(output_dir, exist_ok=True)
-    cmd = [binary, "-o", output_dir]
+    # -q: quiet — only error messages on stdout (progress banner otherwise
+    # dominates the trace excerpt; converted mail is written under output_dir).
+    cmd = [binary, "-q", "-o", output_dir]
     if not format_mbox:
         cmd.append("-e")
     cmd.append(pst_path)
@@ -1248,11 +2037,12 @@ def mraptor_scan(office_path: str) -> dict:
     Faster than full olevba — returns SUSPICIOUS or CLEAN with the trigger
     pattern (auto-exec, write to system, execute external command, etc.).
     """
+    from tools._exit_codes import policy
     binary = _bin_or_warn("mraptor") or _bin_or_warn("mraptor3")
     if not binary:
         return {"success": False, "error":
                 "mraptor not installed — pip install oletools"}
-    return run([binary, office_path], timeout=120)
+    return run([binary, office_path], timeout=120, **policy("mraptor"))
 
 
 # ── Parallel batch execution ────────────────────────────────────────────────
@@ -1551,5 +2341,26 @@ def knowns_pattern_generate(
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2)
         result["output_path"] = output_path
+
+    # Self-log and stamp the roster server-side: the knowns the
+    # operator declared become the relevance model of the pre-report
+    # exhaustion checks (a registry identity that matches the roster is
+    # mandatory; one that matches nothing is report inventory).
+    from core.executor import _log_tool
+    tc = {"success": True, "stdout": f"{len(all_terms)} terms from {len(reference_set or [])} knowns ({dt})",
+          "stderr": "", "exit_code": 0, "truncated": False, "retries": 0,
+          "elapsed_seconds": 0.0,
+          "cmd": f"misc.knowns_pattern_generate {dt} n={len(reference_set or [])}"}
+    _log_tool(tc)
+    cid = tc.get("_trudi_call_id")
+    if cid:
+        result["_trudi_call_id"] = cid
+        try:
+            from core.execution_log import log as _elog
+            _elog.annotate_tool_call(cid, knowns_roster=list(all_terms)[:2000],
+                                     knowns_reference_set=[str(x) for x in (reference_set or [])][:500],
+                                     knowns_derivation=dt)
+        except Exception:
+            pass
 
     return result

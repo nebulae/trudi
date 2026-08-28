@@ -1,37 +1,42 @@
-"""Gate: findings naming a threat-actor group (G\\d{4}, APT\\d+) require a
-backing attribute_actors call in the trace window with that group at the
-requested confidence band or higher.
+"""Gate: a CONFIRMED/LIKELY finding that names a threat-actor group must
+declare it (claim.threat_actor) and have a backing attribute_actors call in the
+trace window.
 
-Forces the attribution claim to flow through the pipeline rather than being
-asserted from intuition. Mirrors the mitre_technique_validation gate's
-philosophy: if you cite a specific entity, the entity must have been
-validated by an MCP tool.
+The G\\d{4} / APT\\d+ / FIN\\d+ regex is kept as a VALIDATOR over a structured
+token space: a group id in the prose without claim.threat_actor is refused
+naming the field (declare it, don't hide it); the declared field is what
+engages the attribute_actors requirement.
 """
 import re
 from typing import Optional
 
-# Match G0001-G9999 or "APT" + 1-3 digits or "FIN" + digits / common alias forms.
-_ACTOR_RE = re.compile(
-    r"\b(?:G\d{4}|APT\s*\d{1,3}|FIN\s*\d{1,3})\b",
-    re.IGNORECASE,
-)
+from ._claims import FIELD_HELP
 
-# Band ranking — same direction as tier rank (higher = stronger claim).
-_BAND_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "INSUFFICIENT": 0}
+_ACTOR_RE = re.compile(r"\b(?:G\d{4}|APT\s*\d{1,3}|FIN\s*\d{1,3})\b", re.IGNORECASE)
 
 
 def check(ctx) -> Optional[dict]:
-    description = ctx.description or ""
-    matches = _ACTOR_RE.findall(description)
-    if not matches:
-        return None
-    # Only enforce for CONFIRMED/LIKELY findings — UNCONFIRMED actor
-    # mentions in narrative findings are acceptable as hypotheses.
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
-
-    # Look for a recent attribute_actors call. Reach into the trace via
-    # ctx.idx since attribution doesn't fit the reason_call type.
+    claim = getattr(ctx, "claim", None) or {}
+    declared = str(claim.get("threat_actor") or "").strip()
+    in_prose = sorted(set(_ACTOR_RE.findall(ctx.description or "")))
+    if not declared and not in_prose:
+        return None
+    if not declared:
+        return {
+            "success": False,
+            "error": (
+                f"Finding names a threat actor ({', '.join(in_prose)}) without declaring "
+                f"it — pass {FIELD_HELP['threat_actor']}. The declared field, not the "
+                f"wording, engages the attribution requirement."
+            ),
+            "description": ctx.description,
+            "confidence": ctx.confidence,
+            "gate": "attribution_required",
+            "missing": ["threat_actor"],
+            "actor_tokens": in_prose,
+        }
     recent_attribution = None
     for e in reversed(ctx.window):
         if e.get("type") != "tool_call":
@@ -40,20 +45,18 @@ def check(ctx) -> Optional[dict]:
         if "attribute_actors" in cmd or "attribution" in cmd.lower():
             recent_attribution = e
             break
-
     if recent_attribution is None:
         return {
             "success": False,
             "error": (
-                f"Finding cites a threat actor ({', '.join(set(matches))}) but no "
-                f"attribute_actors call appears in the last 30 trace entries. "
-                f"Call attribution.attribute_actors() and ensure the named group "
-                f"appears in the top candidates at MEDIUM or HIGH confidence "
-                f"before recording an attribution finding."
+                f"Finding attributes to threat actor {declared!r} but no attribute_actors "
+                f"call appears in the last 30 trace entries. Call "
+                f"attribution.attribute_actors() and ensure the named group appears in "
+                f"the top candidates at MEDIUM or HIGH confidence before recording."
             ),
             "description": ctx.description,
             "confidence": ctx.confidence,
             "gate": "attribution_required",
-            "actor_tokens": sorted(set(matches)),
+            "actor_tokens": [declared],
         }
     return None

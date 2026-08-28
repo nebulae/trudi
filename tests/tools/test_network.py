@@ -128,10 +128,10 @@ class TestPcapIdentityTimeline:
             "success": True,
             "stdout": (
                 "2008-07-21 23:01:01.000000 IP 192.168.15.4.35796 > 74.125.19.104.80: Flags [P.]\n"
-                "GET /calendar/render?gausr=jcoachj%40gmail.com HTTP/1.1\r\n"
+                "GET /calendar/render?gausr=jcoachj%40gmail.example HTTP/1.1\r\n"
                 "Host: www.google.com\r\n"
                 "User-Agent: Firefox\r\n"
-                "Cookie: OL_SESSION=jcoachj%40gmail.com-cal; gmailchat=jcoachj%40gmail.com/475090\r\n\r\n"
+                "Cookie: OL_SESSION=jcoachj%40gmail.example-cal; gmailchat=jcoachj%40gmail.example/475090\r\n\r\n"
                 "2008-07-21 23:09:58.000000 IP 192.168.15.4.36518 > 66.163.181.179.5050: Flags [P.]\n"
                 "YMSG....1..amy789smith..216..Amy..254..Smith\n"
             ),
@@ -149,7 +149,7 @@ class TestPcapIdentityTimeline:
 
         assert r["success"] is True
         assert "Johnny Coach" in r["summary"]["matched_by_person"]
-        assert "jcoachj@gmail.com" in r["summary"]["matched_by_person"]["Johnny Coach"]
+        assert "jcoachj@gmail.example" in r["summary"]["matched_by_person"]["Johnny Coach"]
         assert "Amy Smith" in r["summary"]["matched_by_person"]
         johnny = [
             row for row in r["identities"]
@@ -168,7 +168,7 @@ class TestPcapIdentityTimeline:
             "success": True,
             "stdout": (
                 "2008-07-21 23:01:01.000000 IP 192.168.15.4.35796 > 74.125.19.104.80: Flags [P.]\n"
-                "GET /calendar/render?gausr=jcoachj%40gmail.com HTTP/1.1\r\n"
+                "GET /calendar/render?gausr=jcoachj%40gmail.example HTTP/1.1\r\n"
                 "Host: www.google.com\r\n\r\n"
             ),
             "stderr": "",

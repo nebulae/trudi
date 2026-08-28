@@ -30,3 +30,5 @@ mft*.json
 # *_trace.json / *.log / *.csv ignores above). Evidence is never committed.
 !cases/**
 cases/**/evidence/
+# Per-case exports are run output (carved/extracted files), never part of the bundle.
+cases/*/exports/
