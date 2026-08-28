@@ -141,3 +141,44 @@ class TestEnrichRotationCannotDefeatGate:
         import core.middleware as MM
         src = inspect.getsource(MM.NarrationMiddleware.on_call_tool)
         assert "BEFORE enrich" in src
+
+
+class TestPollAdvisory:
+    """job_status busy-wait: async carves free the agent to work while the
+    carve runs, but a literal model busy-polls (observed: 86 consecutive
+    job_status calls). Advisory-only — never blocks (polling is legitimate and
+    the loop self-terminates when the job finishes)."""
+
+    def _reset(self, monkeypatch):
+        monkeypatch.setattr(M, "_poll_run", {"count": 0})
+        monkeypatch.setattr(M, "POLL_ADVISORY_AFTER", 2)
+
+    RUNNING = {"success": True, "status": "running",
+               "output_files_so_far": 900, "elapsed_seconds": 120.0}
+
+    def test_first_polls_silent_then_advises(self, monkeypatch):
+        self._reset(monkeypatch)
+        assert M._note_poll_and_advise(dict(self.RUNNING)) == ""   # 1
+        assert M._note_poll_and_advise(dict(self.RUNNING)) == ""   # 2
+        msg = M._note_poll_and_advise(dict(self.RUNNING))          # 3
+        assert "POLLING LOOP" in msg and "dair.dair_assess" in msg
+
+    def test_finished_job_never_advises(self, monkeypatch):
+        self._reset(monkeypatch)
+        for _ in range(5):
+            M._note_poll_and_advise(dict(self.RUNNING))
+        done = {"success": True, "status": "finished", "output_files": 1673}
+        assert M._note_poll_and_advise(done) == ""
+
+    def test_real_tool_call_resets_the_run(self, monkeypatch):
+        self._reset(monkeypatch)
+        for _ in range(4):
+            M._note_poll_and_advise(dict(self.RUNNING))
+        M._reset_poll_run()                     # a net.* call happened
+        assert M._note_poll_and_advise(dict(self.RUNNING)) == ""   # count back to 1
+
+    def test_fail_open(self, monkeypatch):
+        self._reset(monkeypatch)
+        # non-dict payload must not raise
+        for _ in range(3):
+            assert M._note_poll_and_advise(None) == ""

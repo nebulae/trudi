@@ -299,6 +299,49 @@ def _repeat_update(key: str, tool_name: str, payload: dict) -> str:
         return ""
 
 
+# ── Consecutive-poll advisory (job_status busy-wait) ────────────────────────
+# Async carve jobs exist so the agent keeps investigating while the carve runs
+# — job_status is exempt from every gate so polling is always allowed. But a
+# literal model treats a running job as a blocking wait and busy-polls
+# (observed live: 86 consecutive job_status calls, nothing else). This advisory
+# rides the job_status result after a few back-to-back polls and tells the
+# model to do OTHER work between polls. Never blocks — the loop self-terminates
+# when the carve finishes, and blocking a poll could strand the model.
+POLL_ADVISORY_AFTER = int(os.environ.get("TRUDI_POLL_ADVISORY_AFTER") or "2")
+
+# consecutive job_status calls with no intervening real tool call
+_poll_run = {"count": 0}
+
+
+def _note_poll_and_advise(payload: dict) -> str:
+    """Called on a job_status result. Returns an advisory once the model has
+    polled several times in a row without doing other work."""
+    try:
+        _poll_run["count"] += 1
+        n = _poll_run["count"]
+        if n <= POLL_ADVISORY_AFTER:
+            return ""
+        if not isinstance(payload, dict) or payload.get("status") != "running":
+            return ""
+        files = payload.get("output_files_so_far", "?")
+        secs = payload.get("elapsed_seconds", "?")
+        return (
+            f"POLLING LOOP: you have called job_status {n}x in a row with no "
+            f"other work — the carve is still running ({secs}s, {files} files) "
+            f"and polling does not speed it up. Do OTHER analysis NOW (query "
+            f"the http_session_inventory / ngrep patterns you have not tried, "
+            f"read.read_output on produced files, record findings, or call "
+            f"dair.dair_assess); poll job_status again only AFTER a real step. "
+            f"The finished result will be waiting."
+        )
+    except Exception:
+        return ""
+
+
+def _reset_poll_run() -> None:
+    _poll_run["count"] = 0
+
+
 def _apply_notices(payload: dict, notices: list) -> dict:
     for key, msg in notices:
         payload.setdefault(key, msg)
@@ -600,6 +643,9 @@ class NarrationMiddleware(Middleware):
         #    structured_content); enrich the structured dict and keep the text
         #    content block in sync so the client sees it either way.
         try:
+            _is_poll = tool_name.endswith("job_status")
+            if not _is_poll and tool_name not in DAIR_GATE_ALLOWLIST:
+                _reset_poll_run()   # a real tool call breaks a poll run
             from tools._enrich import enrich
             if isinstance(result, dict):
                 # Repeat-hash the RAW tool output, BEFORE enrich() decorates it
@@ -609,6 +655,10 @@ class NarrationMiddleware(Middleware):
                     rn = _repeat_update(repeat_key, tool_name, result)
                     if rn:
                         notices.append(("repeat_notice", rn))
+                if _is_poll:
+                    pn = _note_poll_and_advise(result)
+                    if pn:
+                        notices.append(("poll_advisory", pn))
                 result = _apply_notices(enrich(tool_name, result), notices)
             else:
                 sc = _result_payload(result)
@@ -617,6 +667,10 @@ class NarrationMiddleware(Middleware):
                         rn = _repeat_update(repeat_key, tool_name, dict(sc))
                         if rn:
                             notices.append(("repeat_notice", rn))
+                    if _is_poll:
+                        pn = _note_poll_and_advise(dict(sc))
+                        if pn:
+                            notices.append(("poll_advisory", pn))
                     enriched = _apply_notices(enrich(tool_name, dict(sc)), notices)
                     update = {"structured_content": enriched}
                     blocks = getattr(result, "content", None)
