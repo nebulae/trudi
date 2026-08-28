@@ -681,18 +681,15 @@ class TestProtocolViolationFlag:
         l.record_tool_call("vol.netscan", True, False, 0, 0)
         assert "protocol_violation" not in l._entries[1]
 
-    def test_tool_call_without_recent_dair_flagged_after_dair_aged_out(self, tmp_path):
-        # Once DAIR has engaged, a later tool_call with no dair in the 20-entry
-        # window IS flagged (the genuine "agent dropped DAIR mid-investigation").
+    def test_forensic_tool_in_report_phase_flagged(self, tmp_path):
+        # A forensic tool_call once DAIR moved to Report IS a protocol violation.
         l = ExecutionLog()
         l.configure("PV-002b", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        for _ in range(20):
-            l.record_reason_call("reason_hypothesize", True, "ok", {})
+        l.record_dair_call("Analyze", "", True, "Report", "", "push", "")
         l.record_tool_call("vol.netscan", True, False, 0, 0)
-        assert l._entries[-1].get("protocol_violation") == "no_active_dair_batch"
+        assert l._entries[-1].get("protocol_violation") == "forensic_tool_in_report_phase"
 
-    def test_tool_call_with_recent_dair_unflagged(self, tmp_path):
+    def test_tool_call_in_active_phase_unflagged(self, tmp_path):
         l = ExecutionLog()
         l.configure("PV-003", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
@@ -700,30 +697,25 @@ class TestProtocolViolationFlag:
         tc = [e for e in l._entries if e["type"] == "tool_call"][0]
         assert "protocol_violation" not in tc
 
-    def test_tool_call_beyond_20_entry_window_flagged(self, tmp_path):
+    def test_long_batch_in_active_phase_not_flagged(self, tmp_path):
+        # A long collection batch must NOT be flagged — the phase, not a window,
+        # is the authority.
         l = ExecutionLog()
         l.configure("PV-004", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        # 20 reason_calls push the dair_call out of the lookback window.
-        for _ in range(20):
+        l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
+        for _ in range(30):
             l.record_reason_call("reason_hypothesize", True, "ok", {})
-        l.record_tool_call("vol.psscan", True, False, 0, 0)
-        tc = [e for e in l._entries if e["type"] == "tool_call"][-1]
-        assert tc.get("protocol_violation") == "no_active_dair_batch"
+            l.record_tool_call("vol.psscan", True, False, 0, 0)
+        assert not any(e.get("protocol_violation") for e in l._entries)
 
     def test_markdown_renders_violation_marker(self, tmp_path):
         l = ExecutionLog()
         l.configure("PV-005", str(tmp_path / "trace.json"))
-        # DAIR engaged once, then aged out of the 20-entry window → the next
-        # tool_call is a real violation that the markdown must render. (Under
-        # R3b a tool_call before any dair is cold-start grace, not a violation.)
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        for _ in range(20):
-            l.record_reason_call("reason_hypothesize", True, "ok", {})
+        l.record_dair_call("Analyze", "", True, "Report", "", "push", "")
         l.record_tool_call("vol.netscan", True, False, 0, 0)
         md = l.to_markdown()
         assert "PROTOCOL_VIOLATION" in md
-        assert "no_active_dair_batch" in md
+        assert "report_phase" in md
 
     def test_markdown_no_violation_when_dair_recent(self, tmp_path):
         l = ExecutionLog()
@@ -1241,3 +1233,53 @@ class TestSharedCallIdCounter:
         assert last["call_id"] == 4, f"counter must continue past existing max; got {last['call_id']}"
 
 
+
+
+class TestToolCallSidecarFields:
+    @pytest.fixture
+    def log(self, tmp_path):
+        (tmp_path / "analysis").mkdir()
+        l = ExecutionLog()
+        l.configure("SIDE", str(tmp_path / "analysis" / "trace.json"))
+        return l
+
+    def test_output_path_and_gate_persisted(self, log):
+        cid = log.record_tool_call("<py>:misc_export_execution_log", False, False, 0, 1,
+                                   output_path="/x/analysis/out.csv", gate="pre_report_check_required",
+                                   exit_meaning="refused")
+        e = log._entries[-1]
+        assert e["call_id"] == cid
+        assert e["output_path"] == "/x/analysis/out.csv"
+        assert e["gate"] == "pre_report_check_required"
+        assert e["exit_meaning"] == "refused"
+
+    def test_sidecar_written_next_to_trace(self, log, tmp_path):
+        text = "a" * 2000
+        cid = log.record_tool_call("cmd", True, False, 0, 0, stdout_excerpt=text, stdout_full=text)
+        e = log._entries[-1]
+        assert e["stdout_excerpt"] == "a" * 600 and e["stdout_chars"] == 2000
+        assert e["stdout_path"] == str(tmp_path / "analysis" / ".tool_output" / f"{cid}.txt")
+        assert open(e["stdout_path"]).read() == text
+        assert log.stdout_sidecar_dir() == str(tmp_path / "analysis" / ".tool_output")
+
+    def test_excerpt_only_call_records_length_no_sidecar(self, log):
+        log.record_tool_call("cmd", True, False, 0, 0, stdout_excerpt="short")
+        e = log._entries[-1]
+        assert e["stdout_chars"] == 5 and "stdout_path" not in e
+
+    def test_sidecar_cap_marks_partial(self, log, monkeypatch):
+        import core.paths as cp
+        monkeypatch.setattr(cp, "STDOUT_SIDECAR_CAP", 1000)
+        text = "b" * 5000
+        log.record_tool_call("cmd", True, False, 0, 0, stdout_excerpt=text, stdout_full=text)
+        e = log._entries[-1]
+        assert e["stdout_partial"] is True and e["stdout_chars"] == 5000
+        assert len(open(e["stdout_path"]).read()) == 1000
+
+    def test_sidecar_failure_does_not_break_the_entry(self, log, monkeypatch):
+        monkeypatch.setattr(log, "stdout_sidecar_dir", lambda: "/proc/nonexistent/x")
+        text = "c" * 2000
+        cid = log.record_tool_call("cmd", True, False, 0, 0, stdout_excerpt=text, stdout_full=text)
+        e = log._entries[-1]
+        assert e["call_id"] == cid and "stdout_path" not in e
+        assert "stdout_sidecar_error" in e

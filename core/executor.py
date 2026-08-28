@@ -6,7 +6,8 @@ import shlex
 import time
 import asyncio
 from typing import Any
-from .paths import OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES, assert_output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT
+from .paths import (OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES, STDOUT_SIDECAR_CAP,
+                    assert_output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT)
 
 _TRUNCATION_FOOTER = (
     "\n[TRUNCATED — {n} lines omitted. Use a targeted follow-up query "
@@ -46,6 +47,18 @@ def _parse_stderr(raw: str) -> tuple[str, list[str]]:
     return "\n".join(errors)[:4096], progress[-20:]
 
 
+def _apply_exit_policy(result: dict, returncode: int,
+                       success_codes, exit_meanings) -> None:
+    """Map a returncode to success per the wrapper's declared policy
+    (default: only 0 succeeds) and stamp the tool-specific meaning."""
+    result["exit_code"] = returncode
+    codes = success_codes if success_codes is not None else frozenset({0})
+    result["success"] = returncode in codes
+    meaning = (exit_meanings or {}).get(returncode)
+    if meaning:
+        result["exit_meaning"] = meaning
+
+
 def _log_tool(result: dict) -> None:
     """Write a tool_call trace entry for the just-run command.
 
@@ -55,6 +68,13 @@ def _log_tool(result: dict) -> None:
     fabricated `_trudi_call_id: 0`. The middleware wraps the raise into a
     ToolError that the agent must read.
     """
+    # The complete stdout is persisted to the trace sidecar, never returned to
+    # the client (the agent-facing `stdout` keeps its caps). Pop the private
+    # keys BEFORE the trace write so a logging failure cannot leak them.
+    stdout_full = result.pop("_stdout_full", None)
+    result.pop("_stdout_chars", None)
+    if stdout_full is None:
+        stdout_full = result.get("stdout", "")
     try:
         from core.execution_log import log
         parent = [log._last_dair_cid] if log._last_dair_cid else None
@@ -69,6 +89,9 @@ def _log_tool(result: dict) -> None:
             stdout_excerpt=result.get("stdout", ""),
             timed_out=result.get("timed_out", False),
             input_call_ids=parent,
+            stdout_full=stdout_full,
+            output_path=result.get("output_path"),
+            exit_meaning=result.get("exit_meaning", ""),
         )
         result["_trudi_call_id"] = cid
     except Exception as e:
@@ -87,9 +110,15 @@ def run(
     env: dict[str, str] | None = None,
     cwd: str | None = None,
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
+    success_codes: frozenset[int] | None = None,
+    exit_meanings: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     """
     Execute a forensic tool command safely.
+
+    success_codes / exit_meanings: the wrapper's exit-code policy (see
+    tools/_exit_codes.py) for binaries whose non-zero exit is a result
+    (clamscan 1 = infected). Default: only 0 succeeds.
 
     Returns dict with keys: success, stdout, stderr, exit_code, truncated,
     cmd, retries, elapsed_seconds, progress_lines.
@@ -131,11 +160,14 @@ def run(
             env=env,
             cwd=cwd,
         )
-        result["exit_code"] = proc.returncode
-        result["success"] = proc.returncode == 0
+        _apply_exit_policy(result, proc.returncode, success_codes, exit_meanings)
 
         stdout = proc.stdout.decode("utf-8", errors="replace")
         stderr_raw = proc.stderr.decode("utf-8", errors="replace")
+        # Complete stdout goes to the trace sidecar (popped by _log_tool);
+        # the agent-facing copy below keeps the byte/line caps.
+        result["_stdout_full"] = stdout[:STDOUT_SIDECAR_CAP]
+        result["_stdout_chars"] = len(stdout)
 
         if len(stdout) > OUTPUT_CAP:
             stdout = stdout[:OUTPUT_CAP]
@@ -171,6 +203,8 @@ async def run_with_progress(
     timeout: int = VOL_TIMEOUT,
     output_dir: str | None = None,
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
+    success_codes: frozenset[int] | None = None,
+    exit_meanings: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     """
     Async variant of run() that streams stderr progress lines to ctx.report_progress().
@@ -276,6 +310,8 @@ async def run_with_progress(
         await proc.wait()
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
+        result["_stdout_full"] = stdout[:STDOUT_SIDECAR_CAP]
+        result["_stdout_chars"] = len(stdout)
         if len(stdout) > OUTPUT_CAP:
             stdout = stdout[:OUTPUT_CAP]
             result["truncated"] = True
@@ -285,8 +321,7 @@ async def run_with_progress(
                 result["truncated"] = True
 
         result["stdout"] = stdout
-        result["exit_code"] = proc.returncode
-        result["success"] = proc.returncode == 0
+        _apply_exit_policy(result, proc.returncode, success_codes, exit_meanings)
         result["stderr"], result["progress_lines"] = _parse_stderr("\n".join(stderr_buf))
 
     except Exception as e:
@@ -318,6 +353,8 @@ def run_with_output_file(
     needs_sudo: bool = False,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
+    success_codes: frozenset[int] | None = None,
+    exit_meanings: dict[int, str] | None = None,
 ) -> dict[str, Any]:
     """
     Execute a forensic tool with stdout redirected to output_path.
@@ -366,8 +403,7 @@ def run_with_output_file(
                 env=env,
                 cwd=cwd,
             )
-        result["exit_code"] = proc.returncode
-        result["success"] = proc.returncode == 0
+        _apply_exit_policy(result, proc.returncode, success_codes, exit_meanings)
         result["stdout"] = f"Output written to {output_path}"
         stderr_raw = proc.stderr.decode("utf-8", errors="replace")
         result["stderr"], result["progress_lines"] = _parse_stderr(stderr_raw)

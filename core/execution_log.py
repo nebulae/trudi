@@ -2,10 +2,12 @@
 import fcntl
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
 import datetime
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -13,9 +15,33 @@ from typing import Optional
 # exclusive lock around their read-merge-write cycles so they never lose
 # each other's entries to a race.
 _TRACE_LOCK_FILE = os.path.expanduser("~/.cache/trudi/hook.lock")
+# Durability knob: every flush fsyncs the trace (a crash must not lose an
+# entry — the audit trail is the product). Tests patch this False: on WSL2 an
+# fsync costs ~80 ms and the suite writes ~100k entries (the whole 11-minute
+# runtime was fsync + lock waits, not test logic).
+_TRACE_FSYNC = os.environ.get("TRUDI_TRACE_FSYNC", "1") != "0"
 # Shared call_id counter — single monotonic sequence across MCP server + hook
 # so call_ids are dense and reflect global write order.
 _CALL_ID_COUNTER_FILE = os.path.expanduser("~/.cache/trudi/call_id.counter")
+
+
+@contextmanager
+def _hook_flock():
+    """Exclusive flock on the shared hook.lock. EVERY writer of the shared
+    call-id counter or trace must hold it — the MCP server here, the
+    claude/hooks scripts on their side — so concurrent sessions can't rewind
+    the counter or trample each other's writes."""
+    os.makedirs(os.path.dirname(_TRACE_LOCK_FILE), exist_ok=True)
+    fp = open(_TRACE_LOCK_FILE, "w")
+    try:
+        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fp.close()
 
 
 def _scan_trace_max_cid(trace_path: str) -> int:
@@ -46,10 +72,7 @@ def _next_shared_call_id(trace_path: Optional[str] = None, in_memory_seq: int = 
     impossible by construction; the counter file becomes a fast-path *cache*,
     not a source of truth.
     """
-    os.makedirs(os.path.dirname(_TRACE_LOCK_FILE), exist_ok=True)
-    lock_fp = open(_TRACE_LOCK_FILE, "w")
-    try:
-        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+    with _hook_flock():
         # Read counter file (the cheap fast path)
         try:
             with open(_CALL_ID_COUNTER_FILE) as f:
@@ -74,12 +97,6 @@ def _next_shared_call_id(trace_path: Optional[str] = None, in_memory_seq: int = 
             json.dump({"next": n + 1}, f)
         os.replace(tmp, _CALL_ID_COUNTER_FILE)
         return n
-    finally:
-        try:
-            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
-        except OSError:
-            pass
-        lock_fp.close()
 
 # Written on every configure() so the singleton can auto-recover after a server restart.
 _SESSION_FILE = os.path.expanduser("~/.cache/trudi/session.json")
@@ -296,6 +313,24 @@ def _render_entries(case_id: str | None, entries: list[dict]) -> str:
                 lines.append(f"  - **revised:** {e['new_belief'][:300]}")
             if e.get("evidence"):
                 lines.append(f"  - **evidence:** {e['evidence'][:300]}")
+        elif t == "finding_refused":
+            gate = e.get("detail_gate") or e.get("gate") or ""
+            lines.append(f"\n- `{ts}` {prefix}**⛔ FINDING REFUSED** [{e.get('tier', '')}] "
+                         f"gate: `{gate}` — {(e.get('description') or '')[:200]}")
+        elif t == "disposition":
+            ev = e.get("evidence_call_ids") or []
+            ev_s = f" ← evidence #{', #'.join(str(c) for c in ev)}" if ev else ""
+            lines.append(f"- `{ts}` {prefix}**📌 DISPOSITION** {e.get('target_kind')}:"
+                         f"`{e.get('target_id')}` → {e.get('reason')}{ev_s}"
+                         + (f" — {e.get('note')[:200]}" if e.get("note") else ""))
+        elif t == "reason_evidence_fetch":
+            reqs = e.get("requests") or []
+            summary = "; ".join(
+                f"call {r.get('call_id')} '{str(r.get('query') or '')[:40]}' → "
+                f"{r.get('rows_returned', 0)} rows"
+                for r in reqs[:4])
+            lines.append(f"- `{ts}` {prefix}**🔎 EVIDENCE FETCH** for reason call "
+                         f"#{e.get('reason_call_id')}: {summary}")
         else:
             lines.append(f"- `{ts}` {prefix}**[UNKNOWN TYPE: {t}]** {json.dumps(e)[:120]}")
     return "\n".join(lines) + "\n"
@@ -311,10 +346,35 @@ class LogIndex:
     by_tool: dict[str, list[dict]] = field(default_factory=dict)
     findings_by_linked: dict[int, list[dict]] = field(default_factory=dict)
     hypotheses_by_id: dict[str, dict] = field(default_factory=dict)
+    # Evidence registries — built from server-stamped annotate_tool_call
+    # markers (observed_correspondents / observed_identities), which the agent
+    # cannot fabricate in prose. Exhaustion checks do set arithmetic over these
+    # instead of substring-matching descriptions. correspondents_complete goes
+    # False when any feeder marked its scan partial (truncated roster ⇒ never
+    # do blocking arithmetic on it).
+    correspondents: dict[str, dict] = field(default_factory=dict)
+    identities: dict[str, dict] = field(default_factory=dict)
+    correspondents_complete: bool = True
+    # Case roster: the terms misc.knowns_pattern_generate derived
+    # from the operator's reference set, stamped server-side (knowns_roster).
+    # The pre-report exhaustion checks treat a registry identity that matches
+    # a roster term as mandatory; everything else is report inventory.
+    roster: dict[str, dict] = field(default_factory=dict)
+    # Typed dispositions keyed (target_kind, target_norm) → [entries, oldest first].
+    dispositions: dict[tuple, list] = field(default_factory=dict)
 
     def recent(self, type_filter: str, window: list[dict]) -> list[dict]:
         """Return entries in `window` (a slice of recent entries) matching type_filter."""
         return [e for e in window if e.get("type") == type_filter]
+
+
+# Address patterns that appear in every mailbox (bulk/bounce senders). They
+# are FLAGGED at registry build (`bulk`) — present in every inventory, never a
+# blocking leftover; dropping them would hide e.g. DSN/bounce evidence.
+_IDENTITY_NOISE_RE = re.compile(
+    r"mailer-daemon|postmaster|no-?reply|do-?not-?reply|undisclosed[- ]recipients"
+    r"|notifications?@|newsletters?@|bounce|feedback@|automated@",
+    re.IGNORECASE)
 
 
 def _extract_tool_from_entry(entry: dict) -> str:
@@ -353,6 +413,12 @@ class ExecutionLog:
         # Lazy index cache — bumped on every mutation; rebuild on next index() call.
         self._index_version: int = 0
         self._cached_index: Optional[tuple[int, LogIndex]] = None
+        # Beacon ownership + flush bookkeeping for the reset-under-a-live-server
+        # hazard: only a log configured with save_session=True re-saves the
+        # beacon when the trace file vanishes underneath it (never a test log).
+        self._owns_beacon: bool = False
+        self._flush_count: int = 0
+        self._trace_missing_noted: bool = False
 
     def _next_id(self) -> int:
         # Shared counter across MCP server + PostToolUse hook so call_ids form
@@ -407,6 +473,63 @@ class ExecutionLog:
                     hid = e.get("hypothesis_id")
                     if hid:
                         idx.hypotheses_by_id[hid] = e
+                if t == "disposition":
+                    key = (str(e.get("target_kind") or "").lower(),
+                           str(e.get("target_norm") or ""))
+                    idx.dispositions.setdefault(key, []).append(e)
+                if t == "tool_call":
+                    # Evidence registries from annotate_tool_call markers.
+                    oc = e.get("observed_correspondents")
+                    if isinstance(oc, list) and oc:
+                        src = ""
+                        if e.get("cmd"):
+                            src = str(e["cmd"]).split()[0]
+                        stats = e.get("observed_correspondent_stats")
+                        stats = stats if isinstance(stats, dict) else {}
+                        # RFC bulk-header senders (List-Unsubscribe / List-Id /
+                        # Precedence: bulk) — flagged bulk so inbound volume is
+                        # never read as engagement.
+                        bulk_set = e.get("observed_correspondent_bulk")
+                        bulk_set = {str(a).strip().lower()
+                                    for a in bulk_set} if isinstance(bulk_set, list) else set()
+                        for v in oc:
+                            v = str(v).strip().lower()
+                            if not v:
+                                continue
+                            rec = idx.correspondents.setdefault(
+                                v, {"first_cid": cid, "sources": []})
+                            if _IDENTITY_NOISE_RE.search(v) or v in bulk_set:
+                                # kept and FLAGGED, never dropped: a bulk-class
+                                # address (bounce daemons included) can carry
+                                # decisive evidence — it is inventoried, just
+                                # never a mandatory disposition.
+                                rec["bulk"] = True
+                            if src and src not in rec["sources"]:
+                                rec["sources"].append(src)
+                            # Direction counts only when the feeder stamped
+                            # them — a registry without stats stays conservative
+                            # (every leftover blocks) in the pre-report check.
+                            st = stats.get(v)
+                            if isinstance(st, dict):
+                                rec["from"] = rec.get("from", 0) + int(st.get("from") or 0)
+                                rec["to"] = rec.get("to", 0) + int(st.get("to") or 0)
+                        if e.get("correspondents_partial"):
+                            idx.correspondents_complete = False
+                    kr = e.get("knowns_roster")
+                    if isinstance(kr, list):
+                        for v in kr:
+                            v = str(v).strip().lower()
+                            if v:
+                                idx.roster.setdefault(v, {"first_cid": cid})
+                    oi = e.get("observed_identities")
+                    if isinstance(oi, list):
+                        for v in oi:
+                            v = str(v).strip().lower()
+                            if not v:
+                                continue
+                            irec = idx.identities.setdefault(v, {"first_cid": cid})
+                            if _IDENTITY_NOISE_RE.search(v):
+                                irec["bulk"] = True
             self._cached_index = (self._index_version, idx)
             return idx
 
@@ -558,10 +681,7 @@ class ExecutionLog:
             auto-recovers this trace. Test fixtures, ad-hoc smoke scripts,
             and any non-investigator caller MUST pass save_session=False —
             otherwise they hijack the active investigation's recovery
-            beacon and silently redirect tool calls to the wrong trace.
-            (Was the root cause of one silent-failure incident: smoke
-            tests pointed at /tmp/smoke_trace.json hijacked an in-flight
-            investigation when its MCP server next restarted.) When
+            beacon and silently redirect tool calls to the wrong trace. When
             save_session=True is requested but the existing session
             points at a different case, a loud WARN is emitted before
             the overwrite happens.
@@ -581,6 +701,9 @@ class ExecutionLog:
                     self._cached_index = None
                     self._rehydrate_phase_state()
                     self._sync_shared_counter()
+                    self._owns_beacon = bool(save_session)
+                    self._flush_count = 0
+                    self._trace_missing_noted = False
                     self._flush()
                     if save_session:
                         self._save_session()
@@ -613,6 +736,9 @@ class ExecutionLog:
             self._index_version += 1
             self._cached_index = None
             self._sync_shared_counter()
+            self._owns_beacon = bool(save_session)
+            self._flush_count = 0
+            self._trace_missing_noted = False
             self._flush()
             if save_session:
                 self._save_session()
@@ -629,42 +755,47 @@ class ExecutionLog:
         the cache files were manually edited or the trace was restored from
         backup, and the next investigation might otherwise hit ID collisions.
         """
-        os.makedirs(os.path.dirname(_CALL_ID_COUNTER_FILE), exist_ok=True)
-        # Detect drift between counter and our rehydrated state — symptom of a
-        # bad reset (cache cleared while trace preserved, or backup restore).
-        # The F1 fix in _next_shared_call_id corrects it automatically; this
-        # warn makes the corruption visible at session start.
-        existing_counter = None
-        try:
-            with open(_CALL_ID_COUNTER_FILE) as f:
-                existing_counter = int(json.load(f).get("next", 0))
-        except (OSError, ValueError, json.JSONDecodeError, TypeError):
-            pass
-        expected = self._seq + 1
-        if existing_counter is not None and existing_counter < expected - 1:
-            _warn(
-                f"counter file drift detected at configure(): "
-                f"counter says next={existing_counter} but trace max_cid={self._seq} "
-                f"(rehydrating to next={expected}). Likely cause: cache files "
-                f"manually edited or trace restored from backup. Use "
-                f"`python -m tools.trudi_reset` for clean resets in future."
-            )
-        tmp = _CALL_ID_COUNTER_FILE + ".tmp"
-        try:
-            with open(tmp, "w") as f:
-                json.dump({"next": expected}, f)
-            os.replace(tmp, _CALL_ID_COUNTER_FILE)
-        except OSError as e:
-            _warn(f"could not sync shared counter file: {e}")
+        # Under the shared flock: without it, a second session's configure()
+        # could rewind the counter between another writer's read and write.
+        with _hook_flock():
+            os.makedirs(os.path.dirname(_CALL_ID_COUNTER_FILE), exist_ok=True)
+            # Detect drift between counter and our rehydrated state — symptom of
+            # a bad reset (cache cleared while trace preserved, or backup
+            # restore). _next_shared_call_id corrects it automatically; this
+            # warn makes the corruption visible at session start.
+            existing_counter = None
+            try:
+                with open(_CALL_ID_COUNTER_FILE) as f:
+                    existing_counter = int(json.load(f).get("next", 0))
+            except (OSError, ValueError, json.JSONDecodeError, TypeError):
+                pass
+            expected = self._seq + 1
+            if existing_counter is not None and existing_counter < expected - 1:
+                _warn(
+                    f"counter file drift detected at configure(): "
+                    f"counter says next={existing_counter} but trace max_cid={self._seq} "
+                    f"(rehydrating to next={expected}). Likely cause: cache files "
+                    f"manually edited or trace restored from backup. Use "
+                    f"`python -m tools.trudi_reset` for clean resets in future."
+                )
+            # Never move the shared counter BACKWARDS — a concurrent session
+            # (hook or second server) may already have advanced it past our
+            # trace max; rewinding would mint duplicate call_ids under it.
+            target = max(expected, existing_counter or 1)
+            tmp = _CALL_ID_COUNTER_FILE + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump({"next": target}, f)
+                os.replace(tmp, _CALL_ID_COUNTER_FILE)
+            except OSError as e:
+                _warn(f"could not sync shared counter file: {e}")
 
     def _save_session(self) -> None:
         # Must be called under self._lock.
         # Surface cross-case overwrites loudly — if a previously active
         # session for a different case is still on disk and its trace dir
         # exists, that investigation will silently follow this one's path
-        # on the next MCP server restart. The historical incident: ad-hoc
-        # `python -c 'log.configure("SMOKE", "/tmp/x")'` smoke scripts
-        # hijacked an in-flight investigation's session beacon.
+        # on the next MCP server restart.
         try:
             with open(_SESSION_FILE) as f:
                 prior = json.load(f)
@@ -785,8 +916,43 @@ class ExecutionLog:
                 with open(self._path) as f:
                     disk_data = json.load(f)
                 disk_entries = disk_data.get("entries", []) or []
+            except FileNotFoundError:
+                disk_entries = []
+                if self._flush_count > 0 and not self._trace_missing_noted:
+                    # The trace file vanished underneath a live server (a reset
+                    # while running). We can only rewrite from memory — hook-
+                    # authored entries lived on disk alone and are now in the
+                    # backup only. Say so IN the trace, and re-arm the beacon so
+                    # the hooks are not silenced for the rest of the run.
+                    self._trace_missing_noted = True
+                    backup = ""
+                    try:
+                        case_dir = os.path.dirname(os.path.dirname(os.path.abspath(self._path)))
+                        bdir = os.path.join(case_dir, ".trace-backups")
+                        latest = sorted(os.listdir(bdir))[-1:] if os.path.isdir(bdir) else []
+                        backup = os.path.join(bdir, latest[0]) if latest else ""
+                    except OSError:
+                        pass
+                    # NOT _next_id(): that takes hook.lock, which _flush already
+                    # holds on another descriptor → self-deadlock. The in-memory
+                    # sequence is enough; the shared counter re-syncs on the
+                    # next allocation (max(counter, trace_max, seq)).
+                    self._seq += 1
+                    self._entries.append({
+                        "call_id": self._seq,
+                        "type": "system_error",
+                        "ts": _utcnow(),
+                        "category": "trace_file_missing_at_flush",
+                        "detail": ("trace file vanished underneath a live server (reset while "
+                                   "running?) — recreated from memory; hook-authored entries "
+                                   "exist only in the backup" + (f": {backup}" if backup else "")),
+                    })
+                    _warn("trace file missing at flush — recreated from memory (see system_error entry)")
+                    if self._owns_beacon:
+                        self._save_session()
             except (OSError, json.JSONDecodeError, ValueError):
                 disk_entries = []
+            self._flush_count += 1
 
             our_ids = {e.get("call_id") for e in self._entries}
             hook_entries = [
@@ -828,7 +994,8 @@ class ExecutionLog:
                     with os.fdopen(fd, "w") as f:
                         f.write(data)
                         f.flush()
-                        os.fsync(f.fileno())
+                        if _TRACE_FSYNC:
+                            os.fsync(f.fileno())
                     os.replace(tmp, self._path)
                 except Exception:
                     try:
@@ -934,6 +1101,139 @@ class ExecutionLog:
             self._append_entry(entry)
             return cid
 
+    def record_reason_evidence_fetch(
+        self,
+        reason_call_id: int,
+        requests: list[dict],
+        input_call_ids: list[int] | None = None,
+    ) -> int:
+        """One entry per EVIDENCE_REQUEST round: what the reviewer asked for and
+        what came back (call_id, query, columns, file, rows_returned,
+        total_rows, status). This is the grounding record behind a verdict —
+        "CHALLENGED after inspecting the 4720 rows" vs "on a 600-char excerpt".
+        Fail-open: never breaks a reviewer call."""
+        try:
+            with self._lock:
+                if self._path is None:
+                    return 0
+                cid = self._next_id()
+                entry: dict = {
+                    "call_id": cid,
+                    "type": "reason_evidence_fetch",
+                    "ts": _utcnow(),
+                    "reason_call_id": int(reason_call_id or 0),
+                    "requests": [
+                        {k: r.get(k) for k in ("call_id", "query", "columns", "file",
+                                               "rows_returned", "total_rows", "bytes",
+                                               "status", "source_kind", "source_complete",
+                                               "clipped_rows", "truncation_reason",
+                                               "missing_columns", "columns_ignored",
+                                               "scan_incomplete") if k in r}
+                        for r in (requests or []) if isinstance(r, dict)
+                    ],
+                }
+                if input_call_ids:
+                    entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+                elif self._last_dair_cid:
+                    entry["input_call_ids"] = [self._last_dair_cid]
+                self._append_entry(entry)
+                return cid
+        except Exception as e:
+            _warn(f"record_reason_evidence_fetch failed: {e}")
+            return 0
+
+    def record_disposition(
+        self,
+        target_kind: str,
+        target_id: str,
+        reason: str,
+        evidence_call_ids: list[int] | None = None,
+        note: str = "",
+        window: dict | None = None,
+        input_call_ids: list[int] | None = None,
+    ) -> int:
+        """A typed disposition entry (`disposition`): target_kind/target_id/
+        reason are enumerated by tools/_gates/_dispositions.py; target_norm is
+        the shared-normalizer key the gates look up. Validation happens in the
+        MCP tool; this only persists."""
+        from tools._gates._dispositions import normalize_target
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"disposition: {target_kind}:{target_id}")
+            cid = self._next_id()
+            entry: dict = {
+                "call_id": cid,
+                "type": "disposition",
+                "ts": _utcnow(),
+                "target_kind": (target_kind or "").strip().lower(),
+                "target_id": str(target_id or "").strip()[:200],
+                "target_norm": normalize_target(target_kind, target_id),
+                "reason": (reason or "").strip().lower(),
+            }
+            if evidence_call_ids:
+                entry["evidence_call_ids"] = sorted({int(c) for c in evidence_call_ids if c})
+            if note:
+                entry["note"] = str(note)[:500]
+            if window:
+                entry["window"] = dict(window)
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            elif self._last_dair_cid:
+                entry["input_call_ids"] = [self._last_dair_cid]
+            self._append_entry(entry)
+            return cid
+
+    def record_finding_refused(
+        self,
+        description: str,
+        tier: str,
+        gate: str,
+        detail_gate: str = "",
+        claim: dict | None = None,
+        input_call_ids: list[int] | None = None,
+        cited_call_ids: list[int] | None = None,
+        extra: dict | None = None,
+        tested_hypothesis_id: str = "",
+        error: str = "",
+    ) -> int:
+        """Refusal ledger: every record_finding refusal becomes a trace entry
+        (`finding_refused`) so a re-record of the same finding with the
+        triggering words edited out is visible to the refusal_rewording gate —
+        and to the auditor. Fail-open: never breaks the refusal path."""
+        try:
+            with self._lock:
+                if self._path is None:
+                    return 0
+                cid = self._next_id()
+                entry: dict = {
+                    "call_id": cid,
+                    "type": "finding_refused",
+                    "ts": _utcnow(),
+                    "description": (description or "")[:500],
+                    "tier": (tier or "").upper(),
+                    "gate": gate or "",
+                    "detail_gate": detail_gate or "",
+                }
+                if claim:
+                    entry["claim"] = claim
+                if tested_hypothesis_id:
+                    entry["tested_hypothesis_id"] = str(tested_hypothesis_id)
+                if cited_call_ids:
+                    entry["cited_call_ids"] = sorted({int(c) for c in cited_call_ids if c})
+                if extra:
+                    entry["extra"] = extra
+                if error:
+                    entry["error"] = str(error)[:800]     # what the agent was told
+                if input_call_ids:
+                    entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+                elif self._last_dair_cid:
+                    entry["input_call_ids"] = [self._last_dair_cid]
+                self._append_entry(entry)
+                return cid
+        except Exception as e:
+            _warn(f"record_finding_refused failed: {e}")
+            return 0
+
     def record_tool_call(
         self,
         cmd: str,
@@ -946,12 +1246,34 @@ class ExecutionLog:
         stdout_excerpt: str = "",
         timed_out: bool = False,
         input_call_ids: list[int] | None = None,
+        stdout_full: str | None = None,
+        output_path: str | None = None,
+        exit_meaning: str = "",
+        gate: str = "",
     ) -> int:
+        """Record a tool execution.
+
+        stdout_full: the COMPLETE captured stdout (before the agent-facing
+            caps). The entry keeps `stdout_excerpt[:600]` for readability; when
+            the full text is longer than the excerpt it is persisted to a
+            sidecar file (`<analysis>/.tool_output/<cid>.txt`, `stdout_path`)
+            so the reviewer can fetch rows the excerpt cut off. `stdout_chars`
+            always records the raw length, which is how a reader tells a
+            COMPLETE excerpt from a PARTIAL one.
+        output_path: the tool's own artifact file (run_with_output_file,
+            wrappers that write a CSV) — fetchable evidence.
+        exit_meaning: tool-specific meaning of the exit code (e.g. clamscan
+            1 = infected) when the wrapper declared an exit policy.
+        gate: for `<py>:` baseline entries — the gate id when the wrapper
+            returned a refusal, so a refused export/report write is visible
+            as a failure in the trace.
+        """
         with self._lock:
             self._auto_recover()
             self._require_configured(f"tool_call: {cmd[:80]}")
+            cid = self._next_id()
             entry: dict = {
-                "call_id": self._next_id(),
+                "call_id": cid,
                 "type": "tool_call",
                 "ts": _utcnow(),
                 "cmd": cmd,
@@ -966,30 +1288,76 @@ class ExecutionLog:
                 entry["timed_out"] = True
             if stdout_excerpt:
                 entry["stdout_excerpt"] = stdout_excerpt[:600]
+            if stdout_full is None and stdout_excerpt:
+                stdout_full = stdout_excerpt
+            if stdout_full is not None:
+                # Stamped even when EMPTY (0) so "ran and produced nothing"
+                # is distinguishable from "output never persisted".
+                entry["stdout_chars"] = len(stdout_full)
+                entry["stdout_lines"] = (stdout_full.count("\n") + (
+                    0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
+                if len(stdout_full) > len(entry.get("stdout_excerpt") or ""):
+                    self._write_stdout_sidecar(cid, stdout_full, entry)
+            if output_path:
+                entry["output_path"] = str(output_path)
+            if exit_meaning:
+                entry["exit_meaning"] = str(exit_meaning)[:200]
+            if gate:
+                entry["gate"] = str(gate)[:80]
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
-            # Protocol audit: a tool_call must be preceded by an active DAIR batch.
-            # Scan the last 20 entries; if no dair_call is present (and the log is
-            # not empty), flag the tool_call as a protocol violation. The flag is
-            # surfaced in trace.json and trace.md so silent skips are auditable.
-            if self._entries:
-                window = self._entries[-20:]
-                has_recent_dair = any(e.get("type") == "dair_call" for e in window)
-                if not has_recent_dair:
-                    # Cold-start grace: the mandated pre-plan recon batch (hash
-                    # verify, image mount, hive reads) legitimately runs before
-                    # the first dair_assess. Only flag a missing-DAIR violation
-                    # once the investigation has actually engaged DAIR at least
-                    # once — i.e. a dair_call exists earlier in the trace but has
-                    # aged out of the 20-entry window. Flagging pre-DAIR recon
-                    # was a self-contradiction: the workflow mandates those reads.
-                    ever_had_dair = any(
-                        e.get("type") == "dair_call" for e in self._entries
-                    )
-                    if ever_had_dair:
-                        entry["protocol_violation"] = "no_active_dair_batch"
+            # Protocol audit: flag a forensic tool_call that ran outside an active
+            # DAIR phase (i.e. in Report, after DAIR decided the investigation is
+            # converging). Read DAIR's own phase state, not a window count, so a
+            # long collection batch is never flagged. Surfaced in the trace so a
+            # protocol lapse stays auditable.
+            phase = self._current_phase or ""
+            if phase and phase not in ("Triage", "Collect", "Analyze", "Scan"):
+                entry["protocol_violation"] = f"forensic_tool_in_{phase.lower()}_phase"
             self._append_entry(entry)
             return entry["call_id"]
+
+    # ── full-stdout sidecar ────────────────────────────────────────────────
+    def stdout_sidecar_dir(self) -> str | None:
+        """`<dirname(trace)>/.tool_output` — inside analysis/, so it is a
+        readable produced-output location and is wiped with the case run."""
+        if not self._path:
+            return None
+        return os.path.join(os.path.dirname(os.path.abspath(self._path)), ".tool_output")
+
+    def _write_stdout_sidecar(self, cid: int, text: str, entry: dict) -> None:
+        """Persist the complete stdout for `cid`. Called from record_tool_call
+        between _next_id() and _append_entry() — no lock is held across the
+        write and the filename is unique per cid, so the _flush re-entrancy
+        hazard does not apply. Never raises: a failed sidecar is recorded on
+        the entry (`stdout_sidecar_error`) and the entry is still written."""
+        try:
+            from core.paths import STDOUT_SIDECAR_CAP
+            d = self.stdout_sidecar_dir()
+            if not d:
+                return
+            os.makedirs(d, exist_ok=True)
+            partial = len(text) > STDOUT_SIDECAR_CAP
+            body = text[:STDOUT_SIDECAR_CAP]
+            import tempfile
+            fd, tmp = tempfile.mkstemp(prefix=f".{cid}-", suffix=".tmp", dir=d)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
+                    fh.write(body)
+                final = os.path.join(d, f"{cid}.txt")
+                os.replace(tmp, final)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            entry["stdout_path"] = final
+            if partial:
+                entry["stdout_partial"] = True
+        except Exception as e:
+            _warn(f"stdout sidecar for call {cid} failed: {e}")
+            entry["stdout_sidecar_error"] = str(e)[:200]
 
     def record_reason_call(
         self,
@@ -1004,7 +1372,14 @@ class ExecutionLog:
         hypothesis_id: str = "",
         inputs: dict | None = None,
         input_call_ids: list[int] | None = None,
+        error: str = "",
+        backend_meta: dict | None = None,
+        extra: dict | None = None,
     ) -> int:
+        """`extra`: additional typed fields stamped on the entry (non-None values
+        only) — e.g. parse_path / result_block (which parser produced the
+        structured fields), ready_to_report / blocking_issues (pre_report), a
+        declared claim. Readers key on these instead of scraping conclusion text."""
         with self._lock:
             self._auto_recover()
             self._require_configured(f"reason_call: {tool}")
@@ -1032,6 +1407,17 @@ class ExecutionLog:
                 entry["inputs"] = inputs
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            # Persist the error and any backend diagnostics (finish_reason,
+            # reasoning_tokens, retry count, reasoning excerpt) so a failed
+            # reason call explains itself instead of a bare success:false.
+            if error:
+                entry["error"] = str(error)
+            if backend_meta:
+                entry["backend_meta"] = dict(backend_meta)
+            if extra:
+                for k, v in extra.items():
+                    if v is not None and k not in entry:
+                        entry[k] = v
             self._append_entry(entry)
             return cid
 
@@ -1152,6 +1538,25 @@ class ExecutionLog:
             self._append_entry(entry)
             return entry["call_id"]
 
+    def record_tool_blocked(self, tool: str, reason: str) -> int:
+        """Record that a tool invocation was refused by a pre-execution gate (e.g.
+        the DAIR-batch gate) and never ran. A block otherwise leaves NO trace, so a
+        tool that was blocked and then silently dropped is invisible. This makes
+        the block auditable, so the work-order retry check can flag a blocked tool
+        that was abandoned rather than re-run or dispositioned."""
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"tool_blocked: {tool}")
+            entry: dict = {
+                "call_id": self._next_id(),
+                "type": "tool_blocked",
+                "ts": _utcnow(),
+                "tool": tool,
+                "reason": reason,
+            }
+            self._append_entry(entry)
+            return entry["call_id"]
+
     def record_dair_call(
         self,
         current_phase: str,
@@ -1171,6 +1576,13 @@ class ExecutionLog:
         input_call_ids: list[int] | None = None,
         pending_pivots: list[str] | None = None,
         candidate_pivots: list[dict] | None = None,
+        error: str = "",
+        backend_meta: dict | None = None,
+        parse_path: str = "",
+        server_override: dict | None = None,
+        observed_principals: list[dict] | None = None,
+        observed_hosts: list[str] | None = None,
+        case_question: str = "",
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1215,6 +1627,20 @@ class ExecutionLog:
                     p for p in candidate_pivots
                     if isinstance(p, dict) and p.get("value")
                 ]
+            if error:
+                entry["error"] = str(error)
+            if backend_meta:
+                entry["backend_meta"] = dict(backend_meta)
+            if parse_path:
+                entry["parse_path"] = str(parse_path)
+            if server_override:
+                entry["server_override"] = dict(server_override)
+            if observed_principals:
+                entry["observed_principals"] = [dict(p) for p in observed_principals if isinstance(p, dict)]
+            if observed_hosts:
+                entry["observed_hosts"] = [str(h) for h in observed_hosts if str(h).strip()]
+            if case_question:
+                entry["case_question"] = str(case_question).strip()
             self._append_entry(entry)
             self._last_dair_cid = cid
             return cid
@@ -1228,19 +1654,20 @@ class ExecutionLog:
         tested_hypothesis_id: str = "",
         gate_metadata: dict | None = None,
         input_call_ids: list[int] | None = None,
+        supersedes: int = 0,
+        supporting_evidence: str = "",
+        claim: dict | None = None,
     ) -> int:
         """Record a finding entry.
 
-        gate_metadata: optional dict of explicit foreign keys stamped by the
-        record_finding gates — gated_by_evaluate_call_id,
-        gated_by_confidence_call_id, gated_by_cite_check_call_id,
-        gated_by_hypothesize_call_id, validated_techniques. Stored on the
-        entry so consumers (chain view, accuracy report, synthesize) can
-        traverse the audit chain via real call_ids instead of inferring
-        links from substring matches.
-        input_call_ids: agent-declared upstream lineage — list of
-        _trudi_call_id values that informed this finding (complements
-        linked_call_id which is 1:1 evidence; this is N:M lineage).
+        gate_metadata: explicit foreign keys stamped by the record_finding gates
+        (gated_by_*_call_id, validated_techniques) so consumers traverse the
+        audit chain by call_id, not substring.
+        input_call_ids: N:M upstream lineage (complements 1:1 linked_call_id).
+        supersedes: call_id of an earlier finding this one replaces — the old
+        entry is stamped superseded_by so the report/accuracy layer counts only
+        the final tier. Used to re-tier a finding upward once new evidence earns
+        a SUPPORTED evaluate.
         """
         with self._lock:
             self._auto_recover()
@@ -1255,6 +1682,16 @@ class ExecutionLog:
                 "source": source,
                 "linked_call_id": linked_call_id,
             }
+            if supporting_evidence:
+                # Persisted (capped) so report-time checks (affirmative_coverage
+                # dispositions, pre_report recipient/channel checks) have a real
+                # evidence surface — previously this text died with the call.
+                entry["supporting_evidence"] = supporting_evidence[:2000]
+            if claim and any(claim.values()):
+                # Typed claim (kind/category/entities/channel/window) — the
+                # declared structure downstream gates and report-time
+                # exhaustion checks key on instead of description regexes.
+                entry["claim"] = claim
             if tested_hypothesis_id:
                 entry["tested_hypothesis_id"] = tested_hypothesis_id
             if input_call_ids:
@@ -1263,6 +1700,12 @@ class ExecutionLog:
                 for k, v in gate_metadata.items():
                     if v:  # skip empty / 0 — keeps entries small
                         entry[k] = v
+            if supersedes:
+                entry["supersedes"] = int(supersedes)
+                for prior in self._entries:
+                    if prior.get("call_id") == supersedes and prior.get("type") == "finding":
+                        prior["superseded_by"] = cid
+                        break
             self._append_entry(entry)
             return cid
 

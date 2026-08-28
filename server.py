@@ -22,6 +22,7 @@ from tools.carving import mcp as carving_mcp
 from tools.network import mcp as network_mcp
 from tools.enrichment import mcp as enrichment_mcp
 from tools.misc import mcp as misc_mcp
+from tools.read_output import mcp as read_mcp
 from tools.reasoning import mcp as reason_mcp
 from tools.dair import mcp as dair_mcp
 from tools.accuracy import mcp as accuracy_mcp
@@ -58,6 +59,7 @@ mcp.mount(carving_mcp, namespace="carve")
 mcp.mount(network_mcp, namespace="net")
 mcp.mount(enrichment_mcp, namespace="enrich")
 mcp.mount(misc_mcp, namespace="misc")
+mcp.mount(read_mcp, namespace="read")
 mcp.mount(reason_mcp, namespace="reason")
 mcp.mount(dair_mcp, namespace="dair")
 mcp.mount(accuracy_mcp, namespace="accuracy")

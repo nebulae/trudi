@@ -223,3 +223,81 @@ class TestRunDotnet:
         called = mock_sub.call_args[0][0]
         assert "--csv" in called
         assert "/out" in called
+
+
+# ── Phase E: full-stdout sidecar + exit-code policy ─────────────────────────
+
+class TestStdoutSidecarAndExitPolicy:
+    """`run()` persists the COMPLETE stdout to `<analysis>/.tool_output/<cid>.txt`
+    via the trace (the agent-facing `stdout` keeps its caps) and maps exit
+    codes through the wrapper's declared policy."""
+
+    @patch("core.executor.subprocess.run")
+    def test_private_keys_never_returned(self, mock_sub):
+        mock_sub.return_value = make_proc(0, b"line\n" * 300, b"")
+        r = run(["tool"])
+        assert "_stdout_full" not in r and "_stdout_chars" not in r
+
+    @patch("core.executor.subprocess.run")
+    def test_sidecar_holds_full_stdout_past_the_excerpt(self, mock_sub):
+        from core.execution_log import log
+        body = "".join(f"row {i:04d} OK\n" for i in range(200)) + "LAST: FOUND\n"
+        mock_sub.return_value = make_proc(0, body.encode(), b"")
+        r = run(["scanner"], line_cap=None)
+        e = next(x for x in log._entries if x.get("call_id") == r["_trudi_call_id"])
+        assert e["stdout_chars"] == len(body)
+        assert len(e["stdout_excerpt"]) == 600
+        assert e["stdout_path"].endswith(f"/.tool_output/{r['_trudi_call_id']}.txt")
+        with open(e["stdout_path"], encoding="utf-8") as fh:
+            assert fh.read().endswith("LAST: FOUND\n")
+
+    @patch("core.executor.subprocess.run")
+    def test_short_stdout_has_no_sidecar_but_records_length(self, mock_sub):
+        from core.execution_log import log
+        mock_sub.return_value = make_proc(0, b"tiny", b"")
+        r = run(["tool"])
+        e = next(x for x in log._entries if x.get("call_id") == r["_trudi_call_id"])
+        assert e["stdout_chars"] == 4 and "stdout_path" not in e
+
+    @patch("core.executor.subprocess.run")
+    def test_sidecar_keeps_stdout_the_agent_cap_dropped(self, mock_sub):
+        # 150-line cap truncates the agent copy; the sidecar is complete.
+        from core.execution_log import log
+        body = "".join(f"{i}\n" for i in range(400))
+        mock_sub.return_value = make_proc(0, body.encode(), b"")
+        r = run(["tool"])
+        assert r["truncated"] is True
+        e = next(x for x in log._entries if x.get("call_id") == r["_trudi_call_id"])
+        with open(e["stdout_path"], encoding="utf-8") as fh:
+            assert fh.read() == body
+
+    @patch("core.executor.subprocess.run")
+    def test_exit_policy_maps_result_codes_to_success(self, mock_sub):
+        from tools._exit_codes import policy
+        mock_sub.return_value = make_proc(1, b"x: Eicar FOUND\n", b"")
+        r = run(["clamscan", "x"], **policy("clamscan"))
+        assert r["success"] is True and r["exit_code"] == 1
+        assert "infected" in r["exit_meaning"]
+        mock_sub.return_value = make_proc(2, b"", b"boom")
+        r = run(["clamscan", "x"], **policy("clamscan"))
+        assert r["success"] is False and r["exit_meaning"] == "error"
+
+    @patch("core.executor.subprocess.run")
+    def test_default_policy_unchanged(self, mock_sub):
+        mock_sub.return_value = make_proc(1, b"", b"")
+        r = run(["false"])
+        assert r["success"] is False and "exit_meaning" not in r
+
+    @patch("core.executor.subprocess.run")
+    def test_exit_meaning_reaches_the_trace(self, mock_sub):
+        from core.execution_log import log
+        from tools._exit_codes import policy
+        mock_sub.return_value = make_proc(1, b"", b"")
+        r = run(["ngrep", "-q", "x"], **policy("ngrep"))
+        e = next(x for x in log._entries if x.get("call_id") == r["_trudi_call_id"])
+        assert e["success"] is True and e["exit_meaning"] == "no frames matched"
+
+    def test_policy_unknown_binary_is_default(self):
+        from tools._exit_codes import policy
+        p = policy("nosuchtool")
+        assert p["success_codes"] == frozenset({0}) and p["exit_meanings"] == {}

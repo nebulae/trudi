@@ -59,23 +59,33 @@ class TestDairGateMiddleware:
             )
         assert call_next.await_count == 1
 
-    def test_non_allowlisted_tool_blocked_after_dair_drops_out(self, tmp_path):
-        """Once DAIR has been engaged, falling out of the window blocks tools."""
+    def test_non_allowlisted_tool_blocked_in_report_phase(self, tmp_path):
+        """Forensics block once DAIR moves the investigation to Report."""
         from core.execution_log import ExecutionLog
         from core.middleware import NarrationMiddleware
         from fastmcp.exceptions import ToolError
         l = ExecutionLog()
         l.configure("MW-002b", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        # Push the dair_call out of the 20-entry window
-        for _ in range(21):
+        l.record_dair_call("Analyze", "", True, "Report", "", "push", "")
+        mw = NarrationMiddleware()
+        with patch("core.execution_log.log", l):
+            with pytest.raises(ToolError, match="Report"):
+                asyncio.run(_run_middleware(mw, "vol_vol_psscan"))
+
+    def test_long_collect_batch_never_blocks(self, tmp_path):
+        """Regression: a long lead-following batch in a collection phase must
+        not be blocked — findings/narration/tool churn do not close the gate."""
+        from core.execution_log import ExecutionLog
+        from core.middleware import NarrationMiddleware
+        l = ExecutionLog()
+        l.configure("MW-002c", str(tmp_path / "trace.json"))
+        l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
+        for _ in range(30):
+            l.record_tool_call("ez.mftecmd -f x", True, False, 0, 0)
             l.record_agent_message("filler")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            with pytest.raises(ToolError, match="DAIR engaged earlier"):
-                asyncio.run(
-                    _run_middleware(mw, "vol_vol_psscan")
-                )
+            asyncio.run(_run_middleware(mw, "vol_vol_psscan"))  # no exception
 
     def test_non_allowlisted_tool_runs_after_dair(self, tmp_path):
         from core.execution_log import ExecutionLog

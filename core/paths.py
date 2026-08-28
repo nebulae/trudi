@@ -19,6 +19,11 @@ OUTPUT_CAP = 51_200  # 50 KB
 # Maximum tool output lines returned to the agent (line-based cap)
 MAX_TOOL_OUTPUT_LINES = 150
 
+# Full-stdout sidecar cap (bytes). The trace entry keeps a 600-char excerpt for
+# humans; the COMPLETE stdout is persisted to <analysis>/.tool_output/<cid>.txt
+# so the reviewer's EVIDENCE_REQUEST can fetch rows the excerpt cut off.
+STDOUT_SIDECAR_CAP = int(os.environ.get("TRUDI_STDOUT_SIDECAR_CAP") or str(8 * 1024 * 1024))
+
 # ── Configurable timeouts (seconds) ─────────────────────────────────────────
 # Override via environment variables — useful on slow hardware (WSL2, USB drives).
 
@@ -50,6 +55,34 @@ def assert_output_safe(path: str) -> None:
             f"Output path '{path}' is inside a protected evidence directory. "
             "Write outputs to ./analysis/, ./exports/, or ./reports/ only."
         )
+
+
+READABLE_OUTPUT_SEGMENTS = ("analysis", "exports", "reports")
+
+
+def assert_readable_output(path: str) -> str:
+    """Resolve `path` and assert it is a PRODUCED-OUTPUT file under analysis/,
+    exports/, or reports/ — never raw evidence, /mnt, /media, or an arbitrary
+    system path. Returns the resolved absolute path; raises ValueError otherwise.
+
+    The read-side mirror of assert_output_safe: read tools inspect parsed output,
+    never raw evidence (extract that through a typed wrapper first)."""
+    resolved, _ = resolve_path_ci(os.path.abspath(os.path.expanduser(path)))
+    resolved = os.path.realpath(resolved)
+    if is_evidence_path(resolved):
+        raise ValueError(
+            f"'{path}' is under a protected evidence/mounted location. Read tools "
+            "inspect PRODUCED output only — extract the artifact through its typed "
+            "wrapper (ez.*, plaso.*, misc.readpst_extract, …) first, then read the "
+            "output under analysis/ exports/ reports/."
+        )
+    parts = {seg.lower() for seg in Path(resolved).parts}
+    if not (parts & set(READABLE_OUTPUT_SEGMENTS)):
+        raise ValueError(
+            f"'{path}' is not under analysis/ exports/ reports/. Read tools may "
+            "only read produced output in those directories."
+        )
+    return resolved
 
 
 # Common output-parameter names across tool modules. The @output_safe
