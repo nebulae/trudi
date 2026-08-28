@@ -76,6 +76,19 @@ def register(config_path: Path, repo_root: Path, venv_python: str) -> list[str]:
         mcp["trudi-sift"] = want
         msgs.append(f"  {'re-pointed' if stale else 'Registered'} mcp.trudi-sift → {venv_python} {server}")
 
+    # 1b) MCP execution timeout — OpenCode's default (30-60s) aborts long
+    #     forensic/DAIR/reason calls on local models (observed: dair_assess
+    #     killed at 60s with MCP error -32001). experimental.mcp_timeout is
+    #     the canonical key. Respect a user's own larger value.
+    exp = config.setdefault("experimental", {})
+    cur = exp.get("mcp_timeout")
+    if not isinstance(cur, int) or cur < 1_800_000:
+        exp["mcp_timeout"] = 1_800_000
+        if cur is not None:
+            msgs.append(f"  experimental.mcp_timeout raised {cur} → 1800000")
+        else:
+            msgs.append("  experimental.mcp_timeout → 1800000 (30 min)")
+
     # 2) Permissions: allow every trudi-sift tool; deny raw forensic binaries
     #    in bash (derived from the Claude Code ban list — one source of truth).
     ban = _load_ban_list(repo_root / "case-template" / ".claude" / "settings.json")

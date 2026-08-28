@@ -34,6 +34,25 @@ def test_fresh_config_registers_mcp_and_permissions(tmp_path):
     assert bash["log2timeline.py *"] == "deny"
     assert bash["dotnet *"] == "deny"
     assert any("Registered mcp.trudi-sift" in x for x in msgs)
+    # MCP execution timeout: OpenCode's default aborts long DAIR/reason calls
+    assert d["experimental"]["mcp_timeout"] == 1_800_000
+
+
+def test_mcp_timeout_respects_larger_user_value(tmp_path):
+    m = _mod()
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"experimental": {"mcp_timeout": 3_600_000}}))
+    m.register(cfg, REPO, "/venv/bin/python3")
+    assert json.loads(cfg.read_text())["experimental"]["mcp_timeout"] == 3_600_000
+
+
+def test_mcp_timeout_raises_small_user_value(tmp_path):
+    m = _mod()
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"experimental": {"mcp_timeout": 60_000}}))
+    msgs = m.register(cfg, REPO, "/venv/bin/python3")
+    assert json.loads(cfg.read_text())["experimental"]["mcp_timeout"] == 1_800_000
+    assert any("raised 60000" in x for x in msgs)
 
 
 def test_ban_list_matches_claude_deny_list(tmp_path):
