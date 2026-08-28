@@ -85,15 +85,21 @@ def register(config_path: Path, repo_root: Path, venv_python: str) -> list[str]:
     # 1b) MCP execution timeout — OpenCode's default (30-60s) aborts long
     #     forensic/DAIR/reason calls on local models (observed: dair_assess
     #     killed at 60s with MCP error -32001). experimental.mcp_timeout is
-    #     the canonical key. Respect a user's own larger value.
+    #     the canonical key. INVARIANT: this must exceed EVERY TRUDI executor
+    #     budget — an equal value races (observed live: a 1800s carve vs a
+    #     1800s mcp_timeout → client cancelled first, the server's belated
+    #     response then killed the whole stdio connection). TRUDI's largest
+    #     budget is PLASO_TIMEOUT (6h default), so 7h here. The server always
+    #     terminates tools by its own budgets — the client ceiling is a
+    #     never-reached backstop, not a wait. Respect a user's larger value.
     exp = config.setdefault("experimental", {})
     cur = exp.get("mcp_timeout")
-    if not isinstance(cur, int) or cur < 1_800_000:
-        exp["mcp_timeout"] = 1_800_000
+    if not isinstance(cur, int) or cur < 25_200_000:
+        exp["mcp_timeout"] = 25_200_000
         if cur is not None:
-            msgs.append(f"  experimental.mcp_timeout raised {cur} → 1800000")
+            msgs.append(f"  experimental.mcp_timeout raised {cur} → 25200000")
         else:
-            msgs.append("  experimental.mcp_timeout → 1800000 (30 min)")
+            msgs.append("  experimental.mcp_timeout → 25200000 (7h — above every TRUDI tool budget)")
 
     # 1c) External-directory access: /trudi-clear-case runs
     #     `python -m tools.trudi_reset` from the repo, and command docs point

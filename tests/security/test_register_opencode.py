@@ -37,7 +37,7 @@ def test_fresh_config_registers_mcp_and_permissions(tmp_path):
     assert bash["dotnet *"] == "deny"
     assert any("Registered mcp.trudi-sift" in x for x in msgs)
     # MCP execution timeout: OpenCode's default aborts long DAIR/reason calls
-    assert d["experimental"]["mcp_timeout"] == 1_800_000
+    assert d["experimental"]["mcp_timeout"] == 25_200_000
     # repo access for /trudi-* commands (tools.trudi_reset etc.)
     assert d["permission"]["external_directory"][f"{REPO}/*"] == "allow"
 
@@ -45,9 +45,9 @@ def test_fresh_config_registers_mcp_and_permissions(tmp_path):
 def test_mcp_timeout_respects_larger_user_value(tmp_path):
     m = _mod()
     cfg = tmp_path / "opencode.json"
-    cfg.write_text(json.dumps({"experimental": {"mcp_timeout": 3_600_000}}))
+    cfg.write_text(json.dumps({"experimental": {"mcp_timeout": 30_000_000}}))
     m.register(cfg, REPO, "/venv/bin/python3")
-    assert json.loads(cfg.read_text())["experimental"]["mcp_timeout"] == 3_600_000
+    assert json.loads(cfg.read_text())["experimental"]["mcp_timeout"] == 30_000_000
 
 
 def test_mcp_timeout_raises_small_user_value(tmp_path):
@@ -55,7 +55,7 @@ def test_mcp_timeout_raises_small_user_value(tmp_path):
     cfg = tmp_path / "opencode.json"
     cfg.write_text(json.dumps({"experimental": {"mcp_timeout": 60_000}}))
     msgs = m.register(cfg, REPO, "/venv/bin/python3")
-    assert json.loads(cfg.read_text())["experimental"]["mcp_timeout"] == 1_800_000
+    assert json.loads(cfg.read_text())["experimental"]["mcp_timeout"] == 25_200_000
     assert any("raised 60000" in x for x in msgs)
 
 
