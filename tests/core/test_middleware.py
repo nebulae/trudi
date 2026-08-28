@@ -173,6 +173,32 @@ class TestForensicBinaryPatterns:
         for key, hint in MCP_WRAPPER_HINTS.items():
             assert isinstance(hint, str) and hint, key
 
+    def test_every_hint_names_a_real_tool(self):
+        """The deny message is the model's self-correction lifeline: a hint
+        naming a nonexistent tool (observed live: 'net.net_tcpdump_read',
+        doubled prefix) sends a small model hunting for a tool that isn't
+        there and back into the denied bash call — an infinite deny loop.
+        Every dotted token in every hint must resolve to a mounted tool."""
+        import asyncio
+        import re
+        import server
+        from core.middleware import MCP_WRAPPER_HINTS
+
+        async def names():
+            return {t.name for t in await server.mcp.list_tools()}
+        mounted = asyncio.run(names())
+        token_re = re.compile(r"\b([a-z]+)\.([A-Za-z0-9_*]+)")
+        for key, hint in MCP_WRAPPER_HINTS.items():
+            for ns, rest in token_re.findall(hint):
+                if (ns, rest) == ("e", "g"):   # prose "e.g." in the vol hint
+                    continue
+                if rest.endswith("*"):
+                    assert any(n.startswith(f"{ns}_{rest[:-1]}") for n in mounted), \
+                        f"{key}: wildcard {ns}.{rest} matches no mounted tool"
+                else:
+                    assert f"{ns}_{rest}" in mounted, \
+                        f"{key}: hint names nonexistent tool {ns}.{rest}"
+
     def test_identify_forensic_binary_vol(self):
         from core.middleware import _identify_forensic_binary
         assert _identify_forensic_binary(
