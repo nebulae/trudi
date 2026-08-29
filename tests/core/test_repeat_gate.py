@@ -126,14 +126,13 @@ class TestEnrichRotationCannotDefeatGate:
         msg = M._repeat_update(k, "net_ngrep_search", dict(RESULT))
         assert "2x" in msg
 
-    def test_rotating_enrich_field_excluded_from_hash_too(self):
-        # Defense in depth: even if a decorated result reaches the gate, the
-        # rotating interpretive fields are in the strip set, so identity holds.
+    def test_metadata_subobject_excluded_from_hash(self):
+        # enrich() now writes interpretive fields under `_metadata`; the hash
+        # drops `_`-prefixed keys, so a rotating discipline_reminder there
+        # cannot break identity — no strip list needed.
         k = _key()
-        M._repeat_update(k, "t", {**RESULT, "discipline_reminder": "A",
-                                  "data_provenance": "p"})
-        msg = M._repeat_update(k, "t", {**RESULT, "discipline_reminder": "B",
-                                        "data_provenance": "p"})
+        M._repeat_update(k, "t", {**RESULT, "_metadata": {"discipline_reminder": "A"}})
+        msg = M._repeat_update(k, "t", {**RESULT, "_metadata": {"discipline_reminder": "B"}})
         assert "2x" in msg
 
     def test_wiring_hashes_raw_before_enrich(self):

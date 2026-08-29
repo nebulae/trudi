@@ -228,10 +228,10 @@ _REPEAT_MAX_KEYS = 512
 _repeat_state: dict = {}
 
 # Volatile result keys that differ on every run of an otherwise identical call.
-_REPEAT_VOLATILE = ("elapsed_seconds", "retries", "stdout_path",
-                    # enrich() interpretive additions (some rotate per call)
-                    "discipline_reminder", "data_provenance", "caveats",
-                    "does_not_prove")
+# enrich()'s interpretive fields now live under the `_metadata` sub-object,
+# which the hash drops via the `_`-prefix rule — so only genuinely volatile
+# top-level result keys need listing here.
+_REPEAT_VOLATILE = ("elapsed_seconds", "retries", "stdout_path")
 
 
 def _repeat_key(tool_name: str, args: dict) -> str:
