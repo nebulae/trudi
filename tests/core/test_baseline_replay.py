@@ -108,3 +108,39 @@ class TestAttributionGroundingHole:
         e = _trace()
         f = _finding("SUSPECTED", "Amy Smith", binding=[])
         assert replay_finding(e, f, PAG.check) is None
+
+
+class TestDistinctPrincipalAlreadyBlocks:
+    """Gap (A) is ALREADY enforced (verified 2026-08-29): a DECLARED
+    distinct_principal never driven to a verdict blocks pre_report_check. This
+    locks that invariant so it cannot silently regress. The residual weak-driver
+    failure (not declaring the competitor at all) is a discovery problem, not an
+    enforcement one — no gate change here."""
+
+    def _log_with(self, extra):
+        from core.execution_log import ExecutionLog
+        log = ExecutionLog()
+        log._entries = [
+            {"type": "tool_call", "call_id": 1, "cmd": "<py>:misc_start_execution_log", "success": True},
+            {"type": "dair_call", "call_id": 2, "current_phase": "Analyze"},
+            {"type": "reason_call", "call_id": 3, "tool": "reason_plan", "success": True},
+            {"type": "reason_call", "call_id": 4, "tool": "reason_hypothesize", "success": True,
+             "hypothesis_id": "H1", "hypothesis_kind": "distinct_principal",
+             "contested_principals": ["jcoachj"], "contested_principals_norm": ["jcoachj"],
+             "sub_hypotheses": [{"likelihood_tier": "HIGH", "label": "jcoachj controls the session"}]},
+            {"type": "reason_call", "call_id": 5, "tool": "reason_synthesize", "success": True},
+            {"type": "finding", "call_id": 6, "confidence": "LIKELY", "description": "answer",
+             "claim": {"actor_kind": "human", "actor": "Amy Smith", "principal": "Amy Smith",
+                       "answers_case_question": True, "session_binding_call_ids": [2]}},
+        ] + extra
+        return log
+
+    def test_undispositioned_distinct_principal_blocks(self):
+        from unittest.mock import patch
+        import core.execution_log as EL
+        import tools.reasoning as R
+        log = self._log_with([])
+        with patch.object(EL, "log", log), patch.object(R, "log", log, create=True):
+            r = R.reason_pre_report_check()
+        assert r["ready_to_report"] is False
+        assert any("jcoachj" in str(b).lower() for b in r["blocking_issues"])
