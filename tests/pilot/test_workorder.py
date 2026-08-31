@@ -89,6 +89,11 @@ class TestRunTracking:
         assert s.items[0].status == "open"
         assert wo.ran_cids(s) == []
 
+    def test_opening_summary_follows_resumption_contract(self):
+        assert "starting" in wo.opening_summary(_state())
+        assert "Resuming after interruption" in \
+            wo.opening_summary(_state(resumed=True))
+
     def test_draft_summary_and_nag(self):
         s = _state(nag_after=2)
         assert "no tools" in wo.draft_summary(s).lower()

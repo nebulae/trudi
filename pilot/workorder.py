@@ -32,6 +32,7 @@ class SessionState:
     items: list[WorkItem] = field(default_factory=list)
     ran: list[dict] = field(default_factory=list)   # calls since last assess
     nag_after: int = 6
+    resumed: bool = False   # trace existed at boot (resumption contract)
     last_phase: str = ""    # DAIR's current_phase — display fallback only;
                             # the stack itself moves only on push/pop
 
@@ -135,6 +136,14 @@ def draft_summary(state: SessionState) -> str:
         extra = f" — {r['headline']}" if r.get("headline") else ""
         parts.append(f"{head} {mark}{extra}")
     return f"Ran {len(state.ran)} tools: " + "; ".join(parts)
+
+
+def opening_summary(state: SessionState) -> str:
+    """The tool_results_summary for an assess with no calls to summarize —
+    the contract's wording, nothing for the analyst to edit."""
+    if state.resumed:
+        return "Resuming after interruption — re-establishing phase state."
+    return "Investigation starting — no tools run yet"
 
 
 def ran_cids(state: SessionState) -> list:

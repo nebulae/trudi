@@ -418,6 +418,7 @@ async def run(stdio: bool = False) -> None:
             print(render_banner(info, boot))
             state.case_context = (f"Case {info.case_id}. "
                                   f"Question: {info.question}")[:1500]
+            state.resumed = boot.resumed
             state.items = wo.resume_items() if boot.resumed \
                 else wo.ritual_items(info.question)
             print(wo.render(state))
@@ -446,10 +447,15 @@ async def run(stdio: bool = False) -> None:
         async def do_assess() -> None:
             """Call dair.assess with an editable auto-drafted summary, fold
             the returned work order + phase transition into the state."""
-            draft = wo.draft_summary(state) if state.ran else \
-                "Investigation starting — no tools run yet"
-            summary = (await session.prompt_async(
-                [("class:key", "summary> ")], default=draft)).strip() or draft
+            if state.ran:
+                print(f"  drafted summary of your last {len(state.ran)} "
+                      f"call(s) — edit it, or press enter to send:")
+                draft = wo.draft_summary(state)
+                summary = (await session.prompt_async(
+                    [("class:key", "summary> ")], default=draft)).strip() or draft
+            else:
+                summary = wo.opening_summary(state)
+                print(f"  summary: {summary}")
             print("  calling dair.assess…", flush=True)
             try:
                 result = await call_with_progress(client, "dair_assess", {
