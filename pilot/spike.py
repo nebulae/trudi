@@ -21,6 +21,7 @@ import shlex
 import sys
 
 from fastmcp import Client
+from prompt_toolkit.completion import Completer, Completion
 
 
 # ── command-line parsing ─────────────────────────────────────────────────────
@@ -74,12 +75,14 @@ def build_alias_map() -> dict[str, str]:
     return aliases
 
 
-class PilotCompleter:
+class PilotCompleter(Completer):
     """Tool-name + parameter-name completion from live schemas.
 
     First word: dotted tool names, plus binary aliases (`fls` offers
     `tsk.fls`). Later words: `param=` names from the chosen tool's input
-    schema, minus those already supplied.
+    schema, minus those already supplied. Subclassing prompt_toolkit's
+    Completer is load-bearing: its async completion path calls the base
+    class's get_completions_async wrapper.
     """
 
     def __init__(self, tools: list, aliases: dict[str, str]):
@@ -110,7 +113,6 @@ class PilotCompleter:
 
     # prompt_toolkit adapter
     def get_completions(self, document, complete_event):
-        from prompt_toolkit.completion import Completion
         text = document.text_before_cursor
         words = text.split()
         completing_first = not words or (len(words) == 1 and not text.endswith(" "))

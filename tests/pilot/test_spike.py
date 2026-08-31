@@ -60,6 +60,22 @@ class TestCompletion:
         assert "offset_sectors=" in live_completer.complete_param("tsk.fls", "o", set())
         assert live_completer.complete_param("tsk.fls", "o", {"offset_sectors"}) == []
 
+    def test_prompt_toolkit_async_path(self, live_completer):
+        """prompt_toolkit's async completer calls get_completions_async from
+        the Completer base class — a duck-typed completer crashes on first
+        Tab (observed live). Exercise the real async path."""
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.document import Document
+
+        async def hits(text):
+            doc = Document(text, len(text))
+            return [x.text async for x in
+                    live_completer.get_completions_async(doc, CompleteEvent())]
+
+        assert "ez.mftecmd" in asyncio.run(hits("ez.m"))
+        assert "tsk.fls" in asyncio.run(hits("fls"))
+        assert "offset_sectors=" in asyncio.run(hits("tsk.fls image=/x o"))
+
     def test_every_alias_targets_a_mounted_tool(self, live_completer):
         for alias, dotted in live_completer.aliases.items():
             base = dotted.rstrip("*")
