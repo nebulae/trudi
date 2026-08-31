@@ -199,6 +199,10 @@ class PilotCompleter(Completer):
                 key, value = current.split("=", 1)
                 for hit in complete_path(value):
                     yield Completion(hit, start_position=-len(value))
+            elif current and ("/" in current or current.startswith("~")):
+                # a bare path in argument position completes as a path too
+                for hit in complete_path(current):
+                    yield Completion(hit, start_position=-len(current))
             else:
                 for hit in self.complete_param(tool, current, used):
                     yield Completion(hit, start_position=-len(current))
@@ -420,25 +424,44 @@ def guess_value(param: str, prop: dict, evidence: list[str]) -> str:
     return ""
 
 
+_PATTERNISH = ("pattern", "query", "regex", "search", "grep")
+
+
 def prefill_command(suggestion: str, schema_map: dict, evidence: list[str]) -> str:
-    """Turn a work-order suggestion into an editable command with its
-    required args present. A suggestion that already carries args (the
-    ritual items) is used verbatim; a bare tool name gets `key=value` for
-    every required schema param — value guessed where possible, left empty
-    to fill in where not."""
+    """Turn a work-order suggestion into an editable command in OUR syntax.
+
+    Already key=value (the ritual items): verbatim. Anything else — a bare
+    tool name, or a DAIR/reason suggestion in CLI style with flags and
+    placeholder paths ("net.ngrep_search -p 'Cookie:' /path/to/x.pcap") —
+    is REBUILT from the schema: required params with values guessed from
+    schema defaults and case evidence; a quoted string in the suggestion is
+    adopted into the first pattern-ish param. Unguessable values stay
+    `key=` to fill in. Unknown tools pass through untouched."""
     parts = suggestion.split()
-    if len(parts) != 1:
+    tool = parts[0] if parts else ""
+    rest = parts[1:]
+    if rest and all("=" in t for t in rest):
         return suggestion
-    tool = parts[0]
     schema = schema_map.get(dotted_to_wire(tool))
     if not schema:
         return suggestion
     props = schema.get("properties", {})
-    required = schema.get("required", [])
-    frags = [tool]
+    required = list(schema.get("required", []))
+    quoted = next((a or b for a, b in
+                   re.findall(r"'([^']+)'|\"([^\"]+)\"", suggestion)), "")
+    args: dict[str, str] = {}
     for param in required:
-        value = guess_value(param, props.get(param, {}), evidence)
-        if value and (" " in value):
+        args[param] = guess_value(param, props.get(param, {}), evidence)
+    if quoted:
+        pat_param = next(
+            (p for p in list(required) + sorted(props)
+             if any(k in p.lower() for k in _PATTERNISH) and not args.get(p)),
+            None)
+        if pat_param:
+            args[pat_param] = quoted
+    frags = [tool]
+    for param, value in args.items():
+        if value and (" " in value or "|" in value):
             value = f'"{value}"'
         frags.append(f"{param}={value}")
     return " ".join(frags)
@@ -539,6 +562,12 @@ async def run(stdio: bool = False) -> None:
             lexer=PilotLexer(),
             reserve_space_for_menu=6,
         )
+        # Separate session for PROSE input (the summary). Passing a message
+        # to prompt_async() PERSISTS it on the session (observed live: every
+        # later prompt read "summary> "), and prose must not get tool-name
+        # completion — so it gets its own session, not an override.
+        prose_session = PromptSession(
+            [("class:key", "summary> ")], style=PILOT_STYLE)
 
         def _prefill(suggestion: str) -> str:
             return prefill_command(suggestion, schema_map, evidence_paths)
@@ -550,8 +579,8 @@ async def run(stdio: bool = False) -> None:
                 print(f"  drafted summary of your last {len(state.ran)} "
                       f"call(s) — edit it, or press enter to send:")
                 draft = wo.draft_summary(state)
-                summary = (await session.prompt_async(
-                    [("class:key", "summary> ")], default=draft)).strip() or draft
+                summary = (await prose_session.prompt_async(
+                    default=draft)).strip() or draft
             else:
                 summary = wo.opening_summary(state)
                 print(f"  {_CYAN}summary:{_RESET} {summary}")

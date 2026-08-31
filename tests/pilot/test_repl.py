@@ -74,6 +74,28 @@ class TestPrefill:
         assert prefill_command("no.such_tool", self.SCHEMAS, self.EVIDENCE) == \
             "no.such_tool"
 
+    def test_cli_style_suggestion_rebuilt_from_schema(self):
+        """DAIR/reason suggestions arrive CLI-shaped with placeholder paths
+        (observed live: net.ngrep_search -p 'Cookie:|user=' /path/to/x.pcap).
+        They must be rebuilt into our syntax with real values."""
+        from pilot.repl import prefill_command
+        schemas = {
+            "net_ngrep_search": {
+                "properties": {"pcap_path": {"type": "string"},
+                               "pattern": {"type": "string"}},
+                "required": ["pcap_path", "pattern"]},
+            **self.SCHEMAS,
+        }
+        line = prefill_command(
+            "net.ngrep_search -p 'Cookie:|user=|login' /path/to/suspicious.pcap",
+            schemas, self.EVIDENCE)
+        assert line == ('net.ngrep_search pcap_path="/e/case dir/nitroba.pcap" '
+                        'pattern="Cookie:|user=|login"')
+        # flags + placeholder path with no quoted pattern: rebuilt clean
+        assert prefill_command("tsk.fls -r -m /mnt/disk_image",
+                               schemas, self.EVIDENCE) == \
+            "tsk.fls image=/e/disk.E01"
+
     def test_schema_default_wins_over_evidence(self):
         from pilot.repl import guess_value
         assert guess_value("pcap_path", {"default": "/x.pcap"},
@@ -311,6 +333,10 @@ class TestCompletion:
 
         assert asyncio.run(hits("tsk.fls image=ev")) == ["evidence/"]
         assert asyncio.run(hits("tsk.fls image=evidence/")) == ["evidence/disk.E01"]
+        # a bare path in argument position completes too (observed live:
+        # "net.ngrep_search … ./evidence/" had no completion)
+        assert asyncio.run(hits("tsk.fls ./ev")) == ["./evidence/"]
+        assert asyncio.run(hits("tsk.fls evidence/")) == ["evidence/disk.E01"]
         # shell mode: paths complete for arguments
         assert "evidence/" in asyncio.run(hits("ls ev"))
         assert "evidence/" in asyncio.run(hits("!du -sh ev"))
