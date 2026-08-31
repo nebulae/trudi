@@ -181,22 +181,6 @@ else
     warn "trudi wrapper missing at $TRUDI_BIN_SRC"
 fi
 
-# vera (optional, pilot mode's record + UI). Library needs >=3.10; vera's CLI
-# needs python3.12 (PEP 701 f-strings) — the mirror works either way.
-if [ -d "$HOME/vera" ]; then
-    if python3 -c "import vera" 2>/dev/null; then
-        ok "vera importable (pilot mirror available)"
-    else
-        python3 -m pip install --user -e "$HOME/vera" 2>/dev/null \
-            && ok "Installed vera (editable) from ~/vera" \
-            || warn "vera present at ~/vera but pip install failed — pip >=23 needed for editable installs (python3 -m pip install --user --upgrade pip)"
-    fi
-else
-    echo "    vera not found at ~/vera — pilot mode runs without the .vera mirror."
-    echo "    To enable: git clone https://github.com/nebulae/vera ~/vera && python3 -m pip install --user -e ~/vera"
-fi
-
-
 # ── 1d. MITRE ATT&CK reference table ─────────────────────────────────────────
 
 step "Installing MITRE ATT&CK reference table"
@@ -290,7 +274,23 @@ fi
 warn "Installing Python dependencies — this can take several minutes (flare-capa / flare-floss / yara-python are large). Progress shown below."
 "$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements.txt"
 "$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements-dev.txt"
-ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, pytest)"
+ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, prompt_toolkit, pytest)"
+
+# vera (optional — pilot mode's record + UI) goes into the SAME venv the
+# bin/trudi launcher uses. Library needs >=3.10; vera's own CLI needs
+# python3.12 (PEP 701 f-strings) — the pilot mirror works either way.
+if [ -d "$HOME/vera" ]; then
+    if "$VENV_DIR/bin/python3" -c "import vera" 2>/dev/null; then
+        ok "vera importable in venv (pilot mirror available)"
+    else
+        "$VENV_DIR/bin/pip" install --quiet -e "$HOME/vera" \
+            && ok "Installed vera (editable) from ~/vera into venv" \
+            || warn "vera present at ~/vera but pip install failed"
+    fi
+else
+    echo "    vera not found at ~/vera — pilot mode runs without the .vera mirror."
+    echo "    To enable: git clone https://github.com/nebulae/vera ~/vera && rerun install.sh"
+fi
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
 
