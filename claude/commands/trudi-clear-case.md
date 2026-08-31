@@ -23,7 +23,7 @@ The argument, if supplied, names the case. Otherwise read it from
 
 | Removed | Preserved |
 |---|---|
-| `analysis/*`, `exports/*`, `reports/*` (except `generate_pdf_report.py`) | `CLAUDE.md` |
+| `analysis/*`, `exports/*`, `reports/*` | `CLAUDE.md` |
 | `~/.cache/trudi/session.json` | `.claude/settings.json` (tool allowlist) |
 | `~/.claude/projects/<encoded-case-dir>/memory/*` (the case's project memory) | any `evidence/`, mounted images |
 | **live:** `monitoring/` (alerts, response, baselines, watchers, artifacts, seq/open-inv state) | top-level case data files (e.g. `ground_truth.json`) |
@@ -43,9 +43,8 @@ so it can never touch the global `~/.claude/projects/-home-trin/memory/`.
 ### 2. Build the removal preview (read-only — delete NOTHING yet)
 Enumerate the *actual* targets so the operator sees exactly what will go.
 Use read-only shell (`ls`, `find … | wc -l`, `du -sh`) — no `rm`:
-- **Outputs:** list contents of `analysis/`, `exports/`, `reports/`
-  (note the `generate_pdf_report.py` exception if present). Show each
-  file (or a count + total size if large).
+- **Outputs:** list contents of `analysis/`, `exports/`, `reports/`.
+  Show each file (or a count + total size if large).
 - **Project memory:** compute `encoded = <abs case_dir>` with `/`→`-`;
   list files under `~/.claude/projects/<encoded>/memory/` (state "none"
   if the dir is absent/empty).

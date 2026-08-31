@@ -155,7 +155,14 @@ def _next_shared_id(trace_path: str) -> int:
     return n
 
 
-def _process(transcript_path: str, trace_path: str, payload: dict) -> None:
+def _nullfile():
+    """Context manager yielding an empty line-iterable (no-transcript case)."""
+    import contextlib
+    import io
+    return contextlib.closing(io.StringIO(""))
+
+
+def _process(transcript_path: str | None, trace_path: str, payload: dict) -> None:
     # 1) Load dedup state — scoped per session so one session's churn can't
     #    evict another's dedup keys (the uuid stream is per-transcript).
     state = json.loads(_STATE_FILE.read_text()) if _STATE_FILE.exists() else {}
@@ -182,9 +189,10 @@ def _process(transcript_path: str, trace_path: str, payload: dict) -> None:
 
     new_entries: list[dict] = []
 
-    # 3) New narrations from the transcript.
+    # 3) New narrations from the transcript (skipped when no transcript exists,
+    #    e.g. under the OpenCode adapter).
     new_uuids = []
-    with open(transcript_path, encoding="utf-8") as f:
+    with open(transcript_path, encoding="utf-8") if transcript_path else _nullfile() as f:
         for raw in f:
             raw = raw.strip()
             if not raw:
@@ -287,9 +295,11 @@ def main() -> None:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
         return
+    # No transcript (e.g. the OpenCode adapter, which has no transcript file):
+    # proceed with tool_call logging only — the narration scan is skipped.
     transcript_path = payload.get("transcript_path")
-    if not transcript_path or not Path(transcript_path).exists():
-        return
+    if transcript_path and not Path(transcript_path).exists():
+        transcript_path = None
 
     _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock = open(_LOCK_FILE, "w")

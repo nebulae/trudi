@@ -310,3 +310,38 @@ class TestStartExecutionLogIntegratesDashboard:
         assert "dashboard_url" not in r
         assert "dashboard_error" not in r
         assert not (case / "analysis" / "dashboard.url").exists()
+
+
+class TestTraceNameFidelity:
+    """The deep link and the trace filename must describe the REAL file —
+    a model that names the trace unexpectedly must not make the run
+    invisible to the dashboard (observed live: output_path without .json +
+    a {detected_case_id}_trace.json guess → dashboard showed nothing)."""
+
+    def test_launch_dashboard_deep_links_actual_trace(
+        self, standalone_server, monkeypatch,
+    ):
+        from tools import misc
+
+        cases_root = standalone_server["cases_root"]
+        case = _seed_case(cases_root, "fidelity-case", "FID")
+        monkeypatch.setattr(
+            misc, "_DASHBOARD_DISCOVERY_FILE", str(standalone_server["discovery"]),
+        )
+        r = misc.launch_dashboard(
+            str(case), trace_path=str(case / "analysis" / "ODD-NAME_trace.json"))
+        assert r["success"] is True
+        assert "?trace=/fidelity-case/analysis/ODD-NAME_trace.json" in r["url"]
+
+    def test_start_execution_log_appends_json_extension(self, tmp_path):
+        from tools import misc
+
+        case = tmp_path / "ext-case"
+        (case / "analysis").mkdir(parents=True)
+        r = misc.start_execution_log(
+            "EXT-TEST", str(case / "analysis" / "EXT-TEST_trace"),
+            launch_dashboard=False)
+        assert r["success"] is True
+        assert r["log_path"].endswith("EXT-TEST_trace.json")
+        assert (case / "analysis" / "EXT-TEST_trace.json").exists()
+        assert not (case / "analysis" / "EXT-TEST_trace").exists()

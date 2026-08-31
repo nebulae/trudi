@@ -558,6 +558,36 @@ def _split_thinking(content: str, tags: tuple[str, ...] | None = None) -> tuple[
     return answer.strip(), "".join(thinking_parts).strip()
 
 
+def _salvage_thinking_answer(reasoning: str) -> str:
+    """Recover a COMPLETED answer that was misclassified as chain-of-thought.
+
+    Observed live (Titus under the base-Qwen chat template): the model finishes
+    normally (finish_reason=stop) with a full, conclusive analysis — but the
+    entire generation sits inside think-tag territory (template pre-opens
+    `<think>` and the model never emits the close tag), so `_split_thinking`
+    classifies everything as thinking and the visible answer is empty. That is
+    a tag-plumbing artifact, not an incomplete thought: the model committed and
+    stopped. Strip the tag literals (keeping the text between them) and the
+    special-token litter, and require minimal substance so an empty think block
+    ("<think>\n\n</think>") or a stray token is never promoted.
+
+    Returns the salvaged answer, or "" when there is nothing safe to promote.
+    ONLY valid for finish_reason=stop — a length-truncated thought is genuinely
+    incomplete and must never be promoted (see the caller's gating).
+    """
+    if not reasoning or not reasoning.strip():
+        return ""
+    tag_literal_re = re.compile(
+        "|".join(re.escape(t) for pair in COMPAT_THINK_TAGS for t in pair),
+        re.IGNORECASE)
+    salvaged = _strip_special_token_litter(tag_literal_re.sub("", reasoning)).strip()
+    # Substance floor: a salvage shorter than this is more likely litter than
+    # an answer; an honest empty-response failure beats promoting a fragment.
+    if len(salvaged) < 40:
+        return ""
+    return salvaged
+
+
 def _compat_extra_body() -> dict:
     """Parse TRUDI_COMPAT_EXTRA_BODY; {} when unset or malformed (warned once)."""
     if not COMPAT_EXTRA_BODY_RAW:
@@ -623,7 +653,11 @@ def _compat_chat(url: str, api_key: str, model: str, system: str, user: str,
     """POST /v1/chat/completions with thinking-aware budgeting and parsing.
 
     Never raises. Returns:
-      ok              bool  — a non-empty visible answer was obtained
+      ok              bool  — a non-empty visible answer was obtained (or, for
+                              finish_reason=stop with empty content, salvaged
+                              from the think-classified text — see
+                              _salvage_thinking_answer; meta.answer_source is
+                              then "reasoning_salvage")
       text            str   — the answer (inline <think> blocks stripped)
       reasoning       str   — chain-of-thought (reasoning_content / inline)
       error           str   — populated when ok is False
@@ -727,9 +761,10 @@ def _compat_chat(url: str, api_key: str, model: str, system: str, user: str,
         text, inline_think = _split_thinking(message.get("content") or "")
         text = _strip_special_token_litter(text)
         # vLLM/SGLang reasoning parsers: `reasoning_content`; some gateways:
-        # `reasoning`. The chain-of-thought is diagnostic only — it is never
-        # promoted to the answer (it carries no DIRECTIVES block and is not the
-        # model's committed conclusion).
+        # `reasoning`. The chain-of-thought is diagnostic — a length-truncated
+        # thought is never promoted to the answer (not a committed conclusion);
+        # the one exception is the finish_reason=stop salvage below, where the
+        # COMPLETED generation was merely misclassified as thinking.
         reasoning = (message.get("reasoning_content") or message.get("reasoning")
                      or inline_think or "")
         usage = body.get("usage") or {}
@@ -746,6 +781,25 @@ def _compat_chat(url: str, api_key: str, model: str, system: str, user: str,
             return {"ok": True, "text": text, "reasoning": reasoning, "error": "",
                     "meta": meta, "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens}
+
+        # Empty answer but the model FINISHED (stop): the whole generation was
+        # classified as thinking (unterminated/inline think tags, or a server
+        # reasoning parser that captured everything). The analysis is complete
+        # — promote it, flagged for audit. Never done for finish_reason=length:
+        # a truncated thought is not a committed conclusion.
+        if meta["finish_reason"] == "stop":
+            salvaged = _salvage_thinking_answer(reasoning)
+            if salvaged:
+                meta["answer_source"] = "reasoning_salvage"
+                import sys as _sys
+                print(f"[TRUDI WARN] {tool_name}: empty content with completed "
+                      f"generation (finish_reason=stop) — promoted the "
+                      f"think-classified text to the answer "
+                      f"(answer_source=reasoning_salvage)", file=_sys.stderr)
+                return {"ok": True, "text": salvaged, "reasoning": reasoning,
+                        "error": "", "meta": meta,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens}
 
         # Empty answer. Only a budget exhaustion is worth a retry.
         out_of_budget = meta["finish_reason"] == "length"

@@ -651,12 +651,19 @@ def tcpxtract_streams(
     output_dir: str,
 ) -> dict:
     """
-    Extract TCP streams from a PCAP file using tcpxtract.
-    Reconstructs full TCP sessions as individual files — useful for recovering
-    transferred documents, executables, or web content from captured traffic.
+    Start a BACKGROUND carve of TCP streams from a PCAP using tcpxtract.
+    Returns a job_id IMMEDIATELY — poll misc.job_status(job_id) between other
+    work; carved files appear incrementally in output_dir. The finished
+    job_status result is the citable record for findings.
     output_dir: destination for extracted stream files.
     """
     import os
     os.makedirs(output_dir, exist_ok=True)
     cmd = ["tcpxtract", "-f", pcap_file, "-o", output_dir]
-    return run(cmd, needs_sudo=True, timeout=300, output_dir=output_dir)
+    # Carve-class BACKGROUND JOB: a full-pcap carve runs 30+ minutes and must
+    # not block the driver's turn (or invite a client-side cancellation). The
+    # job runs detached with an 1800s hard budget; carved files appear in
+    # output_dir incrementally and survive a timeout as usable partials.
+    from core.jobs import start_job
+    return start_job(cmd, tool="net.tcpxtract_streams", timeout=1800,
+                     output_dir=output_dir, needs_sudo=True)

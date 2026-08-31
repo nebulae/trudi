@@ -820,6 +820,11 @@ def start_execution_log(case_id: str, output_path: str,
     stderr and written to <analysis_dir>/dashboard.url for easy retrieval.
     """
     from core.execution_log import log
+    # Normalize: the dashboard discovers traces by *_trace.json — an
+    # extension-less output_path (models omit it) would make the run
+    # invisible there while writing fine.
+    if not output_path.endswith(".json"):
+        output_path = output_path + ".json"
     # Self-test: configure flushes the initial empty trace, and our explicit
     # sentinel write confirms record_* works end-to-end. Either failure
     # surfaces as a clean error return rather than an unhandled exception.
@@ -860,7 +865,8 @@ def start_execution_log(case_id: str, output_path: str,
             import sys as _modsys
             _dash_fn = _modsys.modules[__name__].launch_dashboard
             try:
-                dash = _dash_fn(case_dir, port=dashboard_port)
+                dash = _dash_fn(case_dir, port=dashboard_port,
+                                trace_path=output_path)
             except (OSError, ValueError) as _disc_err:
                 # Disk / parse / discovery problems are non-fatal — the
                 # investigation can run without the dashboard. Surface in
@@ -1804,11 +1810,23 @@ def record_agent_message(
 
 
 @mcp.tool()
+def job_status(job_id: str) -> dict:
+    """
+    Poll a background job (e.g. net.tcpxtract_streams). While running:
+    status + elapsed + files-so-far. When finished: the full tool result —
+    trace-logged with a citable _trudi_call_id on first collection. Poll
+    between other work; never wait idle on a running job.
+    """
+    from core.jobs import job_status as _job_status
+    return _job_status(job_id)
+
+
+@mcp.tool()
 @output_safe
 def clear_case_run(case_dir: str) -> dict:
     """
     Reset a case for a fresh investigation run. Deletes:
-      - analysis/, exports/, reports/ contents (preserves generate_pdf_report.py)
+      - analysis/, exports/, reports/ contents
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
@@ -1822,8 +1840,6 @@ def clear_case_run(case_dir: str) -> dict:
     for subdir in ("analysis", "exports", "reports"):
         target = os.path.join(case_dir, subdir)
         for item in glob.glob(os.path.join(target, "*")):
-            if os.path.basename(item) == "generate_pdf_report.py":
-                continue
             try:
                 if os.path.isdir(item):
                     shutil.rmtree(item)
@@ -2142,7 +2158,8 @@ def _discover_dashboard() -> dict | None:
     return info
 
 
-def launch_dashboard(case_dir: str, port: int = 8765) -> dict:
+def launch_dashboard(case_dir: str, port: int = 8765,
+                     trace_path: str = "") -> dict:
     """Discover the running standalone dashboard and return a deep-link URL.
 
     Does NOT start any server — that's the standalone `trudi-dashboard`
@@ -2160,7 +2177,12 @@ def launch_dashboard(case_dir: str, port: int = 8765) -> dict:
     info = _discover_dashboard()
     case_id = _detect_case_id(case_dir)
     case_basename = os.path.basename(case_dir)
-    trace_rel = f"/{case_basename}/analysis/{case_id}_trace.json"
+    if trace_path:
+        # Deep-link the ACTUAL trace file — the {case_id}_trace.json guess
+        # breaks whenever the operator/agent named the trace differently.
+        trace_rel = f"/{case_basename}/analysis/{os.path.basename(trace_path)}"
+    else:
+        trace_rel = f"/{case_basename}/analysis/{case_id}_trace.json"
 
     if not info:
         return {
@@ -2364,3 +2386,4 @@ def knowns_pattern_generate(
             pass
 
     return result
+

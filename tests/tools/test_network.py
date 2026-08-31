@@ -205,13 +205,20 @@ class TestTcpdumpWriteFiltered:
 
 
 class TestTcpxtractStreams:
-    def test_output_dir_safe(self, tmp_path, mock_run):
+    # tcpxtract now runs as a BACKGROUND JOB (core.jobs) — a full-pcap carve
+    # must not block the driver's turn. Job mechanics are covered in
+    # tests/core/test_jobs.py::TestTcpxtractIsAJob; here we cover the tool's
+    # own contract: it returns a running-job handle and honours output safety.
+    def test_returns_job_handle(self, tmp_path):
         from tools.network import tcpxtract_streams
+        from unittest.mock import patch
         out = str(tmp_path / "streams")
-        tcpxtract_streams(PCAP, out)
-        cmd = mock_run.call_args[0][0]
-        assert "tcpxtract" in cmd
-        assert "-o" in cmd
+        with patch("core.jobs.subprocess.Popen") as popen:
+            popen.return_value.pid = 4242
+            r = tcpxtract_streams(PCAP, out)
+        assert r["status"] == "running" and r["job_id"]
+        script = popen.call_args[0][0][2]
+        assert "tcpxtract" in script and "-o" in script
 
     def test_evidence_output_blocked(self):
         from tools.network import tcpxtract_streams

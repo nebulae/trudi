@@ -1,6 +1,7 @@
-# CLAUDE.md
+# TRUDI Orchestrator
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file directs the coding agent running a TRUDI investigation — installed as
+`~/.claude/CLAUDE.md` for Claude Code and as `AGENTS.md` for OpenCode.
 
 ## DFIR Orchestrator — TRUDI / SANS SIFT Workstation
 
@@ -16,6 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Operator Preferences
 
 - **NEVER ask questions during a task.** Run workflows fully autonomously. No check-ins, no confirmations. Deliver final findings only. If blocked, pick the most reasonable path and note it in the output.
+- **Tool calls are made ONLY through the tool-calling interface.** NEVER write a tool invocation as text or inside a code block — written calls execute nothing. If you catch yourself describing a call (`net.ngrep_search(...)`, "run vol..."), STOP and execute it as a real tool call instead. A turn that ends with a plan instead of executed tool calls stalls the investigation: keep calling tools until the phase's work order is done.
 - **Never manually edit TRUDI cache files** (`~/.cache/trudi/call_id.counter`, `~/.cache/trudi/session.json`, `~/.cache/trudi/hook_state.json`, `~/.cache/trudi/session_owner.json`). To reset cleanly: `python -m tools.trudi_reset --case-dir <case>` — acquires the fcntl lock and atomically clears all three cache files plus the trace (optional `.trace-backups/<ts>/` backup). Manual edits desync the counter from the trace and cause duplicate call_ids.
 
 ---
@@ -29,6 +31,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Output routing** — all scripts, CSVs, JSON, reports go to `./analysis/`, `./exports/`, `./reports/`. Never `/` or evidence dirs. **`reports/` is written only by `misc.write_final_report`** (gated on `reason.pre_report_check` `ready_to_report=true`); raw `Write`/`Edit`/`MultiEdit` and Bash redirects / `tee` / `cp` into `reports/`, **`exports/` and `analysis/.tool_output/`** are refused at PreToolUse — those directories hold tool output only. **An agent-authored file is never evidence**: writing "verbatim excerpts" of a mailbox or CSV into a file and citing a `read.*` of it is refused by `record_finding` (gate `agent_authored_source`) and shown to the reviewer as `not evidence`; when the reviewer missed rows, issue/let it issue another `EVIDENCE_REQUEST` over the tool-produced file with better terms. Reasoning and notes go in the trace via `misc.record_agent_message` — the agent has NO raw-write capability to `analysis/`, `exports/` or `reports/` (all three hold tool output only; a raw write there is refused at PreToolUse).
 - **Timestamps** — always UTC.
 - **Verification** — check `success: true` after every run. On failure: read `stderr` → hypothesize → correct → retry.
+- **Control-plane notices** — a tool result carrying `dair_notice` or `finding_notice` is an instruction: make the named call (exact shape included in the notice) before any further forensic tool calls. Ignoring it escalates to a refusal (`dair_engagement_gate`).
+- **Background jobs** — carve-class tools (`net.tcpxtract_streams`, and other long carves) return a `job_id` immediately instead of blocking the turn. Poll `misc.job_status(job_id)` between other work — never sit idle on a running job; a timed-out carve still yields usable partials in its output dir. The finished `job_status` result carries the citable `_trudi_call_id` for findings from the carve.
 - **MCP routing is mandatory.** Never invoke these binaries via Bash: `vol`, `dotnet …Cmd.dll`, `fls/icat/istat/blkls/mactime/tsk_recover`, `hexdump/xxd/exiftool`, `log2timeline.py/psort.py`, `yara`, `bulk_extractor/foremost/scalpel`, `ewfmount/vshadowmount/bdemount/xmount`, `tcpdump`, `clamscan`, `rip.pl`. `record_finding` refuses any finding whose `linked_call_id` points to a `source="claude_code_bash"` entry executing one of these (gate: `mcp_routing`). Use the MCP wrapper (`vol_*`, `ez_*`, `tsk_*`, `strings_*`, `plaso_*`, `yara_*`, `carve_*`, `ewf_*`, `net_*`, `misc_regripper_*`).
 
 ---

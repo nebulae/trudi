@@ -18,7 +18,7 @@ Two ways to evaluate TRUDI, shortest first:
 | Need | For | Notes |
 |------|-----|-------|
 | **SANS SIFT Workstation** (Ubuntu 24.04 x86-64) | Path B (the forensic tools) | Path A only needs Python 3.10+ and a browser. [Download](https://www.sans.org/tools/sift-workstation/) |
-| **Protocol SIFT** (Claude Code + skill playbooks) | Both | [github.com/teamdfir/protocol-sift](https://github.com/teamdfir/protocol-sift) |
+| **Claude Code CLI** | Both | `curl -fsSL https://claude.ai/install.sh \| bash` (or `npm install -g @anthropic-ai/claude-code`) |
 | **Python 3.10+** and **dotnet** | Both | Included in SIFT |
 | **`ANTHROPIC_API_KEY`** | Path B (full-quality) | Powers the analyst + `reason.*` + `dair.*`. See the degradation note above. |
 
@@ -40,7 +40,8 @@ cd ~/trudi
 - Install the dashboard launcher (`trudi-dashboard` → `/usr/local/bin`)
 - Copy the MITRE ATT&CK table and the **bundled case studies** into `~/cases/` (existing cases are never overwritten)
 - Back up then install the TRUDI orchestrator to `~/.claude/CLAUDE.md`
-- Register the Claude Code **hooks**, the 5 **`/trudi-*` slash commands**, and the 5 **skills** — all run from the repo path (no drift-prone copies)
+- Register the Claude Code **hooks** and the 5 **`/trudi-*` slash commands** — all run from the repo path (no drift-prone copies)
+- Configure **OpenCode side-by-side** when detected (MCP + deny rules + commands + hook-adapter plugin + `AGENTS.md`) — see the README's *OpenCode support* section
 - Register the **`trudi-sift` MCP server** globally
 - Run the test suite (1,100+ tests) as a smoke check
 
@@ -190,9 +191,8 @@ For the others, the published answer keys and TRUDI's scored results are in the 
 # MCP server is registered
 claude mcp list | grep trudi-sift
 
-# Slash commands + skills are installed
+# Slash commands are installed
 ls ~/.claude/commands/trudi-*.md
-ls ~/.claude/skills/
 
 # The test suite passes (also run by install.sh)
 cd ~/trudi && source ~/.venv/bin/activate && pytest -n auto --no-cov -q   # ~30 s; drop -n auto for a serial run
@@ -212,7 +212,7 @@ cd ~/trudi && source ~/.venv/bin/activate && pytest -n auto --no-cov -q   # ~30 
 | Port 8765 in use | `./dashboard.sh --port 9090` |
 | Volatility plugin times out / `-1` exit | Symbols not cached — run `vol.symbol_check` on the image first; raise `TRUDI_VOL_TIMEOUT` in `.env` on slow hardware. |
 | EZ Tools fail | `dotnet` missing — install the SIFT Workstation, which bundles the .NET runtime. |
-| `claude: command not found` | Install Protocol SIFT first (it installs Claude Code). |
+| `claude: command not found` | Install the Claude Code CLI: `curl -fsSL https://claude.ai/install.sh \| bash`. |
 | `Unable to locate package <pst-utils/pff-tools/tcpxtract>` | `universe` apt component not enabled, or apt index stale on a fresh image. `sudo add-apt-repository -y universe && sudo apt-get update`, then re-run `./install.sh`. (The package is `pst-utils`, never `libpst-utils`.) |
 | `misc.readpst_extract` / `misc.pff_export` fail with "not installed" | `pst-utils` / `pff-tools` missing — see [System forensic packages](#system-forensic-packages). |
 | venv step fails: `ensurepip is not available` | The venv package matching your `python3` isn't installed — **the SIFT base does not ship it** (SIFT's `python3` is 3.12). Install the **version-matched** package, not just the metapackage: `sudo apt-get install -y python3.12-venv python3-pip` (replace `3.12` with `python3 --version`), then `rm -rf ~/.venv` and re-run `./install.sh`. (`install.sh` now auto-installs the matching `pythonX.Y-venv` and retries.) |

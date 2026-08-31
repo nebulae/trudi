@@ -250,13 +250,17 @@ class TestThinkingBudget:
         assert logged["backend_meta"]["attempts"] == 2
         assert "Let me think" in logged["backend_meta"]["reasoning_excerpt"]
 
-    def test_reasoning_content_is_never_promoted_to_answer(self, trace_log):
+    def test_truncated_reasoning_is_never_promoted_to_answer(self, trace_log):
+        """finish_reason=length: an incomplete thought is not a conclusion —
+        the stop-only salvage (TestReasoningSalvage) must NOT engage here."""
         from tools.reasoning import reason_hypothesize
         http = MagicMock(side_effect=[_exhausted(), _exhausted()])
         with patch("httpx.post", http):
             r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is False
         assert "Let me think" not in r["conclusion"]
         assert r["directives"] == {}
+        assert r["backend_meta"].get("answer_source") is None
 
     def test_empty_answer_without_length_does_not_retry(self, trace_log):
         from tools.reasoning import reason_hypothesize
@@ -692,3 +696,81 @@ class TestExecutionLogFields:
         dentry = next(e for e in log._entries if e.get("call_id") == dcid)
         assert dentry["error"] == "boom"
         assert dentry["backend_meta"] == {"attempts": 1}
+
+
+# ── Salvage-on-stop: completed answer misclassified as thinking ──────────────
+# Observed live (Titus, base-Qwen template): finish_reason=stop with empty
+# `content` and a COMPLETE conclusive analysis in think-classified text — the
+# template pre-opens <think> and the model never closes it. A finished
+# generation is a committed conclusion; only length-truncation is not.
+
+_SALVAGE_ANSWER = (
+    "The evidence points toward deliberate harassment from the dorm device; "
+    "attribution requires correlating the AIM identity with the class roster.\n"
+    + _DIRECTIVES_JSON
+)
+
+
+class TestReasoningSalvage:
+    def test_stop_with_unterminated_inline_think_is_salvaged(self, trace_log):
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(
+            content="<think>" + _SALVAGE_ANSWER, finish_reason="stop"))
+        with patch("httpx.post", http):
+            r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is True
+        assert http.call_count == 1
+        assert "<think>" not in r["conclusion"]
+        assert "deliberate harassment" in r["conclusion"]
+        assert r["directives"]["priority_tools"] == ["net.http_session_inventory"]
+        assert r["backend_meta"]["answer_source"] == "reasoning_salvage"
+
+    def test_stop_with_server_side_reasoning_content_is_salvaged(self, trace_log):
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(
+            content=None, reasoning_content=_SALVAGE_ANSWER,
+            finish_reason="stop"))
+        with patch("httpx.post", http):
+            r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is True
+        assert "deliberate harassment" in r["conclusion"]
+        assert r["backend_meta"]["answer_source"] == "reasoning_salvage"
+
+    def test_empty_think_block_is_not_salvaged(self, trace_log):
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(
+            content="<think>\n\n</think>", finish_reason="stop"))
+        with patch("httpx.post", http):
+            r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is False
+        assert "empty response" in r["error"]
+
+    def test_below_substance_floor_is_not_salvaged(self, trace_log):
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(
+            content="<think>ok", finish_reason="stop"))
+        with patch("httpx.post", http):
+            r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is False
+
+    def test_length_truncation_is_never_salvaged(self, trace_log):
+        """Both attempts exhausted mid-think: salvage must not fire on length."""
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(side_effect=[
+            _resp(content="<think>" + _SALVAGE_ANSWER, finish_reason="length"),
+            _resp(content="<think>" + _SALVAGE_ANSWER, finish_reason="length"),
+        ])
+        with patch("httpx.post", http):
+            r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is False
+        assert r["backend_meta"].get("answer_source") is None
+
+    def test_salvage_strips_special_token_litter(self, trace_log):
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(
+            content="<think><|eot_id|>" + _SALVAGE_ANSWER + "<|eom_id|>",
+            finish_reason="stop"))
+        with patch("httpx.post", http):
+            r = reason_hypothesize("who sent the mail?")
+        assert r["success"] is True
+        assert "<|eot_id|>" not in r["conclusion"] and "<|eom_id|>" not in r["conclusion"]

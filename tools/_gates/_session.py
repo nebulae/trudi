@@ -31,13 +31,21 @@ LOGON_TOOL_RE = re.compile(
 )
 
 # Authentication / session markers in evidence TEXT (legacy validator).
+# ONLY genuine authenticated-session signals belong here. Identity / address
+# strings were removed 2026-08-29: a bare IPv4, "source ip", "x-originating-ip",
+# an Internet name or a cert CN prove PRESENCE or IDENTITY, not an authenticated
+# SESSION — and on a network/PCAP case every finding's evidence text contains an
+# IP, so the bare-IPv4 alternation made this fallback bind ANY human attribution
+# (observed live: an empty-`session_binding_call_ids` "Amy Smith, CONFIRMED"
+# passed principal_attribution_grounding purely because its prose mentioned an
+# IP). Binding a named person requires a real logon/session artifact — the
+# cited-cid `session_artifact` marker path, the logon-tool cmd path, or one of
+# these authentication markers; never merely an address.
 SESSION_RE = re.compile(
     r"(?:\blogon\b|\blog-on\b|\b4624\b|\b4625\b|\blogon type\s*\d+"
     r"|\btype\s*(?:3|10)\b|\binteractive session\b|\bremote session\b|\brdp\b"
     r"|\bsmb session\b|\bsshd\b|\bssh session\b|\bkerberos\b|\bntlm\b"
-    r"|\bsource (?:network )?address\b|\bsource ip\b|\boriginating ip\b"
-    r"|\bx-originating-ip\b|\binternetname\b|\bcert(?:ificate)? cn\b"
-    r"|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b)",
+    r"|\bsource network address\b)",
     re.IGNORECASE,
 )
 

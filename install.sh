@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# TRUDI install script — run this after Protocol SIFT setup is complete.
-# https://github.com/teamdfir/protocol-sift
+# TRUDI install script — run on a SANS SIFT Workstation with the Claude Code CLI installed.
 set -euo pipefail
 
 TRUDI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +37,7 @@ dotnet --version &>/dev/null || fail "dotnet not found — EZ Tools require the 
 ok "dotnet $(dotnet --version)"
 
 if ! command -v claude &>/dev/null && [ ! -x "$HOME/.local/bin/claude" ]; then
-    fail "Claude Code CLI not found. Install Protocol SIFT first: https://github.com/teamdfir/protocol-sift"
+    fail "Claude Code CLI not found. Install it first: curl -fsSL https://claude.ai/install.sh | bash"
 fi
 CLAUDE_BIN="$(command -v claude 2>/dev/null || echo "$HOME/.local/bin/claude")"
 ok "Claude Code at $CLAUDE_BIN"
@@ -330,33 +329,26 @@ else
     warn "No commands at $COMMANDS_SRC — skipping slash command install"
 fi
 
-# ── 6c. Claude Code skills ────────────────────────────────────────────────────
+# ── 6c. OpenCode support (optional, side-by-side) ────────────────────────────
 
-step "Installing Claude Code skills"
+step "OpenCode support (optional)"
 
-SKILLS_SRC="$TRUDI_DIR/claude/skills"
-SKILLS_DEST="$CLAUDE_DIR/skills"
-
-if [ -d "$SKILLS_SRC" ] && compgen -G "$SKILLS_SRC/*/SKILL.md" > /dev/null; then
-    mkdir -p "$SKILLS_DEST"
-    count=0
-    for skill_dir in "$SKILLS_SRC"/*/; do
-        [ -f "$skill_dir/SKILL.md" ] || continue
-        name="$(basename "$skill_dir")"
-        dest="$SKILLS_DEST/$name"
-        # Back up a pre-existing skill of the same name before overwriting,
-        # so a user's own customisations aren't silently clobbered.
-        if [ -d "$dest" ] && ! diff -rq "$skill_dir" "$dest" >/dev/null 2>&1; then
-            cp -r "$dest" "$dest.$(date -u +%Y%m%dT%H%M%S).bak"
-        fi
-        rm -rf "$dest"
-        cp -r "$skill_dir" "$dest"
-        count=$((count + 1))
-    done
-    ok "Installed $count skills to $SKILLS_DEST/"
+OPENCODE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+if command -v opencode &>/dev/null || [ -d "$OPENCODE_DIR" ]; then
+    # Registers the trudi-sift MCP server, derives the forensic-binary bash
+    # deny rules from the same ban list Claude Code uses, symlinks the
+    # /trudi-* commands + the hook-adapter plugin (repo path — no drift), and
+    # installs the orchestrator as AGENTS.md (existing file backed up).
+    if python3 "$TRUDI_DIR/opencode/register_opencode.py" \
+            "$OPENCODE_DIR" "$TRUDI_DIR" "$VENV_DIR/bin/python3"; then
+        ok "OpenCode configured at $OPENCODE_DIR (side-by-side with Claude Code)"
+    else
+        warn "OpenCode registration failed — Claude Code setup is unaffected"
+    fi
 else
-    warn "No skills at $SKILLS_SRC — skipping skill install"
+    ok "OpenCode not detected — skipping (re-run ./install.sh after installing it)"
 fi
+
 
 # ── 7. MCP server registration ────────────────────────────────────────────────
 
