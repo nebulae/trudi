@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from pilot.spike import (
+from pilot.repl import (
     PilotCompleter, build_alias_map, complete_path, dotted_to_wire,
     parse_command, shell_guard, wire_to_dotted,
 )
@@ -41,7 +41,7 @@ class TestLookAndFeel:
         command. The binding must fire only when a completion is selected,
         and must clear complete_state (accept) instead of submitting."""
         from prompt_toolkit.filters import Condition
-        from pilot.spike import make_key_bindings
+        from pilot.repl import make_key_bindings
 
         kb = make_key_bindings()
         [binding] = kb.bindings
@@ -63,7 +63,7 @@ class TestLookAndFeel:
         assert Event.current_buffer.called is False  # did NOT submit
 
     def test_classify_line_mcp_command(self):
-        from pilot.spike import classify_line
+        from pilot.repl import classify_line
         frags = classify_line("ez.mftecmd file=/x/$MFT csv=analysis/")
         assert ("class:ns", "ez") in frags
         assert ("class:tool", "mftecmd") in frags
@@ -71,14 +71,14 @@ class TestLookAndFeel:
         assert "".join(t for _, t in frags) == "ez.mftecmd file=/x/$MFT csv=analysis/"
 
     def test_classify_line_shell_and_builtin(self):
-        from pilot.spike import classify_line
+        from pilot.repl import classify_line
         assert classify_line("!du -sh .") == [("class:shell", "!du -sh .")]
         assert classify_line("ls evidence") == [("class:shell", "ls evidence")]
         assert classify_line("cd ..") == [("class:shell", "cd ..")]
         assert classify_line("tools mft")[0] == ("class:builtin", "tools")
 
     def test_print_result_headline(self, capsys):
-        from pilot.spike import print_result
+        from pilot.repl import print_result
         print_result({"success": True, "_trudi_call_id": 42, "rows": 3})
         out = capsys.readouterr().out
         assert "✓" in out and "cid 42" in out

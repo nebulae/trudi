@@ -68,7 +68,7 @@ def run_pilot(case_dir: str, stdio: bool) -> int:
     os.chdir(case_dir)
     import asyncio
 
-    from pilot.spike import run
+    from pilot.repl import run
     asyncio.run(run(stdio=stdio))
     return 0
 

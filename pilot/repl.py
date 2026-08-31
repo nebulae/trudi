@@ -1,4 +1,4 @@
-"""Phase-0 spike: prove the pilot REPL core feel.
+"""The pilot REPL — completion, navigation, and the work-order loop.
 
 Connects a fastmcp Client to the TRUDI server, builds an intellisense
 completer from the live tool schemas (tool names, parameter names, familiar
@@ -7,8 +7,8 @@ prompt_toolkit loop: complete → edit → call → print. Everything the real
 pilot needs to feel right, nothing else — no vera, no DAIR rendering, no
 analysis pass.
 
-    python -m pilot.spike            # in-process client (fast, default)
-    python -m pilot.spike --stdio    # spawn server.py over stdio (deployment shape)
+    python -m pilot.repl            # in-process client (fast, default)
+    python -m pilot.repl --stdio    # spawn server.py over stdio (deployment shape)
 
 Commands: `ns.tool key=value …` (values parsed as JSON when they parse,
 strings otherwise), `tools [substr]`, `schema ns.tool`, `exit`.
@@ -308,17 +308,24 @@ async def run(stdio: bool = False) -> None:
         completer = PilotCompleter(tools, build_alias_map())
 
         # Session bootstrap (bookkeeping auto-runs; see pilot/bootstrap.py).
-        # Only in a prepared case dir — a bare spike run stays a playground.
+        # Only in a prepared case dir — a bare run stays a playground.
+        from pilot import workorder as wo
         from pilot.bootstrap import (bootstrap, is_case_dir, parse_case_md,
                                      render_banner)
+        state = wo.SessionState()
         case_dir = os.environ.get("TRUDI_CASE_DIR") or os.getcwd()
         if is_case_dir(case_dir):
             info = parse_case_md(case_dir)
-            state = await bootstrap(client, info)
-            print(render_banner(info, state))
+            boot = await bootstrap(client, info)
+            print(render_banner(info, boot))
+            state.case_context = (f"Case {info.case_id}. "
+                                  f"Question: {info.question}")[:1500]
+            state.items = wo.resume_items() if boot.resumed \
+                else wo.ritual_items(info.question)
+            print(wo.render(state))
         else:
             print("(no case dir — playground session, nothing recorded)")
-        print(f"TRUDI pilot (spike) — {len(tools)} tools, tab completes "
+        print(f"TRUDI pilot — {len(tools)} tools, tab completes "
               f"(names, params, paths); 'tools <substr>' lists, 'schema ns.tool' "
               f"shows params, ls/cd/!cmd navigate, 'exit' quits")
 
@@ -335,15 +342,80 @@ async def run(stdio: bool = False) -> None:
             reserve_space_for_menu=6,
         )
 
+        async def do_assess() -> None:
+            """Call dair.assess with an editable auto-drafted summary, fold
+            the returned work order + phase transition into the state."""
+            draft = wo.draft_summary(state) if state.ran else \
+                "Investigation starting — no tools run yet"
+            summary = (await session.prompt_async(
+                [("class:key", "summary> ")], default=draft)).strip() or draft
+            try:
+                result = await client.call_tool("dair_assess", {
+                    "tool_results_summary": summary,
+                    "phase_stack": wo.phase_stack_json(state),
+                    "case_context": state.case_context,
+                    "input_call_ids": wo.ran_cids(state),
+                })
+                payload = result.structured_content or {}
+            except Exception as e:
+                print(f"{_RED}assess failed: {e}{_RESET}")
+                return
+            wo.apply_assess(state, payload)
+            rationale = payload.get("transition_rationale") or ""
+            if rationale:
+                print(f" dair: {rationale[:200]}")
+            print(wo.render(state))
+
+        pending_default = ""
         while True:
             try:
-                line = (await session.prompt_async()).strip()
+                line = (await session.prompt_async(
+                    default=pending_default)).strip()
+                pending_default = ""
             except (EOFError, KeyboardInterrupt):
                 break
             if not line:
                 continue
             if line in ("exit", "quit"):
                 break
+            # work-order interaction: number prefills, never auto-runs
+            if line.isdigit():
+                text = wo.select(state, int(line))
+                if text == "assess":
+                    await do_assess()
+                elif text:
+                    pending_default = text
+                else:
+                    print(f"{_YELLOW}no open work-order item {line}{_RESET}")
+                continue
+            if line in ("wo", "order"):
+                print(wo.render(state))
+                continue
+            if line == "assess":
+                await do_assess()
+                continue
+            if line.startswith("dismiss"):
+                parts = line.split()
+                if len(parts) != 3 or not parts[1].isdigit() or \
+                        parts[2] not in wo.DISMISS_REASONS:
+                    print(f"{_YELLOW}usage: dismiss N "
+                          f"{{{'|'.join(wo.DISMISS_REASONS)}}}{_RESET}")
+                    continue
+                item = wo.dismiss(state, int(parts[1]), parts[2])
+                if item is None:
+                    print(f"{_YELLOW}no open work-order item {parts[1]}{_RESET}")
+                    continue
+                target = item.text.split()[0]
+                try:
+                    await client.call_tool("misc_record_disposition", {
+                        "target_kind": "tool", "target_id": target,
+                        "reason": parts[2],
+                        "note": f"dismissed from pilot work order: {item.label}",
+                    })
+                    print(f"dismissed {target} ({parts[2]}) — recorded typed")
+                except Exception as e:
+                    print(f"{_RED}disposition failed: {e}{_RESET}")
+                continue
             if line.startswith("tools"):
                 sub = line.split(None, 1)[1] if " " in line else ""
                 for d in completer.dotted:
@@ -393,9 +465,18 @@ async def run(stdio: bool = False) -> None:
                 continue
             try:
                 result = await client.call_tool(tool, args)
-                print_result(result.structured_content)
+                payload = result.structured_content
+                print_result(payload)
+                ok = isinstance(payload, dict) and payload.get("success", True)
+                cid = payload.get("_trudi_call_id") if isinstance(payload, dict) else None
+                wo.record_ran(state, line, ok, cid)
+                if wo.needs_nag(state):
+                    print(f"{_YELLOW}{len(state.ran)} tools since the last "
+                          f"assess — type `assess` to get the next work "
+                          f"order{_RESET}")
             except Exception as e:
                 print(f"{_RED}error: {e}{_RESET}")
+                wo.record_ran(state, line, False)
 
 
 if __name__ == "__main__":

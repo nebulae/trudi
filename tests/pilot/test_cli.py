@@ -76,8 +76,8 @@ class TestDispatch:
 
         async def fake_run(stdio=False):
             calls["repl"] = stdio
-        import pilot.spike
-        monkeypatch.setattr(pilot.spike, "run", fake_run)
+        import pilot.repl
+        monkeypatch.setattr(pilot.repl, "run", fake_run)
         assert cli.main(["--mode", "pilot", "--case", str(tmp_path), "--stdio"]) == 0
         assert calls["cd"] == str(tmp_path)
         assert calls["repl"] is True
