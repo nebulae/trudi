@@ -52,8 +52,11 @@ class BootState:
 _CASE_ID = re.compile(r"\*\*Case ID:\*\*\s*(\S+)")
 _EVIDENCE_ROOT = re.compile(r"\*\*Evidence root:\*\*\s*`?([^`\n]+)`?")
 _QUESTION = re.compile(r"\*\*CASE_QUESTION:\*\*\s*(.+)")
-_ROSTER_HEAD = re.compile(r"^#+\s*(?:Roster|.*\broster\b.*)$", re.I | re.M)
+_ROSTER_HEAD = re.compile(
+    r"^#+\s*.*\b(?:roster|suspects?|class list|people of interest|"
+    r"persons of interest|occupants|personnel)\b.*$", re.I | re.M)
 _ROSTER_NAME = re.compile(r"^[-*|]\s*\*?\*?([A-Z][a-z]+(?: [A-Z][a-z]+)+)")
+_NAME_RUN = re.compile(r"\b([A-Z][a-z]+ [A-Z][a-z]+)\b")
 
 
 def is_case_dir(case_dir: str) -> bool:
@@ -85,13 +88,24 @@ def parse_case_md(case_dir: str) -> CaseInfo:
     if m := _EVIDENCE_ROOT.search(text):
         info.evidence_root = m.group(1).strip()
 
-    if m := _ROSTER_HEAD.search(text):
+    # roster: union of EVERY roster-ish section (a case file can carry both
+    # a suspects section and a class list — nitroba does), bullet names plus
+    # comma-separated name runs ("Amy Smith, Burt Greedom, Tuck Gorge, …")
+    names: list[str] = []
+    for m in _ROSTER_HEAD.finditer(text):
         section = text[m.end():]
         nxt = re.search(r"^#+\s", section, re.M)
         if nxt:
             section = section[:nxt.start()]
-        info.roster = [n.group(1) for line in section.splitlines()
-                       if (n := _ROSTER_NAME.match(line.strip()))]
+        for line in section.splitlines():
+            line = line.strip()
+            if n := _ROSTER_NAME.match(line):
+                names.append(n.group(1))
+            elif line.count(",") >= 2:
+                run = _NAME_RUN.findall(line)
+                if len(run) >= 3:  # a genuine name list, not prose
+                    names.extend(run)
+    info.roster = list(dict.fromkeys(names))
     return info
 
 
@@ -159,9 +173,11 @@ async def extract_case_info(client, info: CaseInfo, echo=print) -> None:
         extracted = json.load(open(cache, encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         pass
-    if extracted is None:
+    if extracted is not None:
+        echo("  case briefing: cached extraction")
+    else:
         echo("  reading the case briefing via the reason backend "
-             "(first boot for this file — cached after)…", flush=True)
+             "(cached once it extracts something)…", flush=True)
         try:
             r = await client.call_tool("reason_extract_case",
                                        {"case_md": text})
@@ -171,8 +187,17 @@ async def extract_case_info(client, info: CaseInfo, echo=print) -> None:
                              ("case_id", "case_question", "evidence_root",
                               "scenario_summary")}
                 extracted["roster"] = payload.get("roster") or []
-                os.makedirs(_EXTRACT_CACHE_DIR, exist_ok=True)
-                json.dump(extracted, open(cache, "w", encoding="utf-8"))
+                if any(extracted.get(k) for k in
+                       ("case_question", "roster", "evidence_root")):
+                    os.makedirs(_EXTRACT_CACHE_DIR, exist_ok=True)
+                    json.dump(extracted, open(cache, "w", encoding="utf-8"))
+                else:
+                    # an all-empty extraction is a backend whiff, not a fact
+                    # about the document — never cache it (observed live:
+                    # a cached empty silently disabled extraction for good)
+                    extracted = None
+                    echo("  (briefing extraction returned nothing — will "
+                         "retry next boot)")
         except Exception as e:
             echo(f"  (case extraction unavailable: {str(e)[:80]})")
     if extracted:

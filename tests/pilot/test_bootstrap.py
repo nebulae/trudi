@@ -199,3 +199,37 @@ class TestCaseExtraction:
         info = CaseInfo(case_dir=str(tmp_path), case_id="C")
         await B.extract_case_info(_Boom(), info, echo=lambda *a, **k: None)
         assert info.question == ""  # gap remains, boot proceeds
+
+
+class TestNitrobaShapedParse:
+    DOC = (
+        "## X Case Context\n\n**Case ID:** X-1\n\n"
+        "### Dorm Room G24 — Suspects\n"
+        "- Alice (last name unknown)\n- Barbara (last name unknown)\n\n"
+        "### CHEM109 Class List (potential suspects)\n"
+        "Amy Smith, Burt Greedom, Tuck Gorge, Johnny Coach, Jenny Kant\n\n"
+        "### Other\nprose with Two Names, and A Comma, here\n")
+
+    def test_multi_section_roster_with_comma_runs(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text(self.DOC)
+        info = parse_case_md(str(tmp_path))
+        assert "Amy Smith" in info.roster and "Johnny Coach" in info.roster
+        assert len(info.roster) == 5
+        # prose under a non-roster header is not a name list
+        assert "Two Names" not in info.roster
+
+    @pytest.mark.asyncio
+    async def test_empty_extraction_never_cached(self, tmp_path, monkeypatch):
+        from pilot import bootstrap as B
+        monkeypatch.setattr(B, "_EXTRACT_CACHE_DIR", str(tmp_path / "cache"))
+        (tmp_path / "CLAUDE.md").write_text("z")
+        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
+        client = _FakeClient({"reason_extract_case": {
+            "success": True, "case_question": "", "roster": [],
+            "evidence_root": "", "case_id": "", "scenario_summary": ""}})
+        await B.extract_case_info(client, info, echo=lambda *a, **k: None)
+        assert not os.path.exists(str(tmp_path / "cache")) or \
+            not os.listdir(str(tmp_path / "cache"))
+        # next boot retries instead of trusting a cached whiff
+        await B.extract_case_info(client, info, echo=lambda *a, **k: None)
+        assert len(client.calls) == 2
