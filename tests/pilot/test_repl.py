@@ -172,6 +172,33 @@ class TestLookAndFeel:
         print_result({"success": False, "error": "nope"})
         assert "✗" in capsys.readouterr().out
 
+    def test_reason_digest_surfaces_hypothesis_hides_noise(self, capsys):
+        from pilot.repl import print_result
+        payload = {"success": True, "_trudi_call_id": 9,
+                   "hypothesis_id": "H0001",
+                   "conclusion": "H1: benign. H2: exfil.",
+                   "directives": {"priority_tools": ["net.ngrep_search"]},
+                   "backend_meta": {"model": "titus"},
+                   "inputs": {"user_message": "wall of text"},
+                   "input_tokens": 1905}
+        print_result(payload)
+        out = capsys.readouterr().out
+        assert "H0001" in out and "H1: benign" in out
+        assert "1 suggested tool(s)" in out
+        assert "titus" not in out and "wall of text" not in out
+        # verbose (`last`) shows everything
+        print_result(payload, verbose=True)
+        assert "titus" in capsys.readouterr().out
+
+    def test_long_stdout_paged_with_sidecar_pointer(self, capsys):
+        from pilot.repl import print_result
+        stdout = "\n".join(f"packet {i}" for i in range(200))
+        print_result({"success": True, "_trudi_call_id": 5, "stdout": stdout})
+        out = capsys.readouterr().out
+        assert "packet 0" in out and "packet 29" in out
+        assert "packet 31" not in out
+        assert "170 more lines" in out and "read.output" in out
+
 
 class TestNames:
     def test_dotted_wire_round_trip(self):

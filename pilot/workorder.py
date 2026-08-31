@@ -170,21 +170,34 @@ def dismiss(state: SessionState, n: int, reason: str) -> WorkItem | None:
     return item
 
 
-def render(state: SessionState) -> str:
-    lines = [f" work order ── {state.phase} "
-             f"(depth {len(state.phase_stack)}) ────────────────────────"]
+def _fit(label: str, width: int = 74) -> str:
+    """Middle-ellipsize: a truncated path must keep its FILENAME visible."""
+    if len(label) <= width:
+        return label
+    return label[: width - 30] + "…" + label[-29:]
+
+
+def render(state: SessionState, color: bool = False) -> str:
+    b = "\x1b[1m" if color else ""       # bold
+    c = "\x1b[36m" if color else ""      # cyan
+    g = "\x1b[32m" if color else ""      # green
+    r = "\x1b[0m" if color else ""
+    lines = [f"{c}{b} work order ── {state.phase} "
+             f"(depth {len(state.phase_stack)}) ────────────────────────{r}"]
     shown = 0
     for item in state.items:
         if item.status == "dismissed":
             continue
         if item.status == "done":
-            lines.append(f"   ✓  {item.label[:70]}")
+            lines.append(f"   {g}✓{r}  {_fit(item.label)}")
         else:
             shown += 1
-            lines.append(f" ▸ {shown}  {item.label[:70]}")
+            lines.append(f" {c}▸{r} {b}{shown}{r}  {_fit(item.label)}")
     if shown == 0:
-        lines.append("   (empty — run `assess` for the next work order)")
-    lines.append("   type a number to prefill · assess · dismiss N <reason> · wo")
+        lines.append("   (no open items — investigate on your judgment; "
+                     "assess again after running tools)")
+    lines.append(f"   {c}type a number to prefill · assess · "
+                 f"dismiss N <reason> · wo{r}")
     return "\n".join(lines)
 
 

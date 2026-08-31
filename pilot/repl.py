@@ -218,6 +218,8 @@ PILOT_STYLE = Style.from_dict({
 _RED = "\x1b[31m"
 _YELLOW = "\x1b[33m"
 _GREEN = "\x1b[32m"
+_CYAN = "\x1b[36m"
+_BOLD = "\x1b[1m"
 _RESET = "\x1b[0m"
 
 _BUILTINS = {"tools", "schema", "exit", "quit"}
@@ -278,13 +280,15 @@ class PilotLexer(Lexer):
         return get_line
 
 
-def print_result(payload) -> None:
-    """Colored JSON when pygments is available; a ✓/✗ headline either way."""
-    ok = isinstance(payload, dict) and payload.get("success", True)
-    cid = isinstance(payload, dict) and payload.get("_trudi_call_id")
-    head = f"{_GREEN}✓{_RESET}" if ok else f"{_RED}✗{_RESET}"
-    print(f"{head} cid {cid}" if cid else head)
-    text = json.dumps(payload, indent=2, default=str)[:4000]
+# keys the analyst never needs on screen (still in the trace; `last` shows all)
+_NOISE_KEYS = {"inputs", "backend_meta", "evidence_audit", "_metadata",
+               "result_block", "parse_path", "input_tokens", "output_tokens",
+               "success"}
+_STDOUT_HEAD = 30
+
+
+def _print_json(obj) -> None:
+    text = json.dumps(obj, indent=2, default=str)[:4000]
     try:
         from pygments import highlight
         from pygments.formatters import TerminalFormatter
@@ -292,6 +296,51 @@ def print_result(payload) -> None:
         print(highlight(text, JsonLexer(), TerminalFormatter()), end="")
     except ImportError:
         print(text)
+
+
+def print_result(payload, verbose: bool = False) -> None:
+    """A ✓/✗ headline, then a DIGEST of what matters — not the raw payload.
+    `verbose` (the `last` command) prints everything."""
+    ok = isinstance(payload, dict) and payload.get("success", True)
+    cid = isinstance(payload, dict) and payload.get("_trudi_call_id")
+    head = f"{_GREEN}✓{_RESET}" if ok else f"{_RED}✗{_RESET}"
+    print(f"{head} cid {cid}" if cid else head)
+    if not isinstance(payload, dict) or verbose:
+        _print_json(payload)
+        return
+
+    body = {k: v for k, v in payload.items() if k not in _NOISE_KEYS}
+
+    # reason.* digest: the hypothesis id + conclusion ARE the result
+    if "conclusion" in body:
+        hid = body.pop("hypothesis_id", None)
+        if hid:
+            print(f"  {_CYAN}{hid}{_RESET}")
+        for ln in str(body.pop("conclusion", "")).splitlines():
+            print(f"  {ln}")
+        pts = (body.pop("directives", {}) or {}).get("priority_tools") or []
+        if pts:
+            print(f"  {_GREEN}→ {len(pts)} suggested tool(s) added to the "
+                  f"work order{_RESET}")
+        print("  (`last` shows the full payload)")
+        return
+
+    # long stdout: page the head, point at the traced sidecar for the rest
+    stdout = body.get("stdout")
+    if isinstance(stdout, str) and stdout.count("\n") > 8:
+        body.pop("stdout")
+        lines = stdout.splitlines()
+        for ln in lines[:_STDOUT_HEAD]:
+            print(f"  {ln}")
+        if len(lines) > _STDOUT_HEAD:
+            print(f"  {_YELLOW}… {len(lines) - _STDOUT_HEAD} more lines — "
+                  f"full output in the traced sidecar (cid {cid}); query it "
+                  f"with read.output, or `last` for the raw payload{_RESET}")
+        if body:
+            _print_json(body)
+        return
+
+    _print_json(body)
 
 
 # ── prefill & argument checking ──────────────────────────────────────────────
@@ -421,12 +470,13 @@ async def run(stdio: bool = False) -> None:
             state.resumed = boot.resumed
             state.items = wo.resume_items() if boot.resumed \
                 else wo.ritual_items(info.question)
-            print(wo.render(state))
+            print(wo.render(state, color=True))
         else:
             print("(no case dir — playground session, nothing recorded)")
         print(f"TRUDI pilot — {len(tools)} tools, tab completes "
               f"(names, params, paths); 'tools <substr>' lists, 'schema ns.tool' "
-              f"shows params, ls/cd/!cmd navigate, 'exit' quits")
+              f"shows params, ls/cd/!cmd navigate, 'last' full payload, "
+              f"'exit' quits")
 
         from prompt_toolkit import PromptSession
         from prompt_toolkit.shortcuts import CompleteStyle
@@ -455,8 +505,8 @@ async def run(stdio: bool = False) -> None:
                     [("class:key", "summary> ")], default=draft)).strip() or draft
             else:
                 summary = wo.opening_summary(state)
-                print(f"  summary: {summary}")
-            print("  calling dair.assess…", flush=True)
+                print(f"  {_CYAN}summary:{_RESET} {summary}")
+            print(f"  {_CYAN}calling dair.assess…{_RESET}", flush=True)
             try:
                 result = await call_with_progress(client, "dair_assess", {
                     "tool_results_summary": summary,
@@ -473,10 +523,15 @@ async def run(stdio: bool = False) -> None:
             wo.apply_assess(state, payload, prefill=_prefill)
             rationale = payload.get("transition_rationale") or ""
             if rationale:
-                print(f" dair: {rationale[:200]}")
-            print(wo.render(state))
+                print(f" {_CYAN}dair:{_RESET} {rationale[:200]}")
+            if not ((payload.get("directives") or {}).get("priority_tools")):
+                print(f"{_YELLOW} dair returned no work order this round — "
+                      f"proceed on your own judgment and assess again after "
+                      f"running tools{_RESET}")
+            print(wo.render(state, color=True))
 
         pending_default = ""
+        last_payload = None
         while True:
             try:
                 line = (await session.prompt_async(
@@ -488,6 +543,12 @@ async def run(stdio: bool = False) -> None:
                 continue
             if line in ("exit", "quit"):
                 break
+            if line == "last":
+                if last_payload is None:
+                    print(f"{_YELLOW}no result yet{_RESET}")
+                else:
+                    print_result(last_payload, verbose=True)
+                continue
             # work-order interaction: number prefills, never auto-runs
             if line.isdigit():
                 text = wo.select(state, int(line))
@@ -499,7 +560,7 @@ async def run(stdio: bool = False) -> None:
                     print(f"{_YELLOW}no open work-order item {line}{_RESET}")
                 continue
             if line in ("wo", "order"):
-                print(wo.render(state))
+                print(wo.render(state, color=True))
                 continue
             if line == "assess":
                 await do_assess()
@@ -585,6 +646,7 @@ async def run(stdio: bool = False) -> None:
                 result = await call_with_progress(client, tool, args,
                                                   label=line.split()[0])
                 payload = result.structured_content
+                last_payload = payload
                 print_result(payload)
                 ok = isinstance(payload, dict) and payload.get("success", True)
                 cid = payload.get("_trudi_call_id") if isinstance(payload, dict) else None
@@ -594,7 +656,7 @@ async def run(stdio: bool = False) -> None:
                 if tool.startswith("reason_") and isinstance(payload, dict):
                     pts = (payload.get("directives") or {}).get("priority_tools") or []
                     if pts and wo.merge_directives(state, pts, prefill=_prefill):
-                        print(wo.render(state))
+                        print(wo.render(state, color=True))
                 if wo.needs_nag(state):
                     print(f"{_YELLOW}{len(state.ran)} tools since the last "
                           f"assess — type `assess` to get the next work "

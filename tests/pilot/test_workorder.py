@@ -135,4 +135,16 @@ class TestRender:
 
     def test_render_empty(self):
         out = wo.render(_state())
-        assert "empty" in out and "assess" in out
+        assert "no open items" in out and "assess" in out
+
+    def test_render_color_wraps_plain(self):
+        s = _state(items=[wo.WorkItem("net.ngrep_search pattern=jean")])
+        colored = wo.render(s, color=True)
+        assert "\x1b[" in colored and "net.ngrep_search" in colored
+        assert "\x1b[" not in wo.render(s)
+
+    def test_fit_keeps_the_filename(self):
+        long = "net.tcpdump_extract_ips pcap_file=/home/trin/cases/nitroba/evidence/nitroba.pcap"
+        fitted = wo._fit(long)
+        assert len(fitted) <= 75
+        assert fitted.endswith("nitroba.pcap") and fitted.startswith("net.tcpdump")
