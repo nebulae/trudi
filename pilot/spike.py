@@ -141,11 +141,11 @@ async def run(stdio: bool = False) -> None:
     async with client:
         tools = await client.list_tools()
         completer = PilotCompleter(tools, build_alias_map())
-        print(f"pilot spike — {len(tools)} tools, tab completes; "
+        print(f"TRUDI pilot (spike) — {len(tools)} tools, tab completes; "
               f"'tools <substr>' lists, 'schema ns.tool' shows params, 'exit' quits")
 
         from prompt_toolkit import PromptSession
-        session = PromptSession("pilot> ", completer=completer)
+        session = PromptSession("trudi> ", completer=completer)
 
         while True:
             try:

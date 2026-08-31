@@ -128,7 +128,7 @@ BEViewer, thumbcache_viewer, an Arsenal mount for visual browsing — no
 re-derivation path exists. The `manual` command records it:
 
 ```
-pilot> manual
+trudi> manual
   tool:      pestudio 9.55
   input:     analysis/carved/invoice.exe  (cid 0031 — carved by foremost)
   what:      examined imports/resources; UPX section, VT-flagged imphash
@@ -192,7 +192,7 @@ two drivers.
  ▸ 1  ez.mftecmd  file=…/$MFT --csv analysis/        [DAIR 1/4]
    2  misc.readpst_extract  file=…/jean.ost           [DAIR 2/4]
    3  net.ngrep_search  pattern="(jean|alison|…)"     [knowns hunt 3/4]
- pilot> ez.mftecmd file=…/$MFT --csv analysis/ vss=true█  ← #1 selected, edited
+ trudi> ez.mftecmd file=…/$MFT --csv analysis/ vss=true█  ← #1 selected, edited
 ```
 
 Enter runs a normal MCP call (cid, sidecar, mirror). Output pages
