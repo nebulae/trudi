@@ -56,32 +56,74 @@ class TestAgentClientResolution:
             cli.resolve_agent_client(None)
 
 
+class TestClientArgv:
+    def test_agent_mode_launches_bare(self):
+        assert cli.client_argv("claude", "agent") == ["claude"]
+        assert cli.client_argv("opencode", "agent") == ["opencode"]
+
+    def test_pilot_claude_appends_profile_file(self):
+        argv = cli.client_argv("claude", "pilot")
+        assert argv == ["claude", "--append-system-prompt-file",
+                        cli.PILOT_PROFILE]
+        assert os.path.exists(cli.PILOT_PROFILE)  # the profile ships
+
+    def test_pilot_opencode_selects_agent(self):
+        assert cli.client_argv("opencode", "pilot") == \
+            ["opencode", "--agent", "trudi-pilot"]
+
+
 class TestDispatch:
-    def test_agent_mode_execs_client_in_case_dir(self, tmp_path, monkeypatch):
-        (tmp_path / "CLAUDE.md").write_text("# case")
+    def _case(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text("**Case ID:** T-1\n")
+        (tmp_path / "evidence").mkdir()
+        return tmp_path
+
+    def test_pilot_mode_execs_claude_with_profile(self, tmp_path, monkeypatch):
+        case = self._case(tmp_path)
         calls = {}
-        monkeypatch.setattr(cli.shutil, "which",
-                            lambda c: f"/bin/{c}" if c == "claude" else None)
+        monkeypatch.setattr(cli.shutil, "which", lambda c: f"/bin/{c}")
         monkeypatch.setattr(cli.os, "chdir", lambda d: calls.setdefault("cd", d))
         monkeypatch.setattr(cli.os, "execv",
                             lambda b, argv: calls.setdefault("exec", (b, argv)))
-        cli.main(["--mode", "agent", "--case", str(tmp_path)])
-        assert calls["cd"] == str(tmp_path)
-        assert calls["exec"] == ("/bin/claude", ["claude"])
+        cli.main(["--mode", "pilot", "--case", str(case), "--client", "claude"])
+        assert calls["cd"] == str(case)
+        assert calls["exec"] == ("/bin/claude", [
+            "claude", "--append-system-prompt-file", cli.PILOT_PROFILE])
 
-    def test_pilot_mode_runs_repl_in_case_dir(self, tmp_path, monkeypatch):
-        (tmp_path / "CLAUDE.md").write_text("# case")
+    def test_agent_mode_execs_client_bare(self, tmp_path, monkeypatch):
+        case = self._case(tmp_path)
         calls = {}
+        monkeypatch.setattr(cli.shutil, "which",
+                            lambda c: f"/bin/{c}" if c == "opencode" else None)
         monkeypatch.setattr(cli.os, "chdir", lambda d: calls.setdefault("cd", d))
+        monkeypatch.setattr(cli.os, "execv",
+                            lambda b, argv: calls.setdefault("exec", (b, argv)))
+        cli.main(["--mode", "agent", "--case", str(case)])
+        assert calls["exec"] == ("/bin/opencode", ["opencode"])
 
-        async def fake_run(stdio=False):
-            calls["repl"] = stdio
-        import pilot.repl
-        monkeypatch.setattr(pilot.repl, "run", fake_run)
-        assert cli.main(["--mode", "pilot", "--case", str(tmp_path), "--stdio"]) == 0
-        assert calls["cd"] == str(tmp_path)
-        assert calls["repl"] is True
-        assert os.environ["TRUDI_CASE_DIR"] == str(tmp_path)
+    def test_mirror_spawns_follow_before_exec(self, tmp_path, monkeypatch):
+        case = self._case(tmp_path)
+        calls = {}
+        monkeypatch.setattr(cli.shutil, "which", lambda c: f"/bin/{c}")
+        monkeypatch.setattr(cli.os, "chdir", lambda d: None)
+        monkeypatch.setattr(cli.os, "execv",
+                            lambda b, argv: calls.setdefault("exec", (b, argv)))
+
+        class FakeProc:
+            pid = 4242
+
+        def fake_popen(argv, **kw):
+            calls["popen"] = (argv, kw)
+            return FakeProc()
+        monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+        cli.main(["--mode", "pilot", "--case", str(case),
+                  "--client", "opencode", "--mirror"])
+        argv, kw = calls["popen"]
+        assert argv[1:4] == ["-m", "pilot.mirror",
+                             os.path.join(str(case), "analysis", "T-1_trace.json")]
+        assert argv[4].endswith("T-1.vera") and argv[5] == "--follow"
+        assert kw["start_new_session"] is True
+        assert "exec" in calls  # mirror never blocks the launch
 
     def test_mode_is_required(self):
         with pytest.raises(SystemExit):

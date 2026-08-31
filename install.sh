@@ -274,7 +274,7 @@ fi
 warn "Installing Python dependencies — this can take several minutes (flare-capa / flare-floss / yara-python are large). Progress shown below."
 "$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements.txt"
 "$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements-dev.txt"
-ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, prompt_toolkit, pytest)"
+ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, pytest)"
 
 # vera (optional — pilot mode's record + UI) goes into the SAME venv the
 # bin/trudi launcher uses. Library needs >=3.10; vera's own CLI needs

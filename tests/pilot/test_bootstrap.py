@@ -1,12 +1,8 @@
-"""Pilot session bootstrap: case parsing, evidence discovery, banner."""
-import json
+"""Case-briefing parsing (pilot/bootstrap.py) — launcher-side pure logic."""
 import os
 
-import pytest
-
 from pilot.bootstrap import (
-    BootState, CaseInfo, bootstrap, discover_evidence, is_case_dir,
-    parse_case_md, render_banner,
+    CaseInfo, discover_evidence, is_case_dir, merge_extracted, parse_case_md,
 )
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,6 +43,24 @@ class TestParse:
         assert info.question == "" and info.roster == []
 
 
+class TestNitrobaShapedParse:
+    DOC = (
+        "## X Case Context\n\n**Case ID:** X-1\n\n"
+        "### Dorm Room G24 — Suspects\n"
+        "- Alice (last name unknown)\n- Barbara (last name unknown)\n\n"
+        "### CHEM109 Class List (potential suspects)\n"
+        "Amy Smith, Burt Greedom, Tuck Gorge, Johnny Coach, Jenny Kant\n\n"
+        "### Other\nprose with Two Names, and A Comma, here\n")
+
+    def test_multi_section_roster_with_comma_runs(self, tmp_path):
+        (tmp_path / "CLAUDE.md").write_text(self.DOC)
+        info = parse_case_md(str(tmp_path))
+        assert "Amy Smith" in info.roster and "Johnny Coach" in info.roster
+        assert len(info.roster) == 5
+        # prose under a non-roster header is not a name list
+        assert "Two Names" not in info.roster
+
+
 class TestEvidenceDiscovery:
     def test_forensic_extensions_only_sorted(self, tmp_path):
         ev = tmp_path / "evidence"
@@ -71,83 +85,8 @@ class TestEvidenceDiscovery:
         assert discover_evidence(info) == []
 
 
-class _FakeResult:
-    def __init__(self, payload):
-        self.structured_content = payload
-
-
-class _FakeClient:
-    def __init__(self, responses):
-        self.responses = responses
-        self.calls = []
-
-    async def call_tool(self, name, args):
-        self.calls.append((name, args))
-        return _FakeResult(self.responses[name])
-
-
-class TestBootstrap:
-    @pytest.mark.asyncio
-    async def test_bookkeeping_calls_and_state(self, tmp_path):
-        ev = tmp_path / "evidence"
-        ev.mkdir()
-        (ev / "disk.E01").write_bytes(b"x" * 100)
-        info = CaseInfo(case_dir=str(tmp_path), case_id="CASE-1")
-        client = _FakeClient({
-            "misc_start_execution_log": {
-                "success": True, "entries_recovered": 42, "resumed": True,
-                "dashboard_url": "http://127.0.0.1:8765/x"},
-            "hash_verify_evidence_hash": {
-                "success": True, "sha256": "deadbeef" * 8},
-        })
-        state = await bootstrap(client, info, echo=lambda *a, **k: None)
-        assert [c[0] for c in client.calls] == [
-            "misc_start_execution_log", "hash_verify_evidence_hash"]
-        assert client.calls[0][1]["case_id"] == "CASE-1"
-        assert state.resumed and state.entry_count == 42
-        assert state.dashboard_url.startswith("http")
-        assert state.evidence[0][1].startswith("✓ sha256 deadbeef")
-
-    @pytest.mark.asyncio
-    async def test_hash_failure_surfaces_not_raises(self, tmp_path):
-        ev = tmp_path / "evidence"
-        ev.mkdir()
-        (ev / "disk.dd").write_bytes(b"x")
-        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
-        client = _FakeClient({
-            "misc_start_execution_log": {"success": True},
-            "hash_verify_evidence_hash": {"success": False,
-                                          "error": "file unreadable"},
-        })
-        state = await bootstrap(client, info, echo=lambda *a, **k: None)
-        assert state.evidence[0][1].startswith("✗") and \
-            "file unreadable" in state.evidence[0][1]
-
-
-class TestBanner:
-    def test_renders_all_sections(self):
-        info = CaseInfo(case_dir="/c", case_id="M57-JEAN",
-                        question="Who exfiltrated the plan? " * 8,
-                        roster=["Jean Jones", "Alison Smith"])
-        state = BootState(trace_path="analysis/M57-JEAN_trace.json",
-                          dashboard_url="http://127.0.0.1:8765/d",
-                          resumed=True, entry_count=188,
-                          evidence=[("/e/a.E01", "✓ sha256 aaaa…")])
-        b = render_banner(info, state)
-        for expect in ("TRUDI PILOT ── M57-JEAN", " Q: Who exfiltrated",
-                       "a.E01", "resumed, 188 entries", "dashboard:",
-                       "roster: 2 knowns", "dair.assess"):
-            assert expect in b, expect
-        assert all(len(line) <= 80 for line in b.splitlines())
-
-    def test_new_session_shows_ritual(self):
-        b = render_banner(CaseInfo(case_dir="/c", case_id="C"), BootState())
-        assert "reason.hypothesize" in b and "none found" in b
-
-
-class TestCaseExtraction:
+class TestMergeExtracted:
     def test_merge_fills_only_gaps(self):
-        from pilot.bootstrap import merge_extracted
         info = CaseInfo(case_dir="/c", case_id="X", question="already set")
         filled = merge_extracted(info, {
             "case_question": "should not overwrite",
@@ -157,79 +96,3 @@ class TestCaseExtraction:
         assert info.roster == ["Jean Jones", "Alison Smith"]
         assert info.evidence_root == "/e/root"
         assert set(filled) == {"roster", "evidence_root"}
-
-    @pytest.mark.asyncio
-    async def test_extraction_called_once_then_cached(self, tmp_path,
-                                                      monkeypatch):
-        from pilot import bootstrap as B
-        monkeypatch.setattr(B, "_EXTRACT_CACHE_DIR", str(tmp_path / "cache"))
-        (tmp_path / "CLAUDE.md").write_text("# odd format\nsuspects: Jean")
-        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
-        client = _FakeClient({"reason_extract_case": {
-            "success": True, "case_question": "who did it?",
-            "roster": ["Jean Jones"], "evidence_root": "",
-            "case_id": "C", "scenario_summary": "s"}})
-        await B.extract_case_info(client, info, echo=lambda *a, **k: None)
-        assert info.question == "who did it?" and info.roster == ["Jean Jones"]
-        assert len(client.calls) == 1
-        # second boot: cache hit, no backend call
-        info2 = CaseInfo(case_dir=str(tmp_path), case_id="C")
-        await B.extract_case_info(client, info2, echo=lambda *a, **k: None)
-        assert info2.question == "who did it?" and len(client.calls) == 1
-
-    @pytest.mark.asyncio
-    async def test_complete_regex_parse_skips_backend(self, tmp_path):
-        from pilot.bootstrap import extract_case_info
-        (tmp_path / "CLAUDE.md").write_text("x")
-        info = CaseInfo(case_dir=str(tmp_path), case_id="C",
-                        question="q", roster=["A B"])
-        client = _FakeClient({})
-        await extract_case_info(client, info, echo=lambda *a, **k: None)
-        assert client.calls == []
-
-    @pytest.mark.asyncio
-    async def test_backend_failure_is_soft(self, tmp_path, monkeypatch):
-        from pilot import bootstrap as B
-        monkeypatch.setattr(B, "_EXTRACT_CACHE_DIR", str(tmp_path / "cache"))
-        (tmp_path / "CLAUDE.md").write_text("y")
-
-        class _Boom:
-            async def call_tool(self, *a, **k):
-                raise RuntimeError("backend down")
-        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
-        await B.extract_case_info(_Boom(), info, echo=lambda *a, **k: None)
-        assert info.question == ""  # gap remains, boot proceeds
-
-
-class TestNitrobaShapedParse:
-    DOC = (
-        "## X Case Context\n\n**Case ID:** X-1\n\n"
-        "### Dorm Room G24 — Suspects\n"
-        "- Alice (last name unknown)\n- Barbara (last name unknown)\n\n"
-        "### CHEM109 Class List (potential suspects)\n"
-        "Amy Smith, Burt Greedom, Tuck Gorge, Johnny Coach, Jenny Kant\n\n"
-        "### Other\nprose with Two Names, and A Comma, here\n")
-
-    def test_multi_section_roster_with_comma_runs(self, tmp_path):
-        (tmp_path / "CLAUDE.md").write_text(self.DOC)
-        info = parse_case_md(str(tmp_path))
-        assert "Amy Smith" in info.roster and "Johnny Coach" in info.roster
-        assert len(info.roster) == 5
-        # prose under a non-roster header is not a name list
-        assert "Two Names" not in info.roster
-
-    @pytest.mark.asyncio
-    async def test_empty_extraction_never_cached(self, tmp_path, monkeypatch):
-        from pilot import bootstrap as B
-        monkeypatch.setattr(B, "_EXTRACT_CACHE_DIR", str(tmp_path / "cache"))
-        (tmp_path / "CLAUDE.md").write_text("z")
-        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
-        client = _FakeClient({"reason_extract_case": {
-            "success": True, "case_question": "", "roster": [],
-            "evidence_root": "", "case_id": "", "scenario_summary": ""}})
-        await B.extract_case_info(client, info, echo=lambda *a, **k: None)
-        assert not os.path.exists(str(tmp_path / "cache")) or \
-            not os.listdir(str(tmp_path / "cache"))
-        # next boot retries instead of trusting a cached whiff
-        await B.extract_case_info(client, info, echo=lambda *a, **k: None)
-        assert len(client.calls) == 2

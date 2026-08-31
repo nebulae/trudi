@@ -14,6 +14,16 @@ This file directs the coding agent running a TRUDI investigation — installed a
 
 ---
 
+## Mode contract
+
+Default mode is **autonomous agent** — the rules below apply as written.
+When a **TRUDI Pilot profile** is active in this session (launched via
+`trudi --mode pilot`; its header says so), the pilot profile's
+conversational rules OVERRIDE the autonomy directives here ("never ask
+questions", "run fully autonomously"). Every other rule — the evidence
+path, gates, typed claims, citability, reason checkpoints — applies
+unchanged in both modes.
+
 ## Operator Preferences
 
 - **NEVER ask questions during a task.** Run workflows fully autonomously. No check-ins, no confirmations. Deliver final findings only. If blocked, pick the most reasonable path and note it in the output.

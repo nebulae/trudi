@@ -186,6 +186,26 @@ def link_assets(opencode_dir: Path, repo_root: Path) -> list[str]:
     return msgs
 
 
+def link_pilot_agent(opencode_dir: Path, repo_root: Path) -> list[str]:
+    """Symlink the pilot-mode agent definition from the repo (no drift).
+
+    `trudi --mode pilot --client opencode` launches `opencode --agent
+    trudi-pilot`; the agent's prompt is the analyst-driven copilot profile
+    (opencode/agent/trudi-pilot.md), which supersedes AGENTS.md's autonomy
+    rules per the mode contract."""
+    src = (Path(repo_root) / "opencode" / "agent" / "trudi-pilot.md").resolve()
+    if not src.exists():
+        return ["  pilot agent profile missing from repo — skipped"]
+    dest = Path(opencode_dir) / "agent" / "trudi-pilot.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink() and dest.resolve() == src:
+        return ["  agent/trudi-pilot.md already linked — nothing to do"]
+    if dest.exists() or dest.is_symlink():
+        dest.unlink()
+    dest.symlink_to(src)
+    return ["  agent/trudi-pilot.md → repo"]
+
+
 def install_agents_md(opencode_dir: Path, repo_root: Path) -> list[str]:
     """Install the orchestrator as AGENTS.md (backup any existing file).
 
@@ -223,6 +243,8 @@ def main() -> int:
     for line in register(opencode_dir / "opencode.json", repo_root, venv_python):
         print(line)
     for line in link_assets(opencode_dir, repo_root):
+        print(line)
+    for line in link_pilot_agent(opencode_dir, repo_root):
         print(line)
     for line in install_agents_md(opencode_dir, repo_root):
         print(line)

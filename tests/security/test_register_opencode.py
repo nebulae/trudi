@@ -133,6 +133,20 @@ def test_link_assets_symlinks_commands_and_plugin(tmp_path):
     assert msgs == ["  commands + plugin already linked — nothing to do"]
 
 
+def test_link_pilot_agent_symlinks_primary_agent(tmp_path):
+    m = _mod()
+    msgs = m.link_pilot_agent(tmp_path, REPO)
+    dest = tmp_path / "agent" / "trudi-pilot.md"
+    assert dest.is_symlink()
+    assert dest.resolve() == (REPO / "opencode" / "agent" / "trudi-pilot.md").resolve()
+    text = dest.read_text()
+    assert text.startswith("---") and "mode: primary" in text.split("---")[1]
+    assert msgs == ["  agent/trudi-pilot.md → repo"]
+    # idempotent
+    assert m.link_pilot_agent(tmp_path, REPO) == \
+        ["  agent/trudi-pilot.md already linked — nothing to do"]
+
+
 def test_agents_md_installed_with_backup(tmp_path):
     m = _mod()
     msgs = m.install_agents_md(tmp_path, REPO)
