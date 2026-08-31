@@ -38,6 +38,9 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "reason_confidence_score",
     "reason_cite_check",
     "reason_audit_findings",
+    # Task→command drafting is assistance, not forensics — usable any time
+    # (the drafted command itself passes every gate when run).
+    "reason_draft_command",
     "reason_synthesize",
     "reason_pre_report_check",
     "accuracy_compare",

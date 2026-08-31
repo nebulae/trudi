@@ -88,6 +88,35 @@ class TestPrefill:
                                 self.SCHEMAS) == []
 
 
+class TestTaskDrafting:
+    def test_briefs_rank_by_task_overlap(self, live_completer):
+        # need the raw tools list, not the completer — build from the server
+        import asyncio as _a
+        from fastmcp import Client
+        import server
+        from pilot.repl import build_tool_briefs
+
+        async def get_tools():
+            async with Client(server.mcp) as c:
+                return await c.list_tools()
+        tools = _a.run(get_tools())
+        briefs = build_tool_briefs(
+            "extract all the columns from evidence.csv", tools)
+        assert "read.output" in briefs          # the csv tool ranks in
+        assert briefs.count("\n  params") <= 12
+        assert "*" in briefs                    # required params marked
+
+    def test_validate_candidates_drops_broken(self):
+        from pilot.repl import validate_candidates
+        schema_map = {"read_output": {}, "tsk_fls": {}}
+        cands = [
+            {"command": "read.output path=x.csv", "why": "ok"},
+            {"command": "no.such_tool a=1", "why": "invented"},
+            {"command": "tsk.fls bad token", "why": "unparseable"},
+        ]
+        assert [c["why"] for c in validate_candidates(cands, schema_map)] == ["ok"]
+
+
 class TestCallProgress:
     class _SlowClient:
         def __init__(self, delay, result=None, exc=None):

@@ -222,7 +222,8 @@ _CYAN = "\x1b[36m"
 _BOLD = "\x1b[1m"
 _RESET = "\x1b[0m"
 
-_BUILTINS = {"tools", "schema", "exit", "quit"}
+_BUILTINS = {"tools", "schema", "exit", "quit", "task", "pick", "last",
+             "assess", "wo", "dismiss"}
 
 
 def make_key_bindings() -> KeyBindings:
@@ -341,6 +342,53 @@ def print_result(payload, verbose: bool = False) -> None:
         return
 
     _print_json(body)
+
+
+# ── task → command drafting ──────────────────────────────────────────────────
+
+_BRIEF_LIMIT = 12
+
+
+def build_tool_briefs(task: str, tools: list, limit: int = _BRIEF_LIMIT) -> str:
+    """Lexical retrieval over the catalog: score tools by task-word overlap
+    with name+description, return the top briefs (name, purpose, params) so
+    the reason backend sees a dozen relevant schemas, not 278."""
+    stop = {"the", "all", "and", "for", "from", "into", "with", "that",
+            "this", "then", "them", "have", "what", "each", "another",
+            "pull", "get", "show", "give"}
+    words = {w for w in re.split(r"[^a-z0-9]+", task.lower())
+             if len(w) > 2 and w not in stop}
+    scored = []
+    for t in tools:
+        desc = (t.description or "").split("\n")[0]
+        params = " ".join((t.inputSchema or {}).get("properties", {}))
+        hay = f"{t.name} {desc} {params}".lower()
+        score = sum(1 for w in words if w in hay)
+        scored.append((score, t.name, desc, t.inputSchema or {}))
+    scored.sort(key=lambda s: (-s[0], s[1]))
+    briefs = []
+    for score, name, desc, schema in scored[:limit]:
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        params = ", ".join(
+            f"{p}*" if p in required else p for p in props)
+        briefs.append(f"{wire_to_dotted(name)} — {desc[:140]}"
+                      f"\n  params (*=required): {params}")
+    return "\n".join(briefs)
+
+
+def validate_candidates(candidates: list[dict], schema_map: dict) -> list[dict]:
+    """Keep only candidates whose command parses and names a real tool —
+    a drafted command that cannot run is worse than none."""
+    good = []
+    for c in candidates:
+        try:
+            tool, _args = parse_command(c.get("command", ""))
+        except ValueError:
+            continue
+        if tool in schema_map:
+            good.append(c)
+    return good
 
 
 # ── prefill & argument checking ──────────────────────────────────────────────
@@ -475,7 +523,8 @@ async def run(stdio: bool = False) -> None:
             print("(no case dir — playground session, nothing recorded)")
         print(f"TRUDI pilot — {len(tools)} tools, tab completes "
               f"(names, params, paths); 'tools <substr>' lists, 'schema ns.tool' "
-              f"shows params, ls/cd/!cmd navigate, 'last' full payload, "
+              f"shows params, ls/cd/!cmd navigate, '? <task>' drafts commands, "
+              f"'pick' checkboxes the work order, 'last' full payload, "
               f"'exit' quits")
 
         from prompt_toolkit import PromptSession
@@ -530,7 +579,57 @@ async def run(stdio: bool = False) -> None:
                       f"running tools{_RESET}")
             print(wo.render(state, color=True))
 
+        async def do_task(task_text: str) -> list[dict]:
+            """Draft commands for a plain-English task via the reason
+            backend; returns validated candidates."""
+            listing = ", ".join(sorted(os.listdir("analysis"))[:15]) \
+                if os.path.isdir("analysis") else ""
+            context = (f"case: {state.case_context}\n"
+                       f"evidence files: {', '.join(evidence_paths) or '(none)'}\n"
+                       f"produced output in analysis/: {listing or '(none)'}\n"
+                       f"cwd: {os.getcwd()}")
+            print(f"  {_CYAN}drafting commands…{_RESET}", flush=True)
+            try:
+                result = await call_with_progress(
+                    client, "reason_draft_command",
+                    {"task": task_text,
+                     "tool_briefs": build_tool_briefs(task_text, tools),
+                     "context": context,
+                     "input_call_ids": wo.ran_cids(state)},
+                    label="reason.draft_command")
+                payload = result.structured_content or {}
+            except KeyboardInterrupt:
+                return []
+            except Exception as e:
+                print(f"{_RED}draft failed: {e}{_RESET}")
+                return []
+            good = validate_candidates(payload.get("candidates") or [],
+                                       schema_map)
+            if not good:
+                concl = (payload.get("conclusion") or "").strip()
+                print(f"{_YELLOW}no runnable command drafted"
+                      f"{' — ' + concl[:300] if concl else ''}{_RESET}")
+            return good
+
+        async def do_pick() -> list[str]:
+            """Arrow/space checkbox over the open work order; checked items
+            queue up to prefill one after another."""
+            open_items = [i for i in state.items if i.status == "open"]
+            if not open_items:
+                print(f"{_YELLOW}no open work-order items to pick{_RESET}")
+                return []
+            from prompt_toolkit.shortcuts import checkboxlist_dialog
+            picked = await checkboxlist_dialog(
+                title="work order",
+                text="↑/↓ move · space toggles · enter confirms · esc cancels",
+                values=[(i.text, i.label[:70]) for i in open_items],
+                default_values=[i.text for i in open_items],
+            ).run_async()
+            return list(picked) if picked else []
+
         pending_default = ""
+        pending_choices: list[dict] = []
+        queued: list[str] = []
         last_payload = None
         while True:
             try:
@@ -549,8 +648,33 @@ async def run(stdio: bool = False) -> None:
                 else:
                     print_result(last_payload, verbose=True)
                 continue
+            # task drafting: plain English in, selectable commands out
+            if line.startswith("?") or line.startswith("task "):
+                task_text = line.lstrip("?").removeprefix("task").strip()
+                if not task_text:
+                    print(f"{_YELLOW}usage: ? <what you want done>{_RESET}")
+                    continue
+                cands = await do_task(task_text)
+                if len(cands) == 1:
+                    pending_default = cands[0]["command"]
+                elif cands:
+                    pending_choices = cands
+                    for n, c in enumerate(cands, 1):
+                        why = f"  — {c['why']}" if c.get("why") else ""
+                        print(f" {_CYAN}▸{_RESET} {_BOLD}{n}{_RESET}  "
+                              f"{c['command'][:74]}{why[:60]}")
+                    print(f"   {_CYAN}type a number to prefill{_RESET}")
+                continue
             # work-order interaction: number prefills, never auto-runs
             if line.isdigit():
+                if pending_choices:
+                    n = int(line)
+                    if 1 <= n <= len(pending_choices):
+                        pending_default = pending_choices[n - 1]["command"]
+                    else:
+                        print(f"{_YELLOW}no drafted command {line}{_RESET}")
+                    pending_choices = []
+                    continue
                 text = wo.select(state, int(line))
                 if text == "assess":
                     await do_assess()
@@ -558,6 +682,14 @@ async def run(stdio: bool = False) -> None:
                     pending_default = _prefill(text)
                 else:
                     print(f"{_YELLOW}no open work-order item {line}{_RESET}")
+                continue
+            pending_choices = []
+            if line == "pick":
+                queued = await do_pick()
+                if queued:
+                    print(f"  {len(queued)} item(s) queued — each prefills "
+                          f"after the previous run")
+                    pending_default = queued.pop(0)
                 continue
             if line in ("wo", "order"):
                 print(wo.render(state, color=True))
@@ -661,6 +793,10 @@ async def run(stdio: bool = False) -> None:
                     print(f"{_YELLOW}{len(state.ran)} tools since the last "
                           f"assess — type `assess` to get the next work "
                           f"order{_RESET}")
+                if queued:
+                    pending_default = queued.pop(0)
+                    print(f"  {_CYAN}next queued item prefilled "
+                          f"({len(queued)} left){_RESET}")
             except KeyboardInterrupt:
                 continue
             except Exception as e:

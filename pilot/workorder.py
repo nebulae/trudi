@@ -196,8 +196,8 @@ def render(state: SessionState, color: bool = False) -> str:
     if shown == 0:
         lines.append("   (no open items — investigate on your judgment; "
                      "assess again after running tools)")
-    lines.append(f"   {c}type a number to prefill · assess · "
-                 f"dismiss N <reason> · wo{r}")
+    lines.append(f"   {c}number prefills · pick (☑ queue) · assess · "
+                 f"dismiss N <reason> · ? <task>{r}")
     return "\n".join(lines)
 
 

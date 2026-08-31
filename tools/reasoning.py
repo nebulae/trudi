@@ -54,6 +54,7 @@ MAX_TOKENS_CITE_CHECK     = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_CITE_CHE
 MAX_TOKENS_CONFIDENCE     = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_CONFIDENCE")     or "2048")
 MAX_TOKENS_AUDIT_FINDINGS = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_AUDIT_FINDINGS") or "4096")
 MAX_TOKENS_SYNTHESIZE     = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_SYNTHESIZE")     or "4096")
+MAX_TOKENS_DRAFT_COMMAND  = int(os.environ.get("TRUDI_REASON_MAX_TOKENS_DRAFT_COMMAND")  or "2048")
 
 # ── openai-compat: thinking-model support ────────────────────────────────────
 # Reasoning models served over an OpenAI-compatible API (Qwen3, DeepSeek-R1,
@@ -4547,3 +4548,55 @@ def reason_pre_report_check() -> dict:
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
     }
+
+
+# ── task → command drafting (pilot assistance) ───────────────────────────────
+
+_DRAFT_COMMAND_SYS = (
+    "You draft TRUDI MCP commands for a human DFIR analyst. Given a TASK in "
+    "plain English, the AVAILABLE TOOLS (name, purpose, parameters), and "
+    "CONTEXT (case paths, evidence files), produce 1-3 candidate commands "
+    "that accomplish the task.\n\n"
+    "Command syntax: ns.tool key=value key2=\"value with spaces\" — one line "
+    "per command, concrete values only (real paths from CONTEXT, never "
+    "placeholders like <path>). Use ONLY tools and parameters listed in "
+    "AVAILABLE TOOLS — never invent either. For questions about a produced "
+    "CSV/JSON file prefer read.output with query/columns/where. The analyst "
+    "selects and edits before anything runs — when two tools could work, "
+    "offer both, best first." + result_instruction(
+        '{"candidates": [{"command": "ns.tool key=value", '
+        '"why": "one short line"}]}')
+)
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_draft_command")
+def reason_draft_command(task: str, tool_briefs: str, context: str = "",
+                         input_call_ids: list[int] | None = None) -> dict:
+    """
+    Draft runnable TRUDI commands for a natural-language task. NEVER executes
+    anything — returns candidates for the analyst to select and edit.
+
+    task: the analyst's plain-English request ("pull MFT entry 12345 from
+        evidence.csv into another csv").
+    tool_briefs: caller-selected candidate tools, one per line (name,
+        purpose, parameters) — the caller does lexical retrieval over the
+        full catalog so a small model is not drowned in 278 schemas.
+    context: case paths, evidence files, produced-output listing.
+
+    Returns: candidates=[{command, why}] plus the standard reason fields.
+    """
+    user = (f"TASK:\n{task}\n\nAVAILABLE TOOLS:\n{tool_briefs}"
+            f"\n\nCONTEXT:\n{context or '(none)'}")
+    result = _ask(_DRAFT_COMMAND_SYS, user, max_tokens=MAX_TOKENS_DRAFT_COMMAND,
+                  _tool_name="reason_draft_command",
+                  input_call_ids=input_call_ids)
+    candidates = []
+    rb = result.get("result_block")
+    raw_items = rb.get("candidates") if isinstance(rb, dict) else None
+    for c in (raw_items or []):
+        if isinstance(c, dict) and str(c.get("command", "")).strip():
+            candidates.append({"command": str(c["command"]).strip(),
+                               "why": str(c.get("why", "")).strip()[:200]})
+    result["candidates"] = candidates[:5]
+    return result
