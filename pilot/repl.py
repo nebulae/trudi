@@ -430,12 +430,17 @@ _EXT_HINTS = (
 )
 
 
-def guess_value(param: str, prop: dict, evidence: list[str]) -> str:
-    """Best-effort default for a required param: schema default first, then
+def guess_value(param: str, prop: dict, evidence: list[str],
+                defaults: dict | None = None) -> str:
+    """Best-effort default for a required param: case-level defaults first
+    (the case question for observation/case_description, the roster for
+    reference_set — observed live: an empty reference_set= prefill while
+    the roster sat parsed in the case file), then the schema default, then
     an evidence path whose extension matches what the name suggests. A
     strongly-typed param (image/pcap/mem) with NO matching evidence stays
-    empty — never hand a pcap to an `image=` param (observed live: ewf.info
-    against nitroba.pcap, guaranteed failure)."""
+    empty — never hand a pcap to an `image=` param."""
+    if defaults and defaults.get(param):
+        return str(defaults[param])
     if "default" in prop and prop["default"] not in (None, ""):
         return str(prop["default"])
     low = param.lower()
@@ -453,7 +458,8 @@ def guess_value(param: str, prop: dict, evidence: list[str]) -> str:
 _PATTERNISH = ("pattern", "query", "regex", "search", "grep")
 
 
-def prefill_command(suggestion: str, schema_map: dict, evidence: list[str]) -> str:
+def prefill_command(suggestion: str, schema_map: dict, evidence: list[str],
+                    defaults: dict | None = None) -> str:
     """Turn a work-order suggestion into an editable command in OUR syntax.
 
     Already key=value (the ritual items): verbatim. Anything else — a bare
@@ -477,7 +483,7 @@ def prefill_command(suggestion: str, schema_map: dict, evidence: list[str]) -> s
                    re.findall(r"'([^']+)'|\"([^\"]+)\"", suggestion)), "")
     args: dict[str, str] = {}
     for param in required:
-        args[param] = guess_value(param, props.get(param, {}), evidence)
+        args[param] = guess_value(param, props.get(param, {}), evidence, defaults)
     if quoted:
         pat_param = next(
             (p for p in list(required) + sorted(props)
@@ -565,6 +571,7 @@ async def run(stdio: bool = False) -> None:
         state = wo.SessionState()
         schema_map = {t.name: (t.inputSchema or {}) for t in tools}
         evidence_paths: list[str] = []
+        case_defaults: dict[str, str] = {}
         case_dir = os.environ.get("TRUDI_CASE_DIR") or os.getcwd()
         if is_case_dir(case_dir):
             info = parse_case_md(case_dir)
@@ -574,8 +581,16 @@ async def run(stdio: bool = False) -> None:
             state.case_context = (f"Case {info.case_id}. "
                                   f"Question: {info.question}")[:1500]
             state.resumed = boot.resumed
+            case_defaults.update({
+                "observation": info.question,
+                "case_description": info.question,
+            })
+            if info.roster:
+                case_defaults["reference_set"] = ",".join(info.roster)
+                case_defaults["derivation_type"] = "person_username"
             state.items = wo.resume_items() if boot.resumed \
-                else wo.ritual_items(info.question)
+                else wo.ritual_items(info.question, evidence_paths,
+                                     info.roster)
             print(wo.render(state, color=True))
         else:
             print("(no case dir — playground session, nothing recorded)")
@@ -605,7 +620,8 @@ async def run(stdio: bool = False) -> None:
             [("class:key", "summary> ")], style=PILOT_STYLE)
 
         def _prefill(suggestion: str) -> str:
-            return prefill_command(suggestion, schema_map, evidence_paths)
+            return prefill_command(suggestion, schema_map, evidence_paths,
+                                   case_defaults)
 
         async def do_assess() -> None:
             """Call dair.assess with an editable auto-drafted summary, fold
@@ -642,9 +658,18 @@ async def run(stdio: bool = False) -> None:
             if rationale:
                 print(f" {_CYAN}dair:{_RESET} {rationale[:200]}")
             if not ((payload.get("directives") or {}).get("priority_tools")):
-                print(f"{_YELLOW} dair returned no work order this round — "
-                      f"proceed on your own judgment and assess again after "
-                      f"running tools{_RESET}")
+                fallback = [i.text for i in wo.baseline_items(evidence_paths)
+                            if i.text.split()[0] not in
+                            {j.text.split()[0] for j in state.items}]
+                if fallback and wo.merge_directives(state, fallback,
+                                                    prefill=_prefill,
+                                                    cue="baseline"):
+                    print(f"{_YELLOW} dair returned no work order — queueing "
+                          f"the un-run baseline reads instead{_RESET}")
+                else:
+                    print(f"{_YELLOW} dair returned no work order this round — "
+                          f"proceed on your own judgment (try `advise`) and "
+                          f"assess again after running tools{_RESET}")
             print(wo.render(state, color=True))
 
         async def do_task(task_text: str) -> list[dict]:

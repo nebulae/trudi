@@ -43,19 +43,70 @@ class SessionState:
         return self.last_phase or "—"
 
 
-def ritual_items(question: str) -> list[WorkItem]:
-    """The Triage entry ritual as the opening queue of a fresh session."""
+# the agent's opening playbook, evidence-typed — what it "knows right off
+# the bat": identify + sample every evidence file before any reasoning.
+_BASELINE_BY_EXT = {
+    (".pcap", ".pcapng"): [
+        "net.tcpdump_read pcap_file={p}",
+        "net.tcpdump_list_connections pcap_file={p}",
+        "net.tcpdump_extract_ips pcap_file={p}",
+    ],
+    (".e01", ".e02", ".ex01", ".aff"): [
+        "ewf.info image={p}",
+        "ewf.mount_full_image image={p}",
+    ],
+    (".dd", ".raw", ".img", ".vmdk", ".vhd", ".vhdx"): [
+        "tsk.mmls image={p}",
+    ],
+    (".mem", ".vmem", ".lime", ".dmp"): [
+        "vol.symbol_check image={p}",
+    ],
+}
+
+
+def baseline_items(evidence: list[str]) -> list[WorkItem]:
+    """Evidence-typed baseline collection — the concrete, runnable opening
+    the agent gets from its orchestrator. One identify per file, then the
+    type-appropriate first reads."""
+    items, seen = [], set()
+    for path in evidence:
+        ext = path.lower()[path.rfind("."):] if "." in path else ""
+        for exts, templates in _BASELINE_BY_EXT.items():
+            if ext in exts:
+                for tpl in templates:
+                    text = tpl.format(p=path)
+                    if text.split()[0] not in seen:
+                        seen.add(text.split()[0])
+                        items.append(WorkItem(text, cue="baseline"))
+    return items
+
+
+def ritual_items(question: str, evidence: list[str] | None = None,
+                 roster: list[str] | None = None) -> list[WorkItem]:
+    """The Triage entry ritual as the opening queue of a fresh session:
+    baseline reads first, then the reasoning checkpoints — every item
+    concrete and runnable, nothing left as a placeholder."""
     q = (question or "<state the case question>").replace('"', "'")
-    return [
+    ev = ", ".join(evidence or []) or "<evidence files>"
+    items = baseline_items(evidence or [])
+    if roster:
+        names = ",".join(n.replace('"', "'") for n in roster)
+        items.append(WorkItem(
+            f'misc.knowns_pattern_generate reference_set="{names}" '
+            f'derivation_type=person_username',
+            label="misc.knowns_pattern_generate — the roster is the "
+                  "relevance model", cue="ritual"))
+    items += [
         WorkItem(f'reason.hypothesize observation="{q}" '
                  f'hypothesis_kind=case_question',
                  label="reason.hypothesize — the case question first", cue="ritual"),
         WorkItem(f'reason.plan case_description="{q}" '
-                 f'evidence_available="<paste the baseline reads>"',
+                 f'evidence_available="{ev}"',
                  label="reason.plan — after the baseline reads", cue="ritual"),
         WorkItem("assess", label="assess — engage DAIR (unlocks forensic tools)",
                  cue="ritual"),
     ]
+    return items
 
 
 def resume_items() -> list[WorkItem]:

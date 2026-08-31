@@ -162,3 +162,33 @@ class TestSituation:
         assert "net.ngrep_search ok" in sit
         assert "open work order: ez.pecmd" in sit
         assert "tsk.fls" not in sit.split("open work order:")[1]
+
+
+class TestBaseline:
+    def test_baseline_typed_by_evidence(self):
+        items = wo.baseline_items(["/e/nitroba.pcap", "/e/disk.E01"])
+        texts = [i.text for i in items]
+        assert "net.tcpdump_read pcap_file=/e/nitroba.pcap" in texts
+        assert "net.tcpdump_list_connections pcap_file=/e/nitroba.pcap" in texts
+        assert "ewf.info image=/e/disk.E01" in texts
+        assert all(i.cue == "baseline" for i in items)
+        assert wo.baseline_items([]) == []
+
+    def test_ritual_opens_with_baseline_and_roster_hunt(self):
+        items = wo.ritual_items("Who used the network?",
+                                evidence=["/e/n.pcap"],
+                                roster=["Jean Jones", "Alison Smith"])
+        texts = [i.text for i in items]
+        assert texts[0].startswith("net.")            # baseline first
+        knowns = next(t for t in texts if "knowns_pattern_generate" in t)
+        assert 'reference_set="Jean Jones,Alison Smith"' in knowns
+        assert "derivation_type=person_username" in knowns
+        plan = next(t for t in texts if t.startswith("reason.plan"))
+        assert 'evidence_available="/e/n.pcap"' in plan  # no placeholder
+        assert texts[-1] == "assess"
+
+    def test_ritual_without_roster_or_evidence_still_reasons(self):
+        items = wo.ritual_items("q?")
+        texts = [i.text for i in items]
+        assert not any("knowns" in t for t in texts)
+        assert texts[0].startswith("reason.hypothesize")
