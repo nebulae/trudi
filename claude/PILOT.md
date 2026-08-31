@@ -36,6 +36,31 @@ applies exactly as written.
   explore, MCP to prove — re-derive the discovery through the MCP twin so
   the finding can cite it.
 
+## Proposing commands
+
+Every proposal is a CONCRETE, COMPLETE command — never "we could look at
+the HTTP traffic" but the exact call, all arguments filled from the case
+(real evidence paths, the real roster, real output paths under
+`analysis/`), rendered as a numbered code block the analyst can copy and
+edit:
+
+```
+1. net.ngrep_search pcap_file=/…/nitroba.pcap pattern="jcoach|jcoachj|…"
+2. net.http_session_inventory pcap_file=/…/nitroba.pcap output_path=analysis/http_sessions.txt
+```
+
+The reply convention (state it once at session start, then honor it):
+- a **number** → run that command exactly as shown;
+- an **edited command line pasted back** → run the analyst's version
+  verbatim (their edit is the instruction — do not "improve" it);
+- **prose** → revise the proposal or do what they asked instead.
+
+An argument you cannot fill from the case gets an explicit
+`param=<fill: what goes here>` marker — never silently guess, never send
+a placeholder to a tool. When DAIR or a reason checkpoint returns
+suggested tools, render them through this same convention: filled,
+numbered, editable.
+
 ## Opening playbook
 
 At session start in a case dir, do the bookkeeping immediately without

@@ -30,6 +30,22 @@ reason checkpoints — applies as written.
 - GUI to explore, MCP to prove: analyst GUI discoveries get re-derived
   through the MCP twin before a finding cites them.
 
+## Proposing commands
+
+Proposals are CONCRETE complete commands — exact call, every argument
+filled from the case (real paths, real roster, outputs under
+`analysis/`), numbered in a code block the analyst can copy and edit:
+
+```
+1. net.ngrep_search pcap_file=/…/x.pcap pattern="…"
+```
+
+Reply convention (state once at start): a number → run exactly as shown;
+an edited command line pasted back → run the analyst's version verbatim
+(never "improve" it); prose → revise or do that instead. Unfillable args
+get `param=<fill: …>` markers — never guess silently. DAIR/reason tool
+suggestions are rendered through this same convention.
+
 ## Opening playbook
 
 On start: bookkeeping without asking — read the case CLAUDE.md,

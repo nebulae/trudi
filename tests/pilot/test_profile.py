@@ -17,6 +17,7 @@ OPENCODE_PROFILE = os.path.join(REPO, "opencode", "agent", "trudi-pilot.md")
 REQUIRED_HEADINGS = [
     "## Mode override",
     "## Conversational contract",
+    "## Proposing commands",
     "## Opening playbook",
     "## DAIR, analyst-paced",
     "## Findings & dispositions",
