@@ -227,7 +227,7 @@ _BOLD = "\x1b[1m"
 _RESET = "\x1b[0m"
 
 _BUILTINS = {"tools", "schema", "exit", "quit", "task", "pick", "last",
-             "assess", "wo", "dismiss"}
+             "assess", "wo", "dismiss", "advise"}
 
 
 def make_key_bindings() -> KeyBindings:
@@ -467,6 +467,15 @@ def prefill_command(suggestion: str, schema_map: dict, evidence: list[str]) -> s
     return " ".join(frags)
 
 
+def filter_known(suggestions: list, schema_map: dict) -> list[str]:
+    """Drop suggested tools that don't exist on the server (a model may
+    suggest raw binaries like `sha256sum`) — an unrunnable work-order item
+    is noise."""
+    return [str(s) for s in suggestions
+            if str(s).split() and
+            dotted_to_wire(str(s).split()[0]) in schema_map]
+
+
 def missing_required(tool_wire: str, args: dict, schema_map: dict) -> list[str]:
     """Required params absent or left empty — checked client-side so an
     unfilled prefill gets coaching, not a server error."""
@@ -546,7 +555,7 @@ async def run(stdio: bool = False) -> None:
             print("(no case dir — playground session, nothing recorded)")
         print(f"TRUDI pilot — {len(tools)} tools, tab completes "
               f"(names, params, paths); 'tools <substr>' lists, 'schema ns.tool' "
-              f"shows params, ls/cd/!cmd navigate, '? <task>' drafts commands, "
+              f"shows params, ls/cd/!cmd navigate, '? <task>' drafts commands, 'advise' guidance, "
               f"'pick' checkboxes the work order, 'last' full payload, "
               f"'exit' quits")
 
@@ -598,6 +607,10 @@ async def run(stdio: bool = False) -> None:
             except Exception as e:
                 print(f"{_RED}assess failed: {e}{_RESET}")
                 return
+            d = payload.get("directives")
+            if isinstance(d, dict):
+                d["priority_tools"] = filter_known(
+                    d.get("priority_tools") or [], schema_map)
             wo.apply_assess(state, payload, prefill=_prefill)
             rationale = payload.get("transition_rationale") or ""
             if rationale:
@@ -656,6 +669,35 @@ async def run(stdio: bool = False) -> None:
             ).run_async()
             return list(picked) if picked else []
 
+        async def do_advise(question: str) -> None:
+            """Free-form guidance: package the session state, ask the reason
+            backend, print the advice, merge suggested tools into the queue."""
+            print(f"  {_CYAN}thinking…{_RESET}", flush=True)
+            try:
+                result = await call_with_progress(
+                    client, "reason_advise",
+                    {"question": question,
+                     "situation": wo.build_situation(state),
+                     "input_call_ids": wo.ran_cids(state)},
+                    label="reason.advise")
+                payload = result.structured_content or {}
+            except KeyboardInterrupt:
+                return
+            except Exception as e:
+                print(f"{_RED}advise failed: {e}{_RESET}")
+                return
+            advice = (payload.get("advice") or "").strip()
+            if advice:
+                print(f" {_CYAN}advice:{_RESET}")
+                for ln in advice.splitlines():
+                    print(f"  {ln}")
+            else:
+                print(f"{_YELLOW}no advice returned{_RESET}")
+            pts = filter_known((payload.get("directives") or {})
+                               .get("priority_tools") or [], schema_map)
+            if pts and wo.merge_directives(state, pts, prefill=_prefill):
+                print(wo.render(state, color=True))
+
         pending_default = ""
         pending_choices: list[dict] = []
         queued: list[str] = []
@@ -676,6 +718,11 @@ async def run(stdio: bool = False) -> None:
                     print(f"{_YELLOW}no result yet{_RESET}")
                 else:
                     print_result(last_payload, verbose=True)
+                continue
+            if line == "advise" or line.startswith("advise "):
+                question = line.removeprefix("advise").strip() or \
+                    "What should I do next?"
+                await do_advise(question)
                 continue
             # task drafting: plain English in, selectable commands out
             if line.startswith("?") or line.startswith("task "):
@@ -815,7 +862,8 @@ async def run(stdio: bool = False) -> None:
                 # Directive Binding: a reason.* result's priority_tools merge
                 # into the queue (prefilled); DAIR's replace it at assess.
                 if tool.startswith("reason_") and isinstance(payload, dict):
-                    pts = (payload.get("directives") or {}).get("priority_tools") or []
+                    pts = filter_known((payload.get("directives") or {})
+                                       .get("priority_tools") or [], schema_map)
                     if pts and wo.merge_directives(state, pts, prefill=_prefill):
                         print(wo.render(state, color=True))
                 if wo.needs_nag(state):

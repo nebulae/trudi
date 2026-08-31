@@ -138,6 +138,19 @@ def draft_summary(state: SessionState) -> str:
     return f"Ran {len(state.ran)} tools: " + "; ".join(parts)
 
 
+def build_situation(state: SessionState) -> str:
+    """The context package for reason.advise: everything the mentor needs,
+    nothing it should invent."""
+    open_items = [i.text for i in state.items if i.status == "open"][:8]
+    return "\n".join([
+        state.case_context or "(no case context)",
+        f"phase: {state.phase} (stack depth {len(state.phase_stack)})",
+        f"recent results: {draft_summary(state)}",
+        "open work order: " + ("; ".join(open_items) if open_items
+                               else "(empty)"),
+    ])
+
+
 def opening_summary(state: SessionState) -> str:
     """The tool_results_summary for an assess with no calls to summarize —
     the contract's wording, nothing for the analyst to edit."""

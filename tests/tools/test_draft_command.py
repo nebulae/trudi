@@ -39,3 +39,27 @@ class TestDraftCommand:
         cands = [{"command": f"a.b x={i}", "why": ""} for i in range(9)]
         out, _ = _call({"success": True, "result_block": {"candidates": cands}})
         assert len(out["candidates"]) == 5
+
+
+class TestAdvise:
+    def _call(self, ask_result):
+        with patch.object(R, "_ask", return_value=ask_result) as ask:
+            fn = getattr(R.reason_advise, "fn", R.reason_advise)
+            out = fn("what should I do next?",
+                     "phase: Triage\nrecent results: 1 pcap listed")
+            return out, ask
+
+    def test_advice_from_result_block(self):
+        out, ask = self._call({"success": True,
+                               "conclusion": "prose fallback",
+                               "result_block": {"advice": "Inventory HTTP sessions next."},
+                               "directives": {"priority_tools": ["net.http_session_inventory"]}})
+        assert out["advice"] == "Inventory HTTP sessions next."
+        assert out["directives"]["priority_tools"] == ["net.http_session_inventory"]
+        user = ask.call_args[0][1]
+        assert "QUESTION:" in user and "SITUATION:" in user
+
+    def test_falls_back_to_conclusion(self):
+        out, _ = self._call({"success": True, "conclusion": "Check the DNS traffic.",
+                             "result_block": None})
+        assert out["advice"] == "Check the DNS traffic."

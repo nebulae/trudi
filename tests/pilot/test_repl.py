@@ -348,3 +348,12 @@ class TestCompletion:
             base = dotted.rstrip("*")
             assert any(d.startswith(base) for d in live_completer.dotted), \
                 f"alias {alias} -> {dotted} matches no mounted tool"
+
+
+class TestFilterKnown:
+    def test_drops_unknown_tools(self):
+        from pilot.repl import filter_known
+        schema_map = {"hash_file": {}, "net_ngrep_search": {}}
+        assert filter_known(
+            ["hash.file", "sha256sum", "net.ngrep_search pattern=x", ""],
+            schema_map) == ["hash.file", "net.ngrep_search pattern=x"]

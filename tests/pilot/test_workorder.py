@@ -148,3 +148,17 @@ class TestRender:
         fitted = wo._fit(long)
         assert len(fitted) <= 75
         assert fitted.endswith("nitroba.pcap") and fitted.startswith("net.tcpdump")
+
+
+class TestSituation:
+    def test_build_situation_packages_state(self):
+        s = _state(case_context="Case X. Question: who?",
+                   phase_stack=[{"phase": "Collect", "depth": 0}],
+                   items=[wo.WorkItem("ez.pecmd"),
+                          wo.WorkItem("tsk.fls", status="done")])
+        wo.record_ran(s, "net.ngrep_search p=x", True, cid=4)
+        sit = wo.build_situation(s)
+        assert "Case X" in sit and "phase: Collect" in sit
+        assert "net.ngrep_search ok" in sit
+        assert "open work order: ez.pecmd" in sit
+        assert "tsk.fls" not in sit.split("open work order:")[1]

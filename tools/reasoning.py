@@ -4600,3 +4600,45 @@ def reason_draft_command(task: str, tool_briefs: str, context: str = "",
                                "why": str(c.get("why", "")).strip()[:200]})
     result["candidates"] = candidates[:5]
     return result
+
+
+# ── mid-investigation advisory (pilot assistance) ────────────────────────────
+
+_ADVISE_SYS = (
+    "You are a senior DFIR mentor advising a human analyst mid-"
+    "investigation. Given their QUESTION and the SITUATION (case question, "
+    "phase, recent tool results, open work order), give direct grounded "
+    "advice: what matters most right now, what to check next and why, what "
+    "to avoid. Be concrete and brief — a few short paragraphs at most. "
+    "Reference only evidence present in the SITUATION; never invent "
+    "artifacts, hosts, or results. If the analyst should record a finding "
+    "or run the DAIR assess, say so." + result_instruction(
+        '{"advice": "your guidance, 2-6 sentences", '
+        '"directives": {"priority_tools": ["ns.tool", "..."]}}')
+)
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_advise")
+def reason_advise(question: str, situation: str,
+                  input_call_ids: list[int] | None = None) -> dict:
+    """
+    Free-form mid-investigation guidance for the human analyst — the answer
+    to "what should I do next?" when it needs reasoning, not a work order.
+
+    question: the analyst's ask, in their words.
+    situation: auto-assembled by the caller — case question, current phase,
+        recent tool results, open work-order items.
+
+    Returns: advice (str) + the standard reason fields; any suggested
+    priority_tools land in directives for the caller to merge into the
+    work order. Advisory only — never executes or records anything.
+    """
+    user = f"QUESTION:\n{question}\n\nSITUATION:\n{situation}"
+    result = _ask(_ADVISE_SYS, user, max_tokens=MAX_TOKENS_DRAFT_COMMAND,
+                  _tool_name="reason_advise", input_call_ids=input_call_ids)
+    rb = result.get("result_block")
+    advice = rb.get("advice") if isinstance(rb, dict) else None
+    result["advice"] = str(advice).strip() if advice \
+        else (result.get("conclusion") or "").strip()
+    return result
