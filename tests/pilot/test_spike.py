@@ -4,9 +4,35 @@ import asyncio
 import pytest
 
 from pilot.spike import (
-    PilotCompleter, build_alias_map, dotted_to_wire, parse_command,
-    wire_to_dotted,
+    PilotCompleter, build_alias_map, complete_path, dotted_to_wire,
+    parse_command, shell_guard, wire_to_dotted,
 )
+
+
+class TestShellGuard:
+    def test_forensic_binaries_denied_with_hint(self):
+        msg = shell_guard("fls -r /e/disk.E01")
+        assert msg and "tsk.fls" in msg
+        assert shell_guard("tcpdump -r x.pcap") is not None
+
+    def test_navigation_allowed(self):
+        for cmd in ("ls -la evidence/", "tree analysis", "du -sh .",
+                    "wc -l notes.txt"):
+            assert shell_guard(cmd) is None
+
+
+class TestPathCompletion:
+    def test_dirs_get_slash_and_hidden_skipped(self, tmp_path, monkeypatch):
+        (tmp_path / "evidence").mkdir()
+        (tmp_path / "report.txt").write_text("x")
+        (tmp_path / ".hidden").write_text("x")
+        monkeypatch.chdir(tmp_path)
+        assert complete_path("") == ["evidence/", "report.txt"]
+        assert complete_path("e") == ["evidence/"]
+        assert complete_path(".hid") == [".hidden"]
+
+    def test_bad_dir_is_empty_not_error(self):
+        assert complete_path("/no/such/dir/x") == []
 
 
 class TestNames:
@@ -75,6 +101,27 @@ class TestCompletion:
         assert "ez.mftecmd" in asyncio.run(hits("ez.m"))
         assert "tsk.fls" in asyncio.run(hits("fls"))
         assert "offset_sectors=" in asyncio.run(hits("tsk.fls image=/x o"))
+
+    def test_param_value_path_completion(self, live_completer, tmp_path,
+                                         monkeypatch):
+        (tmp_path / "evidence").mkdir()
+        (tmp_path / "evidence" / "disk.E01").write_bytes(b"x")
+        monkeypatch.chdir(tmp_path)
+        from prompt_toolkit.completion import CompleteEvent
+        from prompt_toolkit.document import Document
+
+        async def hits(text):
+            doc = Document(text, len(text))
+            return [x.text async for x in
+                    live_completer.get_completions_async(doc, CompleteEvent())]
+
+        assert asyncio.run(hits("tsk.fls image=ev")) == ["evidence/"]
+        assert asyncio.run(hits("tsk.fls image=evidence/")) == ["evidence/disk.E01"]
+        # shell mode: paths complete for arguments
+        assert "evidence/" in asyncio.run(hits("ls ev"))
+        assert "evidence/" in asyncio.run(hits("!du -sh ev"))
+        # param NAME completion still works when no '=' yet
+        assert "offset_sectors=" in asyncio.run(hits("tsk.fls image=x o"))
 
     def test_every_alias_targets_a_mounted_tool(self, live_completer):
         for alias, dotted in live_completer.aliases.items():

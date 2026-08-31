@@ -60,6 +60,61 @@ def parse_command(line: str) -> tuple[str, dict]:
     return tool, args
 
 
+# ── shell navigation ─────────────────────────────────────────────────────────
+#
+# The analyst needs to look around (ls, tree, cd) — that is navigation, not
+# forensic execution, and refusing it just pushes them to a second terminal.
+# The doctrine holds where it matters: shell commands pass the SAME
+# forensic-binary deny the agent has (core/forensic_binaries — identical ban
+# list, identical MCP-wrapper coaching), so evidence work still has exactly
+# one path. `!cmd` runs anything else; bare ls/ll/tree/pwd/df need no prefix.
+
+NAV_COMMANDS = {"ls", "ll", "tree", "df", "pwd"}
+SHELL_OUTPUT_CAP = 16_384
+
+
+def shell_guard(cmd: str) -> str | None:
+    """The agent's deny message, for the human: MCP hint or None (allowed)."""
+    from core.forensic_binaries import MCP_WRAPPER_HINTS, _identify_forensic_binary
+    binary = _identify_forensic_binary(cmd)
+    if binary:
+        hint = MCP_WRAPPER_HINTS.get(binary, "the corresponding MCP wrapper")
+        return (f"{binary} is a forensic binary — evidence work goes through "
+                f"the traced MCP path so findings can cite it. Use: {hint}")
+    return None
+
+
+def run_shell(cmd: str) -> None:
+    denied = shell_guard(cmd)
+    if denied:
+        print(denied)
+        return
+    import subprocess
+    if cmd.split()[0] == "ll":
+        cmd = "ls -la" + cmd[2:]
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    out = (r.stdout or "") + (r.stderr or "")
+    if len(out) > SHELL_OUTPUT_CAP:
+        out = out[:SHELL_OUTPUT_CAP] + "\n… (truncated)"
+    print(out.rstrip() or f"(exit {r.returncode})")
+
+
+def complete_path(prefix: str) -> list[str]:
+    """Filesystem completions for a partial path; dirs get a trailing /."""
+    base = os.path.expanduser(prefix)
+    dirname, part = os.path.split(base)
+    try:
+        entries = sorted(os.listdir(dirname or "."))
+    except OSError:
+        return []
+    hits = []
+    for name in entries:
+        if name.startswith(part) and not (not part and name.startswith(".")):
+            full = os.path.join(dirname, name) if dirname else name
+            hits.append(full + "/" if os.path.isdir(full) else full)
+    return hits
+
+
 # ── completion ───────────────────────────────────────────────────────────────
 
 def build_alias_map() -> dict[str, str]:
@@ -116,8 +171,16 @@ class PilotCompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         words = text.split()
+        shell_mode = text.lstrip().startswith("!") or (
+            bool(words) and words[0] in NAV_COMMANDS)
         completing_first = not words or (len(words) == 1 and not text.endswith(" "))
-        if completing_first:
+
+        if shell_mode and not completing_first:
+            # navigation: complete filesystem paths for every argument
+            prefix = "" if text.endswith(" ") else words[-1]
+            for hit in complete_path(prefix):
+                yield Completion(hit, start_position=-len(prefix))
+        elif completing_first:
             prefix = words[0] if words else ""
             for hit in self.complete_first(prefix):
                 yield Completion(hit.split()[0], start_position=-len(prefix),
@@ -125,9 +188,15 @@ class PilotCompleter(Completer):
         else:
             tool = words[0]
             used = {w.split("=", 1)[0] for w in words[1:] if "=" in w}
-            prefix = "" if text.endswith(" ") else words[-1]
-            for hit in self.complete_param(tool, prefix, used):
-                yield Completion(hit, start_position=-len(prefix))
+            current = "" if text.endswith(" ") else words[-1]
+            if "=" in current:
+                # param VALUE: complete as a filesystem path, keeping key=
+                key, value = current.split("=", 1)
+                for hit in complete_path(value):
+                    yield Completion(hit, start_position=-len(value))
+            else:
+                for hit in self.complete_param(tool, current, used):
+                    yield Completion(hit, start_position=-len(current))
 
 
 # ── the loop ─────────────────────────────────────────────────────────────────
@@ -154,8 +223,9 @@ async def run(stdio: bool = False) -> None:
             print(render_banner(info, state))
         else:
             print("(no case dir — playground session, nothing recorded)")
-        print(f"TRUDI pilot (spike) — {len(tools)} tools, tab completes; "
-              f"'tools <substr>' lists, 'schema ns.tool' shows params, 'exit' quits")
+        print(f"TRUDI pilot (spike) — {len(tools)} tools, tab completes "
+              f"(names, params, paths); 'tools <substr>' lists, 'schema ns.tool' "
+              f"shows params, ls/cd/!cmd navigate, 'exit' quits")
 
         from prompt_toolkit import PromptSession
         session = PromptSession("trudi> ", completer=completer)
@@ -183,6 +253,33 @@ async def run(stdio: bool = False) -> None:
                         break
                 else:
                     print(f"no such tool: {target}")
+                continue
+            # navigation: cd/pwd builtins, ! prefix, bare ls/ll/tree/df.
+            # Same forensic-binary deny as the agent (shell_guard).
+            if line == "pwd":
+                print(os.getcwd())
+                continue
+            if line == "cd" or line.startswith("cd "):
+                target = os.path.expanduser(line[2:].strip() or "~")
+                try:
+                    os.chdir(target)
+                    print(os.getcwd())
+                except OSError as e:
+                    print(f"cd: {e}")
+                continue
+            if line.startswith("!"):
+                run_shell(line[1:].strip())
+                continue
+            first = line.split()[0]
+            if first in NAV_COMMANDS:
+                run_shell(line)
+                continue
+            if "." not in first:
+                # not an MCP tool: a bare forensic binary gets the same
+                # coaching the agent gets; anything else, a pointer.
+                print(shell_guard(line) or
+                      f"unknown command {first!r} — MCP tools are ns.tool "
+                      f"(tab completes); prefix shell with !")
                 continue
             try:
                 tool, args = parse_command(line)

@@ -312,8 +312,13 @@ stack — suggested, prefilled.
 ## Design decisions (settled)
 - **Name and CLI shape:** pilot / agent duality via `trudi --mode pilot|agent`.
 - **Terminal-first:** the REPL is the driving surface; vera web is optional.
-- **No shell escape hatch:** MCP-only execution — the architectural guardrail
-  and the court-defensibility story are the same thing.
+- **Navigation shell, MCP-only evidence work:** ls/cd/tree and a `!cmd`
+  escape exist — an analyst must be able to look around without a second
+  terminal — but every shell command passes the SAME forensic-binary deny
+  the agent has (core/forensic_binaries: identical ban list, identical
+  MCP-wrapper coaching). Evidence work has exactly one path; the
+  architectural guardrail and the court-defensibility story are the same
+  thing.
 - **Analysis is always async:** output never waits on the reason backend.
 - **Gates before vera:** a finding enters vera only after `record_finding`
   accepts it. Vera holds accepted findings; refusals are transient coaching.
