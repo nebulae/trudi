@@ -51,6 +51,31 @@ class TestApplyAssess:
         assert s.ran == []
 
 
+class TestPrefillAndMerge:
+    def test_apply_assess_prefills_items(self):
+        s = _state()
+        wo.apply_assess(s, {"directives": {"priority_tools": ["tsk.fls"]}},
+                        prefill=lambda t: t + " image=/e/disk.E01")
+        assert s.items[0].text == "tsk.fls image=/e/disk.E01"
+        assert s.items[0].label == "tsk.fls image=/e/disk.E01"
+
+    def test_merge_directives_appends_prefilled_no_dupes(self):
+        s = _state(items=[wo.WorkItem("net.ngrep_search pattern=x")])
+        added = wo.merge_directives(
+            s, ["net.ngrep_search other", "ez.pecmd"],
+            prefill=lambda t: t + " prefilled=1")
+        assert added == 1  # ngrep already open → not duplicated
+        assert s.items[-1].text == "ez.pecmd prefilled=1"
+        assert s.items[-1].cue == "reason"
+
+    def test_reason_items_survive_assess(self):
+        s = _state()
+        wo.merge_directives(s, ["ez.pecmd"])
+        wo.apply_assess(s, {"directives": {"priority_tools": ["tsk.fls"]}})
+        assert [i.text for i in s.items if i.status == "open"] == \
+            ["ez.pecmd", "tsk.fls"]
+
+
 class TestRunTracking:
     def test_success_retires_matching_item(self):
         s = _state(items=[wo.WorkItem("ez.mftecmd --csv analysis/")])

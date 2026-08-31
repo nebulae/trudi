@@ -35,6 +35,59 @@ class TestPathCompletion:
         assert complete_path("/no/such/dir/x") == []
 
 
+class TestPrefill:
+    SCHEMAS = {
+        "net_tcpdump_read": {
+            "properties": {"pcap_path": {"type": "string"},
+                           "packet_count": {"type": "integer", "default": 100}},
+            "required": ["pcap_path"]},
+        "tsk_fls": {
+            "properties": {"image": {"type": "string"},
+                           "offset_sectors": {"type": "integer"}},
+            "required": ["image"]},
+        "reason_plan": {
+            "properties": {"case_description": {"type": "string"}},
+            "required": ["case_description"]},
+    }
+    EVIDENCE = ["/e/case dir/nitroba.pcap", "/e/disk.E01"]
+
+    def test_bare_tool_gets_required_args_with_guesses(self):
+        from pilot.repl import prefill_command
+        line = prefill_command("net.tcpdump_read", self.SCHEMAS, self.EVIDENCE)
+        # pcap param prefers the .pcap evidence; spaces get quoted
+        assert line == 'net.tcpdump_read pcap_path="/e/case dir/nitroba.pcap"'
+        assert prefill_command("tsk.fls", self.SCHEMAS, self.EVIDENCE) == \
+            "tsk.fls image=/e/disk.E01"
+
+    def test_unguessable_required_left_empty(self):
+        from pilot.repl import prefill_command
+        assert prefill_command("reason.plan", self.SCHEMAS, self.EVIDENCE) == \
+            "reason.plan case_description="
+
+    def test_suggestion_with_args_and_unknown_tool_verbatim(self):
+        from pilot.repl import prefill_command
+        ritual = 'reason.hypothesize observation="q" hypothesis_kind=case_question'
+        assert prefill_command(ritual, self.SCHEMAS, self.EVIDENCE) == ritual
+        assert prefill_command("ez.evtxecmd Security 4624",
+                               self.SCHEMAS, self.EVIDENCE) == \
+            "ez.evtxecmd Security 4624"
+        assert prefill_command("no.such_tool", self.SCHEMAS, self.EVIDENCE) == \
+            "no.such_tool"
+
+    def test_schema_default_wins_over_evidence(self):
+        from pilot.repl import guess_value
+        assert guess_value("pcap_path", {"default": "/x.pcap"},
+                           self.EVIDENCE) == "/x.pcap"
+
+    def test_missing_required_reports_empty_and_absent(self):
+        from pilot.repl import missing_required
+        assert missing_required("tsk_fls", {}, self.SCHEMAS) == ["image(string)"]
+        assert missing_required("tsk_fls", {"image": ""}, self.SCHEMAS) == \
+            ["image(string)"]
+        assert missing_required("tsk_fls", {"image": "/e/disk.E01"},
+                                self.SCHEMAS) == []
+
+
 class TestCallProgress:
     class _SlowClient:
         def __init__(self, delay, result=None, exc=None):

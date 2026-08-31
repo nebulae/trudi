@@ -63,9 +63,10 @@ def resume_items() -> list[WorkItem]:
                            "last-known phase stack", cue="ritual")]
 
 
-def apply_assess(state: SessionState, payload: dict) -> None:
+def apply_assess(state: SessionState, payload: dict, prefill=None) -> None:
     """Fold a dair_assess result into the state: phase stack per the
-    contract, open items replaced by the new work order."""
+    contract, open items replaced by the new work order. `prefill` maps a
+    suggestion to a runnable command (args filled from schema/evidence)."""
     action = payload.get("stack_action") or "stay"
     nxt = payload.get("next_phase") or ""
     state.last_phase = payload.get("current_phase") or state.last_phase
@@ -80,8 +81,27 @@ def apply_assess(state: SessionState, payload: dict) -> None:
 
     tools = (payload.get("directives") or {}).get("priority_tools") or []
     kept = [i for i in state.items if i.status != "open" or i.cue == "reason"]
-    state.items = kept + [WorkItem(str(t), cue="dair") for t in tools]
+    state.items = kept + [WorkItem(prefill(str(t)) if prefill else str(t),
+                                   cue="dair") for t in tools]
     state.ran = []
+
+
+def merge_directives(state: SessionState, suggestions: list[str],
+                     prefill=None, cue: str = "reason") -> int:
+    """Append priority_tools from a reason.* result to the queue (Directive
+    Binding: reason directives merge, DAIR replaces). Items whose tool is
+    already open are not duplicated. Returns how many were added."""
+    open_heads = {i.text.split()[0] for i in state.items if i.status == "open"}
+    added = 0
+    for s in suggestions:
+        head = str(s).split()[0] if str(s).split() else ""
+        if not head or head in open_heads:
+            continue
+        text = prefill(str(s)) if prefill else str(s)
+        state.items.append(WorkItem(text, cue=cue))
+        open_heads.add(head)
+        added += 1
+    return added
 
 
 def mark_done(state: SessionState, cmd: str) -> None:

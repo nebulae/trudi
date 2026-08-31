@@ -294,6 +294,72 @@ def print_result(payload) -> None:
         print(text)
 
 
+# ── prefill & argument checking ──────────────────────────────────────────────
+
+_PATHY = ("file", "path", "image", "evidence", "pcap", "hive", "mail",
+          "db", "dump", "target", "dir")
+_EXT_HINTS = (
+    (("pcap",), (".pcap", ".pcapng")),
+    (("image", "e01", "disk"), (".e01", ".ex01", ".dd", ".raw", ".img",
+                                ".vmdk", ".vhd", ".vhdx")),
+    (("mem", "dump"), (".mem", ".vmem", ".lime", ".dmp")),
+    (("mail", "ost", "pst"), (".ost", ".pst")),
+)
+
+
+def guess_value(param: str, prop: dict, evidence: list[str]) -> str:
+    """Best-effort default for a required param: schema default first, then
+    an evidence path whose extension matches what the name suggests."""
+    if "default" in prop and prop["default"] not in (None, ""):
+        return str(prop["default"])
+    low = param.lower()
+    if any(p in low for p in _PATHY) and evidence:
+        for names, exts in _EXT_HINTS:
+            if any(n in low for n in names):
+                for path in evidence:
+                    if os.path.splitext(path)[1].lower() in exts:
+                        return path
+        return evidence[0]
+    return ""
+
+
+def prefill_command(suggestion: str, schema_map: dict, evidence: list[str]) -> str:
+    """Turn a work-order suggestion into an editable command with its
+    required args present. A suggestion that already carries args (the
+    ritual items) is used verbatim; a bare tool name gets `key=value` for
+    every required schema param — value guessed where possible, left empty
+    to fill in where not."""
+    parts = suggestion.split()
+    if len(parts) != 1:
+        return suggestion
+    tool = parts[0]
+    schema = schema_map.get(dotted_to_wire(tool))
+    if not schema:
+        return suggestion
+    props = schema.get("properties", {})
+    required = schema.get("required", [])
+    frags = [tool]
+    for param in required:
+        value = guess_value(param, props.get(param, {}), evidence)
+        if value and (" " in value):
+            value = f'"{value}"'
+        frags.append(f"{param}={value}")
+    return " ".join(frags)
+
+
+def missing_required(tool_wire: str, args: dict, schema_map: dict) -> list[str]:
+    """Required params absent or left empty — checked client-side so an
+    unfilled prefill gets coaching, not a server error."""
+    schema = schema_map.get(tool_wire) or {}
+    props = schema.get("properties", {})
+    out = []
+    for param in schema.get("required", []):
+        if args.get(param) in (None, ""):
+            ptype = (props.get(param) or {}).get("type", "")
+            out.append(f"{param}({ptype})" if ptype else param)
+    return out
+
+
 async def call_with_progress(client, tool: str, args: dict, label: str = "",
                              tick: float = 5.0):
     """call_tool with a heartbeat: silent awaits look like a frozen REPL
@@ -342,10 +408,13 @@ async def run(stdio: bool = False) -> None:
         from pilot.bootstrap import (bootstrap, is_case_dir, parse_case_md,
                                      render_banner)
         state = wo.SessionState()
+        schema_map = {t.name: (t.inputSchema or {}) for t in tools}
+        evidence_paths: list[str] = []
         case_dir = os.environ.get("TRUDI_CASE_DIR") or os.getcwd()
         if is_case_dir(case_dir):
             info = parse_case_md(case_dir)
             boot = await bootstrap(client, info)
+            evidence_paths = [p for p, _ in boot.evidence]
             print(render_banner(info, boot))
             state.case_context = (f"Case {info.case_id}. "
                                   f"Question: {info.question}")[:1500]
@@ -371,6 +440,9 @@ async def run(stdio: bool = False) -> None:
             reserve_space_for_menu=6,
         )
 
+        def _prefill(suggestion: str) -> str:
+            return prefill_command(suggestion, schema_map, evidence_paths)
+
         async def do_assess() -> None:
             """Call dair.assess with an editable auto-drafted summary, fold
             the returned work order + phase transition into the state."""
@@ -392,7 +464,7 @@ async def run(stdio: bool = False) -> None:
             except Exception as e:
                 print(f"{_RED}assess failed: {e}{_RESET}")
                 return
-            wo.apply_assess(state, payload)
+            wo.apply_assess(state, payload, prefill=_prefill)
             rationale = payload.get("transition_rationale") or ""
             if rationale:
                 print(f" dair: {rationale[:200]}")
@@ -416,7 +488,7 @@ async def run(stdio: bool = False) -> None:
                 if text == "assess":
                     await do_assess()
                 elif text:
-                    pending_default = text
+                    pending_default = _prefill(text)
                 else:
                     print(f"{_YELLOW}no open work-order item {line}{_RESET}")
                 continue
@@ -495,6 +567,14 @@ async def run(stdio: bool = False) -> None:
             except ValueError as e:
                 print(f"{_YELLOW}parse error: {e}{_RESET}")
                 continue
+            gaps = missing_required(tool, args, schema_map)
+            if gaps:
+                print(f"{_YELLOW}{line.split()[0]} needs: {', '.join(gaps)} "
+                      f"— fill in the value and press enter{_RESET}")
+                # re-prefill with guessed args where the line was bare, so the
+                # buffer converges toward runnable instead of repeating
+                pending_default = _prefill(line) if len(line.split()) == 1 else line
+                continue
             try:
                 result = await call_with_progress(client, tool, args,
                                                   label=line.split()[0])
@@ -503,6 +583,12 @@ async def run(stdio: bool = False) -> None:
                 ok = isinstance(payload, dict) and payload.get("success", True)
                 cid = payload.get("_trudi_call_id") if isinstance(payload, dict) else None
                 wo.record_ran(state, line, ok, cid)
+                # Directive Binding: a reason.* result's priority_tools merge
+                # into the queue (prefilled); DAIR's replace it at assess.
+                if tool.startswith("reason_") and isinstance(payload, dict):
+                    pts = (payload.get("directives") or {}).get("priority_tools") or []
+                    if pts and wo.merge_directives(state, pts, prefill=_prefill):
+                        print(wo.render(state))
                 if wo.needs_nag(state):
                     print(f"{_YELLOW}{len(state.ran)} tools since the last "
                           f"assess — type `assess` to get the next work "
