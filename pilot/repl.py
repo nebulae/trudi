@@ -467,6 +467,23 @@ def guess_value(param: str, prop: dict, evidence: list[str],
 
 _PATTERNISH = ("pattern", "query", "regex", "search", "grep")
 
+# output-destination params: prefill even when OPTIONAL, so structured
+# results land as files under analysis/ (operator: "the commands don't
+# write to any files, just to stdout" — full stdout is always persisted to
+# the analysis/.tool_output sidecar, but explicit outputs beat digging).
+_OUTPUT_DIR_PARAMS = {"output_dir", "out_dir", "export_dir", "csv_dir",
+                      "output_directory", "dest_dir"}
+_OUTPUT_FILE_PARAMS = {"output_path", "out_path", "output_file", "out_file",
+                       "export_path", "csv_path", "output_csv"}
+
+
+def output_default(param: str, tool_dotted: str) -> str:
+    """analysis/-rooted default for an output param, named after the tool."""
+    if param in _OUTPUT_DIR_PARAMS:
+        return "analysis/"
+    short = tool_dotted.split(".", 1)[-1]
+    return f"analysis/{short}_out.txt"
+
 
 def prefill_command(suggestion: str, schema_map: dict, evidence: list[str],
                     defaults: dict | None = None) -> str:
@@ -493,7 +510,17 @@ def prefill_command(suggestion: str, schema_map: dict, evidence: list[str],
                    re.findall(r"'([^']+)'|\"([^\"]+)\"", suggestion)), "")
     args: dict[str, str] = {}
     for param in required:
-        args[param] = guess_value(param, props.get(param, {}), evidence, defaults)
+        if param in _OUTPUT_DIR_PARAMS or param in _OUTPUT_FILE_PARAMS:
+            args[param] = output_default(param, tool)
+        else:
+            args[param] = guess_value(param, props.get(param, {}), evidence,
+                                      defaults)
+    # optional output params get filled too — structured results should
+    # land as analysis/ files, not vanish into stdout
+    for param in props:
+        if param not in args and (param in _OUTPUT_DIR_PARAMS
+                                  or param in _OUTPUT_FILE_PARAMS):
+            args[param] = output_default(param, tool)
     if quoted:
         pat_param = next(
             (p for p in list(required) + sorted(props)

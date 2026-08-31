@@ -143,3 +143,59 @@ class TestBanner:
     def test_new_session_shows_ritual(self):
         b = render_banner(CaseInfo(case_dir="/c", case_id="C"), BootState())
         assert "reason.hypothesize" in b and "none found" in b
+
+
+class TestCaseExtraction:
+    def test_merge_fills_only_gaps(self):
+        from pilot.bootstrap import merge_extracted
+        info = CaseInfo(case_dir="/c", case_id="X", question="already set")
+        filled = merge_extracted(info, {
+            "case_question": "should not overwrite",
+            "roster": [" Jean Jones ", "", "Alison Smith"],
+            "evidence_root": "/e/root"})
+        assert info.question == "already set"
+        assert info.roster == ["Jean Jones", "Alison Smith"]
+        assert info.evidence_root == "/e/root"
+        assert set(filled) == {"roster", "evidence_root"}
+
+    @pytest.mark.asyncio
+    async def test_extraction_called_once_then_cached(self, tmp_path,
+                                                      monkeypatch):
+        from pilot import bootstrap as B
+        monkeypatch.setattr(B, "_EXTRACT_CACHE_DIR", str(tmp_path / "cache"))
+        (tmp_path / "CLAUDE.md").write_text("# odd format\nsuspects: Jean")
+        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
+        client = _FakeClient({"reason_extract_case": {
+            "success": True, "case_question": "who did it?",
+            "roster": ["Jean Jones"], "evidence_root": "",
+            "case_id": "C", "scenario_summary": "s"}})
+        await B.extract_case_info(client, info, echo=lambda *a, **k: None)
+        assert info.question == "who did it?" and info.roster == ["Jean Jones"]
+        assert len(client.calls) == 1
+        # second boot: cache hit, no backend call
+        info2 = CaseInfo(case_dir=str(tmp_path), case_id="C")
+        await B.extract_case_info(client, info2, echo=lambda *a, **k: None)
+        assert info2.question == "who did it?" and len(client.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_complete_regex_parse_skips_backend(self, tmp_path):
+        from pilot.bootstrap import extract_case_info
+        (tmp_path / "CLAUDE.md").write_text("x")
+        info = CaseInfo(case_dir=str(tmp_path), case_id="C",
+                        question="q", roster=["A B"])
+        client = _FakeClient({})
+        await extract_case_info(client, info, echo=lambda *a, **k: None)
+        assert client.calls == []
+
+    @pytest.mark.asyncio
+    async def test_backend_failure_is_soft(self, tmp_path, monkeypatch):
+        from pilot import bootstrap as B
+        monkeypatch.setattr(B, "_EXTRACT_CACHE_DIR", str(tmp_path / "cache"))
+        (tmp_path / "CLAUDE.md").write_text("y")
+
+        class _Boom:
+            async def call_tool(self, *a, **k):
+                raise RuntimeError("backend down")
+        info = CaseInfo(case_dir=str(tmp_path), case_id="C")
+        await B.extract_case_info(_Boom(), info, echo=lambda *a, **k: None)
+        assert info.question == ""  # gap remains, boot proceeds

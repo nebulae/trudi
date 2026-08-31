@@ -415,3 +415,29 @@ class TestTightenedGuessing:
             ["net.ngrep_search p=x", "correlate.mitre_map finding_text=x"]
         # no evidence context: only existence-checked
         assert filter_known(sugg, schema_map) == sugg
+
+
+class TestOutputParams:
+    SCHEMAS = {
+        "net_tcpdump_extract_http": {
+            "properties": {"pcap_file": {"type": "string"},
+                           "output_path": {"type": "string"}},
+            "required": ["pcap_file"]},
+        "carve_foremost_carve": {
+            "properties": {"image": {"type": "string"},
+                           "output_dir": {"type": "string"}},
+            "required": ["image", "output_dir"]},
+    }
+
+    def test_optional_output_param_filled(self):
+        from pilot.repl import prefill_command
+        line = prefill_command("net.tcpdump_extract_http", self.SCHEMAS,
+                               ["/e/n.pcap"])
+        assert "pcap_file=/e/n.pcap" in line
+        assert "output_path=analysis/tcpdump_extract_http_out.txt" in line
+
+    def test_required_output_dir_filled(self):
+        from pilot.repl import prefill_command
+        line = prefill_command("carve.foremost_carve", self.SCHEMAS,
+                               ["/e/disk.dd"])
+        assert "image=/e/disk.dd" in line and "output_dir=analysis/" in line

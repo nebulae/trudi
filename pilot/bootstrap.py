@@ -121,8 +121,69 @@ def _payload(result) -> dict:
         return {}
 
 
+_EXTRACT_CACHE_DIR = os.path.expanduser("~/.cache/trudi/pilot_case_info")
+
+
+def merge_extracted(info: CaseInfo, extracted: dict) -> list[str]:
+    """Fill CaseInfo gaps from an LLM extraction — the regex parse wins
+    wherever it found something; the extraction fills what it missed.
+    Returns the field names that were filled."""
+    filled = []
+    if not info.question and extracted.get("case_question"):
+        info.question = str(extracted["case_question"]).strip()
+        filled.append("question")
+    if not info.roster and extracted.get("roster"):
+        info.roster = [str(n).strip() for n in extracted["roster"]
+                       if str(n).strip()]
+        if info.roster:
+            filled.append("roster")
+    if not info.evidence_root and extracted.get("evidence_root"):
+        info.evidence_root = str(extracted["evidence_root"]).strip()
+        filled.append("evidence_root")
+    return filled
+
+
+async def extract_case_info(client, info: CaseInfo, echo=print) -> None:
+    """When the regex parse left gaps (question/roster), ask the reason
+    backend to read the case CLAUDE.md — once per file content, cached
+    under ~/.cache/trudi so later boots are instant."""
+    md_path = os.path.join(info.case_dir, "CLAUDE.md")
+    if (info.question and info.roster) or not os.path.exists(md_path):
+        return
+    text = open(md_path, encoding="utf-8", errors="replace").read()
+    import hashlib
+    key = hashlib.sha256(text.encode()).hexdigest()[:24]
+    cache = os.path.join(_EXTRACT_CACHE_DIR, f"{key}.json")
+    extracted = None
+    try:
+        extracted = json.load(open(cache, encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    if extracted is None:
+        echo("  reading the case briefing via the reason backend "
+             "(first boot for this file — cached after)…", flush=True)
+        try:
+            r = await client.call_tool("reason_extract_case",
+                                       {"case_md": text})
+            payload = _payload(r)
+            if payload.get("success"):
+                extracted = {k: payload.get(k, "") for k in
+                             ("case_id", "case_question", "evidence_root",
+                              "scenario_summary")}
+                extracted["roster"] = payload.get("roster") or []
+                os.makedirs(_EXTRACT_CACHE_DIR, exist_ok=True)
+                json.dump(extracted, open(cache, "w", encoding="utf-8"))
+        except Exception as e:
+            echo(f"  (case extraction unavailable: {str(e)[:80]})")
+    if extracted:
+        filled = merge_extracted(info, extracted)
+        if filled:
+            echo(f"  case briefing filled: {', '.join(filled)}")
+
+
 async def bootstrap(client, info: CaseInfo, echo=print) -> BootState:
     """Run the bookkeeping against a connected fastmcp client."""
+    await extract_case_info(client, info, echo)
     state = BootState(
         trace_path=os.path.join("analysis", f"{info.case_id}_trace.json"))
     state.resumed = os.path.exists(os.path.join(info.case_dir, state.trace_path))

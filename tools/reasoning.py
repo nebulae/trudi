@@ -4670,3 +4670,46 @@ def reason_advise(question: str, situation: str,
     result["advice"] = str(advice).strip() if advice \
         else (result.get("conclusion") or "").strip()
     return result
+
+
+# ── case briefing extraction (pilot bootstrap) ───────────────────────────────
+
+_EXTRACT_CASE_SYS = (
+    "You extract structured case metadata from a DFIR case briefing "
+    "document (a case CLAUDE.md or similar). Read the WHOLE document and "
+    "return exactly what it states — never invent, never embellish. "
+    "roster = every named person/account of interest (suspects, users, "
+    "correspondents from any roster/suspect/personnel section), full names "
+    "as written. evidence_root = the directory holding the evidence files, "
+    "if stated. case_question = the investigation's driving question, "
+    "verbatim where one is marked, else the closest single sentence."
+    + result_instruction(
+        '{"case_id": "...", "case_question": "...", "evidence_root": "...", '
+        '"roster": ["Full Name", "..."], "scenario_summary": "1-2 sentences"}')
+)
+
+
+@mcp.tool()
+@with_tool_timeout(_REASON_WATCHDOG, label="reason_extract_case")
+def reason_extract_case(case_md: str,
+                        input_call_ids: list[int] | None = None) -> dict:
+    """
+    Extract typed case metadata from a case briefing document — the pilot
+    calls this at first boot so the case question, roster, and evidence
+    root prefill commands regardless of the briefing's formatting (a regex
+    parser only catches the canonical layout).
+
+    Returns: case_id, case_question, evidence_root, roster (list),
+    scenario_summary — empty where the document is silent.
+    """
+    user = f"CASE BRIEFING DOCUMENT:\n{case_md[:12000]}"
+    result = _ask(_EXTRACT_CASE_SYS, user, max_tokens=MAX_TOKENS_DRAFT_COMMAND,
+                  _tool_name="reason_extract_case",
+                  input_call_ids=input_call_ids)
+    rb = result.get("result_block")
+    rb = rb if isinstance(rb, dict) else {}
+    for key in ("case_id", "case_question", "evidence_root",
+                "scenario_summary"):
+        result[key] = str(rb.get(key) or "").strip()
+    result["roster"] = str_list(rb.get("roster"))
+    return result

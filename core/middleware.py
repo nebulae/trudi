@@ -42,6 +42,7 @@ DAIR_GATE_ALLOWLIST = frozenset({
     # forensics — usable any time (whatever gets run passes every gate).
     "reason_draft_command",
     "reason_advise",
+    "reason_extract_case",
     "reason_synthesize",
     "reason_pre_report_check",
     "accuracy_compare",
