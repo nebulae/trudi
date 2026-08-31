@@ -76,7 +76,7 @@ Imager, Sysinternals, …) one alt-tab away. Consequences:
   Explorer" is a copy-paste, not a mount hunt.
 - **GUI handoff back (`manual` command):** work done in a Windows GUI tool is
   recorded as a vera manual action + trace narration. If it produced an
-  artifact file, the pilot immediately runs `hash.hash_file` on it — so the
+  artifact file, the pilot immediately runs `hash.file` on it — so the
   manual record carries a real `_trudi_call_id` for the artifact's *identity*
   even though its *derivation* is untraced. Honest limit unchanged: findings
   resting only on manual steps cannot reach gate-tier CONFIRMED, and the
@@ -96,7 +96,7 @@ runs `ez.mftecmd` → CSV in `analysis/`; the analyst opens it in Timeline
 Explorer via the printed `\\wsl$` path, sorts, filters, finds the row.
 Nothing is recorded — viewing isn't evidence work; the citable artifact is
 the extractor's CSV + cid. When the analyst returns with "this row
-matters," the pilot prefills a **traced read** (`read.read_output` with a
+matters," the pilot prefills a **traced read** (`read.output` with a
 matching `where=` query) so the finding cites the extractor run + the traced
 read, exactly like an agent finding. The GUI is for human eyes; the citation
 path never touches it.
@@ -136,7 +136,7 @@ pilot> manual
 ```
 
 → vera manual action (analyst as `actor`), trace narration via
-`record_agent_message`, and `hash.hash_file` on any produced artifact — a
+`record_agent_message`, and `hash.file` on any produced artifact — a
 real cid for the artifact's *identity*, though its *derivation* stays
 untraced. The composer states the ceiling up front ("manual derivation —
 SUSPECTED/LIKELY ceiling; re-derive via `misc.pe_scanner` to go higher")
@@ -235,7 +235,7 @@ stack — suggested, prefilled.
 
 ### Phase 0 — prerequisites + spike (~1–2 days)
 - **Wire-name normalization.** ~150 tools across 15 namespaces have doubled
-  wire names (`vol_vol_info`, `tsk_tsk_fls`, `ez_ez_mftecmd`). In an
+  wire names (`vol_info`, `tsk_fls`, `ez_mftecmd`). In an
   agent-driven system this was cosmetic; in a REPL a human types these names
   all day. Strip the redundant prefix at mount time in `server.py` (single
   choke point), update the ~10 consumer files/docs; the hint-resolution test
@@ -273,7 +273,7 @@ stack — suggested, prefilled.
 - Work orders mirrored as vera Leads; each run links the lead item to the
   resulting action. Dismissing a suggestion prompts for a typed disposition.
 - Manual GUI steps: `manual` command → vera manual action + a trace narration
-  (`record_agent_message`), with `hash.hash_file` run on any produced
+  (`record_agent_message`), with `hash.file` run on any produced
   artifact (see Target environment — the Windows GUI toolset is a first-class
   part of the workflow, not an edge case). *Honest limit: manual steps carry
   no derivation `_trudi_call_id`, so findings resting only on them cannot

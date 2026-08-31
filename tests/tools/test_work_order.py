@@ -29,7 +29,7 @@ class TestBinarySig:
         assert wo._binary_sig("vol_pslist") == "pslist"
 
     def test_handles_doubled_and_dotted(self):
-        assert wo._binary_sig("ez_ez_sbecmd") == "sbecmd"
+        assert wo._binary_sig("ez_sbecmd") == "sbecmd"
         assert wo._binary_sig("ez.sbecmd") == "sbecmd"
 
     def test_binary_aliases_for_differently_named_wrappers(self):
@@ -38,9 +38,9 @@ class TestBinarySig:
         # the tool-name word (else the tool that ran is reported as never-run).
         assert wo._binary_sig("misc.regripper_hive") == "rip.pl"        # runs rip.pl
         assert wo._binary_sig("misc.regripper_list_plugins") == "rip.pl"
-        assert wo._binary_sig("plaso.plaso_create_timeline") == "log2timeline"
-        assert wo._binary_sig("plaso.plaso_export_csv") == "psort"
-        assert wo._binary_sig("plaso.plaso_info") == "pinfo"
+        assert wo._binary_sig("plaso.create_timeline") == "log2timeline"
+        assert wo._binary_sig("plaso.export_csv") == "psort"
+        assert wo._binary_sig("plaso.info") == "pinfo"
 
     def test_arg_laden_tool_names_strip_to_correct_sig(self):
         # A verbose model may append call args to a tool name; the signature must
@@ -49,7 +49,7 @@ class TestBinarySig:
         assert wo._binary_sig("vol.pslist(pid=4)") == "pslist"
         assert wo._binary_sig('ez.recmd_hive(hive="SYSTEM")') == "recmd"
         assert wo._binary_sig('misc.regripper_hive(hive="SAM")') == "rip.pl"   # alias still applies
-        assert wo._binary_sig('plaso.plaso_create_timeline(src="/x")') == "log2timeline"
+        assert wo._binary_sig('plaso.create_timeline(src="/x")') == "log2timeline"
 
     def test_arg_laden_work_order_tool_matches_its_run(self):
         # The Qwen deadlock: tsk.fls(args) ran (as `sudo fls`) but read as unrun.
@@ -77,7 +77,7 @@ class TestBinarySig:
              "cmd": "log2timeline.py --storage-file /x/out.plaso /mnt"},
         ]
         unrun = wo.unrun_from_list(
-            entries, ["misc.regripper_hive", "plaso.plaso_create_timeline", "tsk.fls"])
+            entries, ["misc.regripper_hive", "plaso.create_timeline", "tsk.fls"])
         assert "regripper" not in str(unrun).lower()       # ran as rip.pl
         assert not any("plaso" in u.lower() for u in unrun)  # ran as log2timeline
         assert any("fls" in u.lower() for u in unrun)        # genuinely never ran
@@ -85,12 +85,12 @@ class TestBinarySig:
 
 class TestUnretriedBlocks:
     def test_blocked_and_never_retried_flags(self):
-        issues = wo.unretried_blocks([_blocked("ez_ez_sbecmd")])
+        issues = wo.unretried_blocks([_blocked("ez_sbecmd")])
         assert len(issues) == 1 and "ez.sbecmd" in issues[0]
 
     def test_blocked_then_retried_clears(self):
         entries = [
-            _blocked("ez_ez_sbecmd"),
+            _blocked("ez_sbecmd"),
             _call("dotnet /opt/zimmermantools/SBECmd.dll -d /UsrClass"),  # sig 'sbecmd'
         ]
         assert wo.unretried_blocks(entries) == []
@@ -98,7 +98,7 @@ class TestUnretriedBlocks:
     def test_recmd_hive_block_cleared_by_recmd_run(self):
         # first-segment sig 'recmd' must match a later RECmd cmd (not 'hive').
         entries = [
-            _blocked("ez_ez_recmd_hive"),
+            _blocked("ez_recmd_hive"),
             _call("dotnet /opt/zimmermantools/RECmd/RECmd.dll -f SOFTWARE"),
         ]
         assert wo.unretried_blocks(entries) == []
@@ -107,27 +107,27 @@ class TestUnretriedBlocks:
         # a success BEFORE the block does not count as a retry of it.
         entries = [
             _call("dotnet /x/SBECmd.dll -d /a"),
-            _blocked("ez_ez_sbecmd"),
+            _blocked("ez_sbecmd"),
         ]
         assert len(wo.unretried_blocks(entries)) == 1
 
     def test_failed_retry_does_not_count(self):
         entries = [
-            _blocked("ez_ez_sbecmd"),
+            _blocked("ez_sbecmd"),
             _call("dotnet /x/SBECmd.dll -d /a", success=False),
         ]
         assert len(wo.unretried_blocks(entries)) == 1
 
     def test_prose_waiver_no_longer_clears(self):
         entries = [
-            _blocked("ez_ez_sbecmd"),
+            _blocked("ez_sbecmd"),
             _msg("ShellBags (sbecmd) inapplicable — UsrClass.dat absent from evidence."),
         ]
         assert len(wo.unretried_blocks(entries)) == 1
 
     def test_typed_tool_disposition_clears(self):
         entries = [
-            _blocked("ez_ez_sbecmd"),
+            _blocked("ez_sbecmd"),
             {"type": "disposition", "call_id": 9, "target_kind": "tool", "target_id": "ez.sbecmd",
              "target_norm": "ez.sbecmd", "reason": "inapplicable"},
         ]
@@ -140,11 +140,11 @@ class TestUnretriedBlocks:
         assert len(wo.unretried_blocks(entries)) == 1
 
     def test_multiple_blocks_same_tool_dedup(self):
-        entries = [_blocked("ez_ez_jlecmd"), _blocked("ez_ez_jlecmd")]
+        entries = [_blocked("ez_jlecmd"), _blocked("ez_jlecmd")]
         assert len(wo.unretried_blocks(entries)) == 1
 
     def test_two_distinct_dropped_tools_two_issues(self):
-        entries = [_blocked("ez_ez_sbecmd"), _blocked("ez_ez_jlecmd")]
+        entries = [_blocked("ez_sbecmd"), _blocked("ez_jlecmd")]
         assert len(wo.unretried_blocks(entries)) == 2
 
     def test_no_blocks_no_issues(self):
@@ -153,9 +153,9 @@ class TestUnretriedBlocks:
     def test_control_plane_block_is_not_a_work_order_item(self):
         # Observed: record_finding blocked by the Report-phase gate,
         # then dispositioned "inapplicable" purely to clear this check.
-        entries = [_blocked("misc_record_finding"), _blocked("misc_misc_record_disposition"),
-                   _blocked("misc_export_execution_log"), _blocked("reason_reason_synthesize"),
-                   _blocked("ez_ez_sbecmd")]
+        entries = [_blocked("misc_record_finding"), _blocked("misc_record_disposition"),
+                   _blocked("misc_export_execution_log"), _blocked("reason_synthesize"),
+                   _blocked("ez_sbecmd")]
         issues = wo.unretried_blocks(entries)
         assert len(issues) == 1 and "ez.sbecmd" in issues[0]
 
@@ -232,7 +232,7 @@ class TestUnrunPriorityTools:
         # reason.* / coverage.* / dair.* / record_* are not forensic work orders.
         issues = wo.unrun_priority_tools([_dair([
             "reason.hypothesize", "reason.pre_report_check", "reason.synthesize",
-            "coverage.coverage_report", "dair.dair_assess", "misc.record_finding"])])
+            "coverage.report", "dair.assess", "misc.record_finding"])])
         assert issues == []
 
     def test_no_dair_directives_no_duty(self):

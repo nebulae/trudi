@@ -475,7 +475,7 @@ addresses the case question's key entities.
 KNOWNS-DRIVEN HUNTING: When case_context includes a reference set (suspect \
 list, asset inventory, allowlist, baseline, hash list), include \
 misc.knowns_pattern_generate followed by a knowns-IOC sweep \
-(net.ngrep_search / strings.strings_grep / yara.scan_strings against the \
+(net.ngrep_search / strings.grep / yara.scan_strings against the \
 returned pattern) in the FIRST Triage batch — before generic enumeration.
 
   Triage   — confirm the initial IOC/alert AND actively challenge your own findings \
@@ -507,9 +507,9 @@ You do not infer pivots from summary prose. When a returned candidate matters to
 case question, prescribe explicit evidence-gathering tools for it; never mutate the \
 phase stack merely because a candidate exists. \
 ALSO run anti-forensics detectors here when the relevant input artifacts exist: \
-af.af_timestomp_drift (after ez.mftecmd CSV), af.af_event_log_clear (after \
-ez.evtxecmd), af.af_sysmon_evasion (after ez.recmd_hive SYSTEM), af.af_usn_gaps \
-(after misc.usnparser_parse), af.af_prefetch_deletion (after ez.pecmd + \
+af.timestomp_drift (after ez.mftecmd CSV), af.event_log_clear (after \
+ez.evtxecmd), af.sysmon_evasion (after ez.recmd_hive SYSTEM), af.usn_gaps \
+(after misc.usnparser_parse), af.prefetch_deletion (after ez.pecmd + \
 ez.appcompatcacheparser/amcacheparser).
 
 INAPPLICABLE TOOL SUBSTITUTION: If a priority_tools entry names a tool that \
@@ -534,12 +534,12 @@ is a required Analyze step, not optional enrichment.
 LIVE ENDPOINT CASES: When case_context names a live endpoint (the agent will \
 mention 'live=true' or supply an endpoint_host like 'ubuntu-endpoint' in case \
 context), include live.* tools in priority_tools as appropriate:
-  Triage   — live.live_processes, live.live_network_connections, live.live_recent_logins
-  Collect  — live.live_persistence_audit, live.live_services, live.live_scheduled_tasks
-  Analyze  — live.live_process_details(pid) and live.live_open_files(pid) for \
-suspicious PIDs; live.live_event_log_tail(unit) for services of interest; \
-live.live_read_file for small config artifacts (max 64KB cap)
-  Scan     — live.live_yara_scan(rules_path, target_dir) for cross-host hunting
+  Triage   — live.processes, live.network_connections, live.recent_logins
+  Collect  — live.persistence_audit, live.services, live.scheduled_tasks
+  Analyze  — live.process_details(pid) and live.open_files(pid) for \
+suspicious PIDs; live.event_log_tail(unit) for services of interest; \
+live.read_file for small config artifacts (max 64KB cap)
+  Scan     — live.yara_scan(rules_path, target_dir) for cross-host hunting
 The live.* tools route through SSH with fixed argv (no remote shell parsing); \
 findings can use their _trudi_call_id as linked_call_id like any other tool.
   Scan     — SCOPING: pursue every newly-discovered IOC to depth. Scoping has \
@@ -567,7 +567,7 @@ or next_phase="Analyze" (whichever is the smallest phase that can gather or \
 reason over the missing artifact), and put the concrete missing tools in \
 directives.priority_tools. Only stay in Report for wording/citation cleanup when \
 no missing-evidence blocker remains. BEFORE reason.synthesize, call BOTH \
-coverage.coverage_report (TTP coverage checklist) AND attribution.attribute_actors \
+coverage.report (TTP coverage checklist) AND attribution.attribute_actors \
 (adversary attribution from observed T-IDs) so the final synthesis input has the \
 complete picture. When findings span multiple hosts, ALSO call \
 correlate.process_to_file and correlate.network_to_process (with no PID/IP/path \

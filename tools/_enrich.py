@@ -78,8 +78,9 @@ def enrich(tool_name: str, result: dict) -> dict:
         return result
     try:
         call_num = next(_call_counter)
-        # Middleware passes namespace-DOUBLED registration names (e.g.
-        # "ez_ez_mftecmd", "vol_vol_pslist"); collapse to single-namespace form.
+        # Wire names are single-namespace since the mount-time dedup
+        # (core/normalize_names.py); normalize stays as the compat shim for
+        # legacy doubled names (e.g. "ez_ez_mftecmd" from old traces).
         tool_name = _normalize_tool_name(tool_name)
         # Interpretive context is METADATA, not evidence: it lands in a
         # `_metadata` sub-object, never as top-level payload keys. Two reasons:

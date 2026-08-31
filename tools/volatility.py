@@ -169,7 +169,7 @@ def vol_handles(image: str, pid: Optional[int] = None) -> dict:
     Volatility 3's `windows.handles` plugin only accepts --pid and --offset —
     there is no built-in handle-type filter. To filter the result by type
     (File, Key, Mutant, Thread, Process, Section, Event, …), grep the rendered
-    output column "Type" via `strings.strings_grep` on the JSON output or pipe
+    output column "Type" via `strings.grep` on the JSON output or pipe
     the result through a downstream filter.
     """
     extra = []

@@ -63,6 +63,14 @@ NAMESPACES = [
 for _ns, _child in NAMESPACES:
     mcp.mount(_child, namespace=_ns)
 
+# Dedupe doubled wire names (tsk_tsk_mmls -> tsk_mmls): modules whose function
+# names bake in the namespace would otherwise stutter when mounted under it.
+# Runs at import so every consumer — the stdio server, tests, the pilot REPL's
+# schema-driven completer — sees the same names. See core/normalize_names.py.
+import asyncio as _asyncio
+from core.normalize_names import normalize_tool_names
+_asyncio.run(normalize_tool_names(NAMESPACES))
+
 
 if __name__ == "__main__":
     # Schema-eager clients (OpenCode) pay for every description in every

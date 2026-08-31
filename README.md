@@ -57,10 +57,10 @@ case opened
     ├─ reason.plan                         ← prioritized Triage plan
     │
     └─ DAIR loop ── repeats until next_phase = Report ───────────────┐
-         ├─ dair.dair_assess              ← phase decision + priority_tools work order
+         ├─ dair.assess              ← phase decision + priority_tools work order
          ├─ [tool batch — disk, memory, artifacts, network, …]       │  (+ optional curiosity probes)
          │      └─ reason.hypothesize     ← per suspicious artifact   │
-         └─ dair.dair_assess (results) ──────────────────────────────┘
+         └─ dair.assess (results) ──────────────────────────────┘
     │
     (before any CONFIRMED/LIKELY finding)
     ├─ reason.evaluate_finding / confidence_score / cite_check

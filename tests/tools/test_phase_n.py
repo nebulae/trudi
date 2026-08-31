@@ -195,7 +195,7 @@ class TestA6NearAliasExcludeNeedsBodyRead:
         l = ExecutionLog(); l.configure("A6", str(tmp_path / "t.json"), save_session=False)
         l.record_dair_call("Analyze", "", False, "", "", "stay", "")
         # two near-alias correspondents in the registry
-        cid = l.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = l.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         l.annotate_tool_call(cid, observed_correspondents=["contact1@ext.example",
                                                            "contactl@ext.example"],
                              observed_correspondent_stats={"contactl@ext.example": {"from": 1, "to": 2}},
@@ -205,7 +205,7 @@ class TestA6NearAliasExcludeNeedsBodyRead:
     def test_exclude_on_listing_alone_refused(self, tmp_path):
         from tools.misc import record_disposition
         l = self._seed(tmp_path)
-        senders = l.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        senders = l.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         fn = getattr(record_disposition, "fn", record_disposition)
         with patch("core.execution_log.log", l):
             r = fn("correspondent", "contact1@ext.example", "excluded", evidence_call_ids=[senders])
@@ -218,7 +218,7 @@ class TestA6NearAliasExcludeNeedsBodyRead:
         fn = getattr(record_disposition, "fn", record_disposition)
         for rs in ("out_of_scope", "noise"):
             l = self._seed(tmp_path)
-            senders = l.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+            senders = l.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
             with patch("core.execution_log.log", l):
                 r = fn("correspondent", "contact1@ext.example", rs, evidence_call_ids=[senders])
             assert r["success"] is False and r["detail_gate"] == "near_alias_needs_body_read", rs
@@ -226,7 +226,7 @@ class TestA6NearAliasExcludeNeedsBodyRead:
     def test_exclude_with_body_read_of_address_clears(self, tmp_path):
         from tools.misc import record_disposition
         l = self._seed(tmp_path)
-        body = l.record_tool_call("read.read_mail -o /x/mail mode=messages field=body q=contact1",
+        body = l.record_tool_call("read.mail -o /x/mail mode=messages field=body q=contact1",
                                   True, False, 0, 0)
         fn = getattr(record_disposition, "fn", record_disposition)
         with patch("core.execution_log.log", l):
@@ -237,7 +237,7 @@ class TestA6NearAliasExcludeNeedsBodyRead:
         from tools.misc import record_disposition
         l = ExecutionLog(); l.configure("A6b", str(tmp_path / "t.json"), save_session=False)
         l.record_dair_call("Analyze", "", False, "", "", "stay", "")
-        cid = l.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = l.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         l.annotate_tool_call(cid, observed_correspondents=["spammer@x.example"],
                              correspondents_partial=False)
         fn = getattr(record_disposition, "fn", record_disposition)
@@ -265,11 +265,11 @@ class TestA8CompetingRecipient:
 
     def test_competing_recipients_warn(self, tmp_path):
         l = self._log_cq(tmp_path)
-        l.record_finding("disseminated to the competitor", "LIKELY", "read.read_mail",
+        l.record_finding("disseminated to the competitor", "LIKELY", "read.mail",
                          claim=normalize_claim(claim_kind="positive", category="delivery",
                                                act="delivery", recipients=["rcpt-a@far.example"],
                                                answers_case_question=True))
-        l.record_finding("china thread", "SUSPECTED", "read.read_mail",
+        l.record_finding("china thread", "SUSPECTED", "read.mail",
                          claim=normalize_claim(claim_kind="positive", category="delivery",
                                                act="delivery", recipients=["handler@ext.example"]))
         r = self._pre(l)
@@ -277,7 +277,7 @@ class TestA8CompetingRecipient:
 
     def test_single_recipient_no_warn(self, tmp_path):
         l = self._log_cq(tmp_path)
-        l.record_finding("disseminated to the competitor", "LIKELY", "read.read_mail",
+        l.record_finding("disseminated to the competitor", "LIKELY", "read.mail",
                          claim=normalize_claim(claim_kind="positive", category="delivery",
                                                act="delivery", recipients=["rcpt-a@far.example"],
                                                answers_case_question=True))

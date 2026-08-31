@@ -967,7 +967,7 @@ class TestRecordFindingMcpRoutingGate:
         assert r["success"] is False
         assert r.get("gate") == "mcp_routing"
         assert "MCP routing" in r["error"]
-        assert "vol.vol_" in r.get("suggested_wrapper", "")
+        assert "vol." in r.get("suggested_wrapper", "")
 
     def test_bash_dotnet_eztool_invocation_refuses_finding(self, tmp_path):
         from tools.misc import record_finding
@@ -982,7 +982,7 @@ class TestRecordFindingMcpRoutingGate:
         assert r["success"] is False
         assert r.get("gate") == "mcp_routing"
         assert "EvtxECmd" in r.get("offending_cmd_excerpt", "")
-        assert "ez_evtxecmd" in r.get("suggested_wrapper", "")
+        assert "ez.evtxecmd" in r.get("suggested_wrapper", "")
 
     def test_bash_non_forensic_command_does_not_refuse(self, tmp_path):
         from tools.misc import record_finding

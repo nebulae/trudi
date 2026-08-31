@@ -33,12 +33,12 @@ NTUSER_UA = _e(71, "rip.pl -r /mnt/c/Users/PC User/NTUSER.DAT -p userassist",
                stdout_excerpt="smallftpd.exe (3) 2016-07-01")
 PECMD = _e(80, "dotnet PECmd.dll -d /mnt/c/Windows/Prefetch --csv /out")
 ICAT_FTP = _e(5, "icat -o 2048 /cases/x.E01 1234 > /case/exports/ftp/transfers.log")
-READ_FTP = _e(70, "read.read_output --output /case/exports/ftp/transfers.log --query temp.zip",
+READ_FTP = _e(70, "read.output --output /case/exports/ftp/transfers.log --query temp.zip",
               stdout_excerpt="2016-07-01 12:01 temp.zip 4120 bytes sent 173.73.166.249")
 RECMD_SYS = _e(90, "dotnet RECmd.dll -f /mnt/c/Windows/System32/config/SYSTEM --bn BatchMostPlugins.reb --csv /out",
                stdout_excerpt="USBSTOR\\Disk&Ven_SanDisk MountedDevices")
-MAIL = _e(95, "read.read_mail -o /case/exports/mail/Inbox.mbox", transfer_artifact=True)
-MAIL_RCPT = _e(96, "read.read_mail -o /case/exports/mail/Sent.mbox", receipt_artifact=True)
+MAIL = _e(95, "read.mail -o /case/exports/mail/Inbox.mbox", transfer_artifact=True)
+MAIL_RCPT = _e(96, "read.mail -o /case/exports/mail/Sent.mbox", receipt_artifact=True)
 NARRATION = {"type": "investigation_narration", "call_id": 99, "content": "prefetch shows smallftpd"}
 WRITE = _e(100, "Write /case/analysis/notes.txt", source="claude_code_write")
 
@@ -131,7 +131,7 @@ class TestArtifactClasses:
     def test_sidecar_text_is_scanned(self, tmp_path):
         side = tmp_path / "77.txt"
         side.write_text("x" * 700 + "\n2016-07-01 temp.zip 4120 bytes sent\n")
-        e = _e(77, "read.read_output --output /case/exports/ftp/transfers.log",
+        e = _e(77, "read.output --output /case/exports/ftp/transfers.log",
                stdout_excerpt="x" * 600, stdout_path=str(side))
         assert "transfer" in T.classify_entry(e)
 
@@ -311,7 +311,7 @@ class TestStructuralTransferClasses:
                 assert cls in T.classify_entry(e), (cls, t)
 
     def test_failure_code_is_not_a_receipt(self):
-        e = _e(303, "read.read_mail -o /x/mail",
+        e = _e(303, "read.mail -o /x/mail",
                stdout_excerpt="552 5.3.4 Message size exceeds fixed limit")
         assert "receipt" not in T.classify_entry(e)
 
@@ -322,10 +322,10 @@ class TestCrossPlatformClasses:
 
     def test_linux_logon_and_execution_reach_confirmed(self):
         by = {
-            1: _e(1, "read.read_output --output /case/exports/auth.log --query sshd",
+            1: _e(1, "read.output --output /case/exports/auth.log --query sshd",
                   session_artifact=True),
             2: _e(2, "strings -a /mnt/img/var/log/wtmp"),
-            3: _e(3, "read.read_output --output /case/exports/home_user_bash_history.txt"),
+            3: _e(3, "read.output --output /case/exports/home_user_bash_history.txt"),
         }
         c, o = T.artifact_classes(by, [1, 2], with_origins=True)
         assert T.tier_for({"act": "logon"}, c, o).tier == "CONFIRMED"
@@ -334,7 +334,7 @@ class TestCrossPlatformClasses:
 
     def test_unix_persistence_classes(self):
         assert "unix_persistence" in T.classify_entry(
-            _e(4, "read.read_output --output /case/exports/crontab_root.txt"))
+            _e(4, "read.output --output /case/exports/crontab_root.txt"))
         assert "unix_persistence" in T.classify_entry(
             _e(5, "ls /mnt/img/Library/LaunchAgents"))
         assert "unix_persistence" in T.classify_entry(

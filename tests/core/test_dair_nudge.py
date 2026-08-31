@@ -47,23 +47,23 @@ class TestColdStartTriage:
                 action, msg = M._nudge_decision("net_tcpdump_read")
                 assert action == "notice"
                 assert "reason.hypothesize(" in msg
-                assert "reason.plan(" in msg and "dair.dair_assess(" in msg
+                assert "reason.plan(" in msg and "dair.assess(" in msg
 
     def test_after_hypothesize_notice_names_plan_then_dair(self):
         with patch("core.execution_log.log", _log(entries=[_HYP, _TOOLCALL])):
             action, msg = M._nudge_decision("net_tcpdump_read")
         assert action == "notice"
-        assert "reason.plan(" in msg and "dair.dair_assess(" in msg
+        assert "reason.plan(" in msg and "dair.assess(" in msg
 
     def test_after_plan_forensic_tools_block(self):
         with patch("core.execution_log.log", _log(entries=[_HYP, _PLAN])):
             action, msg = M._nudge_decision("net_tcpdump_read")
         assert action == "block"
-        assert "dair.dair_assess(" in msg and "Collect" in msg
+        assert "dair.assess(" in msg and "Collect" in msg
 
     def test_block_message_names_dair_required_gate(self):
         with patch("core.execution_log.log", _log(entries=[_PLAN])):
-            _, msg = M._nudge_decision("ez_ez_mftecmd")
+            _, msg = M._nudge_decision("ez_mftecmd")
         assert "dair_required" in msg
 
     def test_dair_and_reason_tools_are_allowlisted_exits(self):
@@ -72,9 +72,9 @@ class TestColdStartTriage:
         # NOTE: misc_record_finding is deliberately NOT allowlisted — it must
         # face the gates (dair_required refuses it pre-engagement with the
         # same call-dair instruction, keeping the two teachers consistent).
-        for tool in ("dair_dair_assess", "reason_reason_plan",
-                     "reason_reason_hypothesize", "misc_record_agent_message",
-                     "misc_record_disposition", "read_read_output"):
+        for tool in ("dair_assess", "reason_plan",
+                     "reason_hypothesize", "misc_record_agent_message",
+                     "misc_record_disposition", "read_output"):
             assert tool in M.DAIR_GATE_ALLOWLIST
 
 
@@ -98,7 +98,7 @@ class TestEngaged:
 
 class TestExemptions:
     @pytest.mark.parametrize("tool", ["monitor_check_alerts", "respond_list_actions",
-                                      "velo_query", "live_live_processes",
+                                      "velo_query", "live_processes",
                                       "misc_job_status", "misc_job_list"])
     def test_live_and_job_tools_never_gated(self, tool):
         with patch("core.execution_log.log", _log(entries=[_PLAN])):

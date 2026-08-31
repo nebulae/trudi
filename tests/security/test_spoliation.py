@@ -156,19 +156,19 @@ class TestDairGatePreventsRogueTools:
         """vol.* tools must require DAIR engagement before running."""
         from core.middleware import DAIR_GATE_ALLOWLIST
         for vol_tool in (
-            "vol_vol_psscan", "vol_vol_netscan", "vol_vol_malfind",
+            "vol_psscan", "vol_netscan", "vol_malfind",
         ):
             assert vol_tool not in DAIR_GATE_ALLOWLIST, (
                 f"{vol_tool} should not be on the allowlist"
             )
 
     def test_destructive_eztools_not_allowlisted(self):
-        # ez_ez_recmd_hive IS allowlisted (pre-plan read of hives before first
+        # ez_recmd_hive IS allowlisted (pre-plan read of hives before first
         # dair_assess). Other ez.* tools are NOT allowlisted.
         from core.middleware import DAIR_GATE_ALLOWLIST
         for ez_tool in (
-            "ez_ez_evtxecmd", "ez_ez_mftecmd", "ez_ez_pecmd",
-            "ez_ez_jlecmd", "ez_ez_lecmd",
+            "ez_evtxecmd", "ez_mftecmd", "ez_pecmd",
+            "ez_jlecmd", "ez_lecmd",
         ):
             assert ez_tool not in DAIR_GATE_ALLOWLIST
 

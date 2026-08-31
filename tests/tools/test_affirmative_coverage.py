@@ -98,7 +98,7 @@ class TestRecipientExhaustion:
 
     def test_read_mail_counts(self):
         assert not any("correspondent enumeration" in i
-                       for i in ac.coverage_gaps(self._recip([_t("read.read_mail --output /x/mbox")])))
+                       for i in ac.coverage_gaps(self._recip([_t("read.mail --output /x/mbox")])))
 
     def test_recipient_wording_without_claim_not_gated(self):
         assert not any("correspondent enumeration" in i
@@ -118,7 +118,7 @@ class TestDestructionImpact:
         assert any("destruction-impact" in i for i in ac.coverage_gaps([self._wiper("SUSPECTED")]))
 
     def test_wiper_with_usn_gaps_clears(self):
-        entries = [self._wiper(), _t("af.af_usn_gaps --journal /out/usn.csv")]
+        entries = [self._wiper(), _t("af.usn_gaps --journal /out/usn.csv")]
         assert not any("destruction-impact" in i for i in ac.coverage_gaps(entries))
 
     def test_wiper_with_carving_clears(self):

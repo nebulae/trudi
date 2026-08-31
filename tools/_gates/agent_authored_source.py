@@ -2,7 +2,7 @@
 
 After a CHALLENGED verdict, an agent once wrote "verbatim excerpts" of
 evidence into an exports/ file with the raw Write tool, read it back with
-`read.read_output`, and earned a CONFIRMED on its own file. Whether or not
+`read.output`, and earned a CONFIRMED on its own file. Whether or not
 the copy was faithful, a reviewer cannot tell it from extractor output, and
 nothing prevents a curated line.
 

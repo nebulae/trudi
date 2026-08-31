@@ -47,7 +47,7 @@ def _binary_sig(tool: str) -> str:
     whose wrapped binary is named differently, an explicit alias maps to the
     keyword the command actually contains (misc_regripper_hive→'rip.pl',
     plaso_create_timeline→'log2timeline'). Handles the namespace-doubled form the
-    middleware passes ('ez_ez_sbecmd').
+    middleware passes ('ez_sbecmd').
 
     A verbose model may append call arguments to the tool name
     (`tsk.fls(input_path=..., depth=2)`); the arguments are not part of the
@@ -90,7 +90,7 @@ def _control_plane_tool(tool: str) -> bool:
 
 def tool_waived(didx, tool: str) -> bool:
     """A typed disposition settles the tool: target_kind="tool", target_id any
-    spelling of the MCP tool (ez.pecmd / ez_pecmd / ez_ez_pecmd), reason
+    spelling of the MCP tool (ez.pecmd / ez_pecmd / ez_pecmd), reason
     inapplicable | absent_from_evidence | out_of_scope."""
     sig = _binary_sig(tool)
     table = getattr(didx, "dispositions", None) or {}

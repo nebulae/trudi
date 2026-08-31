@@ -598,11 +598,11 @@ class TestSchardtFollowUps:
         assert recs[0]["status"] == "not_evidence"
 
     def test_read_output_selflog_writes_sidecar(self, pull_env):
-        # read.read_output kept only a 600-char head → "excerpt omits the
+        # read.output kept only a 600-char head → "excerpt omits the
         # MAC/MachineID columns". The full body now goes to the sidecar.
         from tools.read_output import _selflog
         body = "col_a,col_b\n" + "\n".join(f"row{i},{'v' * 40}" for i in range(40))
-        cid = _selflog("read.read_output --output /x/a.csv", body)
+        cid = _selflog("read.output --output /x/a.csv", body)
         e = pull_env["log"].index().by_call_id[cid]
         assert e["stdout_chars"] == len(body) and e.get("stdout_path")
 
@@ -664,7 +664,7 @@ class TestVankoFollowUps:
         assert r.matched_rows == 1 and "SanDisk" in r.body and r.scan_complete
         assert not r.columns_ignored          # projection survived the NULs
         log = pull_env["log"]
-        cid = log.record_tool_call(f"read.read_output --output {f}", True, False, 0, 0,
+        cid = log.record_tool_call(f"read.output --output {f}", True, False, 0, 0,
                                    stdout_excerpt="x")
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "SanDisk Cruzer", "columns": ["KeyPath", "ValueData"]}], [cid], 4000)
@@ -711,7 +711,7 @@ class TestVankoFollowUps:
         f.write_text("EntryNumber,FileName,ParentPath\n1,vacation photos.7z,.\\Users\\PC User\\Downloads\n2,other,.\\x\n")
         body = "EntryNumber,FileName,ParentPath\n1,vacation photos.7z,.\\Users\\PC User\\Downloads\n"
         log = pull_env["log"]
-        cid = log.record_tool_call(f"read.read_output --output {f}", True, False, 0, 0,
+        cid = log.record_tool_call(f"read.output --output {f}", True, False, 0, 0,
                                    stdout_excerpt=body[:600], stdout_full=body + "x" * 700)
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "vacation photos.7z", "columns": ["EntryNumber", "FileName"]}], [cid], 4000)
@@ -749,7 +749,7 @@ class TestVankoFollowUps:
         assert "EVIDENCE INTERPRETATION" not in _payload(http, 0)
 
     def test_read_over_agent_authored_file_is_not_evidence(self, pull_env, tmp_path):
-        # Laundering path: Write → read.read_output → cited as evidence.
+        # Laundering path: Write → read.output → cited as evidence.
         log = pull_env["log"]
         f = tmp_path / "exports" / "titan_thread.txt"
         f.parent.mkdir(parents=True)
@@ -763,7 +763,7 @@ class TestVankoFollowUps:
                 if e.get("call_id") == cid_w:
                     e["source"] = "claude_code_write"
             log._index_version += 1
-        cid_r = log.record_tool_call(f"read.read_output --output {f}", True, False, 0, 0,
+        cid_r = log.record_tool_call(f"read.output --output {f}", True, False, 0, 0,
                                      stdout_excerpt="bulgakov")
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid_r, "query": "bulgakov", "columns": []}], [cid_r], 4000)

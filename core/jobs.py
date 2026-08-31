@@ -174,7 +174,7 @@ def _finished_result(state: dict, elapsed: float, cached: bool) -> dict:
         "note": ("already collected — cite _trudi_call_id for findings from "
                  "this carve" if cached else
                  "collected. Cite _trudi_call_id for findings from this carve; "
-                 "read specific carved files with read.read_output."),
+                 "read specific carved files with read.output."),
     }
     if state["timed_out"]:
         out["partial_output"] = (

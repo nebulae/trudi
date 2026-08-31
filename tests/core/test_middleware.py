@@ -55,7 +55,7 @@ class TestDairGateMiddleware:
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
             result, call_next = asyncio.run(
-                _run_middleware(mw, "vol_vol_psscan")
+                _run_middleware(mw, "vol_psscan")
             )
         assert call_next.await_count == 1
 
@@ -70,7 +70,7 @@ class TestDairGateMiddleware:
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
             with pytest.raises(ToolError, match="Report"):
-                asyncio.run(_run_middleware(mw, "vol_vol_psscan"))
+                asyncio.run(_run_middleware(mw, "vol_psscan"))
 
     def test_long_collect_batch_never_blocks(self, tmp_path):
         """Regression: a long lead-following batch in a collection phase must
@@ -85,7 +85,7 @@ class TestDairGateMiddleware:
             l.record_agent_message("filler")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            asyncio.run(_run_middleware(mw, "vol_vol_psscan"))  # no exception
+            asyncio.run(_run_middleware(mw, "vol_psscan"))  # no exception
 
     def test_non_allowlisted_tool_runs_after_dair(self, tmp_path):
         from core.execution_log import ExecutionLog
@@ -96,7 +96,7 @@ class TestDairGateMiddleware:
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
             result, call_next = asyncio.run(
-                _run_middleware(mw, "vol_vol_psscan")
+                _run_middleware(mw, "vol_psscan")
             )
         assert call_next.await_count == 1
 
@@ -104,13 +104,13 @@ class TestDairGateMiddleware:
         """The 4 pre-plan reads (per CLAUDE.md) must be on the allowlist so
         they can run before the first dair_assess at the start of a case."""
         from core.middleware import DAIR_GATE_ALLOWLIST
-        assert "ez_ez_recmd_hive" in DAIR_GATE_ALLOWLIST
+        assert "ez_recmd_hive" in DAIR_GATE_ALLOWLIST
         assert "strings_stat_file" in DAIR_GATE_ALLOWLIST
 
     def test_dair_assess_allowlisted(self):
         from core.middleware import DAIR_GATE_ALLOWLIST
         assert "dair_assess" in DAIR_GATE_ALLOWLIST
-        assert "dair_dair_assess" in DAIR_GATE_ALLOWLIST
+        assert "dair_assess" in DAIR_GATE_ALLOWLIST
 
     def test_start_execution_log_allowlisted(self):
         from core.middleware import DAIR_GATE_ALLOWLIST

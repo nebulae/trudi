@@ -3723,7 +3723,7 @@ def reason_pre_report_check() -> dict:
         # No complete registry: warn unless a roster / mail read ran (by COMMAND).
         xref_seen = any(
             e.get("type") == "tool_call" and isinstance(e.get("cmd"), str)
-            and re.search(r"knowns_pattern_generate|read_mail|readpst|pff_export|chat_db_export",
+            and re.search(r"knowns_pattern_generate|read[._]mail|readpst|pff_export|chat_db_export",
                           e["cmd"], re.IGNORECASE)
             for e in entries
         )
@@ -3731,7 +3731,7 @@ def reason_pre_report_check() -> dict:
             warnings.append(
                 f"{len(recipient_findings)} finding(s) declare a recipient but no roster "
                 f"sweep or comms-store read is evident in the trace (misc.knowns_pattern_generate, "
-                f"read.read_mail, readpst/pff_export, chat_db_export). Inventory all "
+                f"read.mail, readpst/pff_export, chat_db_export). Inventory all "
                 f"correspondents and cross-reference the recipient against the case roster "
                 f"before Report."
             )
@@ -4107,7 +4107,7 @@ def reason_pre_report_check() -> dict:
             for e in entries if e.get("type") == "finding")
         if _comms_claim:
             from tools._gates._manifests import CHAT_FAMILIES as _FAMILIES
-            _PARSE_RE = re.compile(r"chat_db_export|sqlecmd|read\.read_mail|readpst|pff_export", re.I)
+            _PARSE_RE = re.compile(r"chat_db_export|sqlecmd|read\.(?:read_)?mail|readpst|pff_export", re.I)
             from tools._gates._dispositions import find_disposition as _fd7
             _ev_calls7 = [e for e in entries if e.get("type") == "tool_call" and e.get("success")]
             for fam, frx in _FAMILIES.items():
@@ -4128,7 +4128,7 @@ def reason_pre_report_check() -> dict:
                         f"source disposition covers it. With a delivery/dissemination/"
                         f"egress question in the case, every comms store present in "
                         f"evidence must be examined (it may equally exonerate) — parse it "
-                        f"(misc.chat_db_export / read.read_mail), or record "
+                        f"(misc.chat_db_export / read.mail), or record "
                         f"misc.record_disposition(target_kind=\"source\", "
                         f"target_id=\"{fam}\", reason=\"absent_from_evidence\"|"
                         f"\"inapplicable\") before Report."
@@ -4340,13 +4340,13 @@ def reason_pre_report_check() -> dict:
         if _has_recipient_claim:
             _body_read = any(
                 e.get("type") == "tool_call" and isinstance(e.get("cmd"), str)
-                and e["cmd"].startswith("read.read_mail")
+                and e["cmd"].startswith(("read.mail", "read.read_mail"))
                 and "mode=messages" in e["cmd"] and " q=" in e["cmd"]
                 for e in entries)
             if not _body_read:
                 warnings.append(
                     "A recipient/delivery claim is recorded but no queried BODY read of a "
-                    "mail store appears in the trace (read.read_mail mode=messages with a "
+                    "mail store appears in the trace (read.mail mode=messages with a "
                     "query). Subject and sender-listing reads cannot establish or exclude "
                     "a recipient — read the thread bodies and cite that call."
                 )

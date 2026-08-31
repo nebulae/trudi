@@ -27,7 +27,7 @@ from ._manifests import MANIFESTS
 # Mail/chat correspondent enumeration (recipient exhaustion) — over COMMANDS.
 _COMMS_RE = re.compile(
     r"readpst|pff_export|\.ost\b|\.pst\b|outlook|main\.db|skype|whatsapp|telegram"
-    r"|msgstore|chat_db_export|read_mail",
+    r"|msgstore|chat_db_export|read[._]mail",
     re.IGNORECASE)
 
 # A destruction-impact pass — enumerating/recovering what was destroyed — over
@@ -89,7 +89,7 @@ def coverage_gaps(entries) -> list:
             issues.append(
                 "A recipient is declared in a CONFIRMED/LIKELY finding but no mail/chat "
                 "correspondent enumeration ran (readpst / pff_export / chat_db_export / "
-                "read.read_mail over the OST/PST/chat stores). Extract and enumerate ALL "
+                "read.mail over the OST/PST/chat stores). Extract and enumerate ALL "
                 "senders and recipients, cross-referenced against the case roster, before "
                 "naming the recipient (Recipient/Correspondent Exhaustion)."
             )
@@ -109,7 +109,7 @@ def coverage_gaps(entries) -> list:
                 "on the host, but no destruction-impact assessment was performed. "
                 "'A wiper ran' is not a conclusion — the wiped material may be the "
                 "very evidence under investigation. Characterize what was destroyed "
-                "via USN $J gap analysis (af.af_usn_gaps), $LogFile, VSS/shadow "
+                "via USN $J gap analysis (af.usn_gaps), $LogFile, VSS/shadow "
                 "copies, or file carving; OR record "
                 + disposition_call("destruction_scope", str(cid), "undetermined")
                 + " before the report."

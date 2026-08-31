@@ -105,7 +105,7 @@ def read_output(path: str, query: str = "", columns: str = "", where: str = "",
             if len(lines) > max_rows + 1:
                 body = "\n".join(lines[:max_rows + 1]) + "\n…[row cap]"
 
-    _cmd = f"read.read_output --output {resolved}"
+    _cmd = f"read.output --output {resolved}"
     if query:   _cmd += f" query={query[:80]}"
     if cols:    _cmd += f" columns={','.join(cols)}"
     if where:   _cmd += f" where={where[:60]}"
@@ -406,7 +406,7 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
         zero_yield = consumed == 0
     # The cmd carries mode/field/query so the trace shows HOW the store was
     # read (a roster listing is not a body read) — audit-traceable.
-    _cmd = f"read.read_mail -o {resolved} mode={mode} field={field}" + (f" q={query[:60]}" if query else "")
+    _cmd = f"read.mail -o {resolved} mode={mode} field={field}" + (f" q={query[:60]}" if query else "")
     cid = _selflog(_cmd,
                    "\n".join(f"{r.get('from')} -> {r.get('to')} | {r.get('subject')}" for r in matched))
     if cid:

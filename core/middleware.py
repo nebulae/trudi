@@ -27,31 +27,30 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "misc_serve_dashboard",
     # Phase director itself
     "dair_assess",
-    "dair_dair_assess",
     # Adversarial-review + scoring META tools (they reason ABOUT findings, they
     # don't execute forensics), exempt so they never require a fresh dair_assess.
     # record_finding still carries the dair_required gate, keeping the
-    # investigation DAIR-directed. Bare and namespace-doubled forms both listed.
-    "reason_plan", "reason_reason_plan",
-    "reason_hypothesize", "reason_reason_hypothesize",
-    "reason_evaluate_finding", "reason_reason_evaluate_finding",
-    "reason_confidence_score", "reason_reason_confidence_score",
-    "reason_cite_check", "reason_reason_cite_check",
-    "reason_audit_findings", "reason_reason_audit_findings",
-    "reason_synthesize", "reason_reason_synthesize",
-    "reason_pre_report_check", "reason_reason_pre_report_check",
-    "accuracy_compare", "accuracy_accuracy_compare",
-    "accuracy_export_report", "accuracy_accuracy_export_report",
-    "correlate_mitre_validate", "correlate_correlate_mitre_validate",
+    # investigation DAIR-directed. Wire names are single-namespace since the
+    # mount-time dedup (core/normalize_names.py).
+    "reason_plan",
+    "reason_hypothesize",
+    "reason_evaluate_finding",
+    "reason_confidence_score",
+    "reason_cite_check",
+    "reason_audit_findings",
+    "reason_synthesize",
+    "reason_pre_report_check",
+    "accuracy_compare",
+    "accuracy_export_report",
+    "correlate_mitre_validate",
     # Produced-output readers — they read parsed output only (never evidence),
     # so they are phase-free: legal in Report to ground citations while writing.
-    "read_output", "read_read_output",
-    "read_mail", "read_read_mail",
+    "read_output",
+    "read_mail",
     # Pre-flight reads that run before the first dair_assess
     "hash_verify_evidence_hash",
     "vol_symbol_check",
-    "vol_vol_symbol_check",
-    "ez_ez_recmd_hive",
+    "ez_recmd_hive",
     "strings_stat_file",
 })
 
@@ -101,7 +100,7 @@ _NUDGE_SKIP_SUFFIXES = ("job_status", "job_list")
 _FINDING_NOTICE_INTERVAL_S = 60.0   # advisory throttle, wall-clock (not a counter)
 
 _DAIR_CALL_SHAPE = (
-    "dair.dair_assess(tool_results_summary=\"<3-5 sentences: what this batch "
+    "dair.assess(tool_results_summary=\"<3-5 sentences: what this batch "
     "found>\", phase_stack='[]' (or the current stack), case_context=\"<case id "
     "+ confirmed IOCs>\", input_call_ids=[<recent cids>])"
 )
@@ -267,7 +266,7 @@ def _repeat_precheck(key: str, tool_name: str) -> str:
             f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", "
             f"category=..., act=..., scope=[...], linked_call_id=<the prior "
             f"call's cid>, input_call_ids=[...]) and run a DIFFERENT query, or "
-            f"call dair.dair_assess for the next work order."
+            f"call dair.assess for the next work order."
         )
     return ""
 
@@ -292,7 +291,7 @@ def _repeat_update(key: str, tool_name: str, payload: dict) -> str:
             f"result — re-running it cannot produce new evidence. If it is a "
             f"negative, record it once (misc.record_finding, "
             f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", with "
-            f"scope) and move to a DIFFERENT query, or call dair.dair_assess "
+            f"scope) and move to a DIFFERENT query, or call dair.assess "
             f"for the next work order."
         )
     except Exception:
@@ -330,8 +329,8 @@ def _note_poll_and_advise(payload: dict) -> str:
             f"other work — the carve is still running ({secs}s, {files} files) "
             f"and polling does not speed it up. Do OTHER analysis NOW (query "
             f"the http_session_inventory / ngrep patterns you have not tried, "
-            f"read.read_output on produced files, record findings, or call "
-            f"dair.dair_assess); poll job_status again only AFTER a real step. "
+            f"read.output on produced files, record findings, or call "
+            f"dair.assess); poll job_status again only AFTER a real step. "
             f"The finished result will be waiting."
         )
     except Exception:

@@ -109,7 +109,7 @@ class TestCorrespondentRelevance:
                            "CONFIRMED", "ez.mftecmd",
                            claim=normalize_claim(claim_kind="positive", category="delivery",
                                                  act="delivery", recipients=["contact-a@ext.example"]))
-        cid = log.record_tool_call("read.read_mail -o /x/mail", True, False, 0, 0)
+        cid = log.record_tool_call("read.mail -o /x/mail", True, False, 0, 0)
         log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example", "nina.bulgakov@titan.example",
@@ -145,7 +145,7 @@ class TestInventoryInReport:
         base_log.record_finding("STUN.exe present", "CONFIRMED", "ez.mftecmd",
                                 claim=normalize_claim(claim_kind="positive", category="other",
                                                       act="presence", entities=["STUN.exe"]))
-        cid = base_log.record_tool_call("read.read_mail -o /x/mail", True, False, 0, 0)
+        cid = base_log.record_tool_call("read.mail -o /x/mail", True, False, 0, 0)
         base_log.annotate_tool_call(cid, observed_correspondents=["news@apple.example"],
                                     observed_correspondent_stats={"news@apple.example": {"from": 1, "to": 0}},
                                     correspondents_partial=False)
@@ -162,7 +162,7 @@ class TestInventoryInReport:
         assert w["success"] and w["inventory_rows_appended"] == 2
         text = out.read_text()
         assert "## Evidence registry inventory" in text
-        assert "| news@apple.example | 1 | 0 | read.read_mail | inventory |" in text
+        assert "| news@apple.example | 1 | 0 | read.mail | inventory |" in text
         assert "| findme69@hotmail.example |" in text
 
 
@@ -175,10 +175,10 @@ class TestClaimClassExhaustion:
         log.record_tool_call("vol.psscan", True, False, 0, 0)
         log.record_reason_call("reason_hypothesize", True, "hyp", {})
         log.record_finding("data was delivered to contact-a@ext.example",
-                           "SUSPECTED", "read.read_mail",
+                           "SUSPECTED", "read.mail",
                            claim=normalize_claim(claim_kind="positive", category="delivery",
                                                  act="delivery", recipients=["contact-a@ext.example"]))
-        cid = log.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = log.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         log.annotate_tool_call(
             cid, observed_correspondents=["contact-a@ext.example", "handler-b@far.example"],
             observed_correspondent_stats={"contact-a@ext.example": {"from": 1, "to": 2},
@@ -188,7 +188,7 @@ class TestClaimClassExhaustion:
         assert any("handler-b@far.example" in i for i in r["blocking_issues"])
         # K-6b: recipient claim without a queried body read → warning
         assert any("BODY read" in w for w in r["warnings"])
-        log.record_tool_call("read.read_mail -o /x/mail mode=messages field=any q=handler", True, False, 0, 0)
+        log.record_tool_call("read.mail -o /x/mail mode=messages field=any q=handler", True, False, 0, 0)
         r2 = _pre(log)
         assert not any("BODY read" in w for w in r2["warnings"])
 
@@ -201,7 +201,7 @@ class TestAliasLeads:
         log.record_tool_call("vol.psscan", True, False, 0, 0)
         log.record_reason_call("reason_hypothesize", True, "hyp", {})
         log.record_finding("x present", "SUSPECTED", "t")
-        cid = log.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = log.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         log.annotate_tool_call(
             cid, observed_correspondents=["nina_kwa1@qq.example", "nina_kwai@qq.example",
                                           "other@else.example"],
@@ -225,7 +225,7 @@ class TestCommsPresence:
     def _seed(self, log):
         log.record_tool_call("vol.psscan", True, False, 0, 0)
         log.record_reason_call("reason_hypothesize", True, "hyp", {})
-        log.record_finding("data was delivered", "SUSPECTED", "read.read_mail",
+        log.record_finding("data was delivered", "SUSPECTED", "read.mail",
                            claim=normalize_claim(claim_kind="positive", category="delivery",
                                                  act="delivery", recipients=["x@ext.example"]))
         # evidence output shows a WhatsApp store; only Skype was parsed
@@ -288,10 +288,10 @@ class TestBulkClassRegistry:
         log = base_log
         log.record_tool_call("vol.psscan", True, False, 0, 0)
         log.record_reason_call("reason_hypothesize", True, "hyp", {})
-        log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.read_mail",
+        log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.mail",
                            claim=normalize_claim(claim_kind="positive", category="delivery",
                                                  act="delivery", recipients=["contact-a@ext.example"]))
-        cid = log.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = log.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example", "mailer-daemon@x.example",
@@ -320,10 +320,10 @@ class TestBulkClassRegistry:
         log = base_log
         log.record_tool_call("vol.psscan", True, False, 0, 0)
         log.record_reason_call("reason_hypothesize", True, "hyp", {})
-        log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.read_mail",
+        log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.mail",
                            claim=normalize_claim(claim_kind="positive", category="delivery",
                                                  act="delivery", recipients=["contact-a@ext.example"]))
-        cid = log.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = log.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example", "promo8x2k@esp.example"],
@@ -338,7 +338,7 @@ class TestBulkClassRegistry:
         blocking = " ".join(r["blocking_issues"])
         assert "1lxwip7emb" not in blocking   # inventoried, not a blocking leftover
         # a genuinely engaged correspondent (subject wrote TO them) still blocks
-        cid2 = log.record_tool_call("read.read_mail -o /x/mail2 mode=senders field=any", True, False, 0, 0)
+        cid2 = log.record_tool_call("read.mail -o /x/mail2 mode=senders field=any", True, False, 0, 0)
         log.annotate_tool_call(
             cid2, observed_correspondents=["handler-b@far.example"],
             observed_correspondent_stats={"handler-b@far.example": {"from": 1, "to": 1}},
@@ -385,7 +385,7 @@ class TestChatFamiliesDataDriven:
         log = base_log
         log.record_tool_call("vol.psscan", True, False, 0, 0)
         log.record_reason_call("reason_hypothesize", True, "hyp", {})
-        log.record_finding("delivered to x", "SUSPECTED", "read.read_mail",
+        log.record_finding("delivered to x", "SUSPECTED", "read.mail",
                            claim=normalize_claim(claim_kind="positive", category="delivery",
                                                  act="delivery", recipients=["x@ext.example"]))
         log.record_tool_call("ls '/mnt/c/Users/U/AppData/Roaming/Tencent'", True, False, 0, 0,
@@ -408,10 +408,10 @@ class TestA2v2InboundVolumeNotEngaged:
         base_log.record_tool_call("vol.psscan", True, False, 0, 0)
         base_log.record_reason_call("reason_hypothesize", True, "hyp", {})
         base_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
-        base_log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.read_mail",
+        base_log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.mail",
                                 claim=normalize_claim(claim_kind="positive", category="delivery",
                                                       act="delivery", recipients=["contact-a@ext.example"]))
-        cid = base_log.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = base_log.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         base_log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example", "spamco@promo.example", "handler-b@far.example"],
@@ -431,10 +431,10 @@ class TestA2v2InboundVolumeNotEngaged:
     def test_roster_inbound_still_blocks(self, base_log):
         base_log.record_reason_call("reason_hypothesize", True, "hyp", {})
         base_log.record_reason_call("reason_evaluate_finding", True, "SUPPORTED", {})
-        base_log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.read_mail",
+        base_log.record_finding("delivered to contact-a@ext.example", "CONFIRMED", "read.mail",
                                 claim=normalize_claim(claim_kind="positive", category="delivery",
                                                       act="delivery", recipients=["contact-a@ext.example"]))
-        cid = base_log.record_tool_call("read.read_mail -o /x/mail mode=senders field=any", True, False, 0, 0)
+        cid = base_log.record_tool_call("read.mail -o /x/mail mode=senders field=any", True, False, 0, 0)
         base_log.annotate_tool_call(cid, observed_correspondents=["suspect@ext.example"],
                                     observed_correspondent_stats={"suspect@ext.example": {"from": 3, "to": 0}},
                                     correspondents_partial=False)

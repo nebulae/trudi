@@ -87,9 +87,9 @@ class TestToolBodyExceptionCapture:
 
         with patch("core.execution_log.log", l):
             with pytest.raises(ToolError, match="blocked"):
-                _run_async(mw.on_call_tool(_build_context("misc_misc_record_finding",
+                _run_async(mw.on_call_tool(_build_context("misc_record_finding",
                                                           {"description": "new", "confidence": "LIKELY"}), _ok))
-            r = _run_async(mw.on_call_tool(_build_context("misc_misc_record_finding",
+            r = _run_async(mw.on_call_tool(_build_context("misc_record_finding",
                                                           {"description": "fix", "confidence": "SUSPECTED",
                                                            "supersedes": 12}), _ok))
         assert isinstance(r, dict) and r.get("success") is True
@@ -108,7 +108,7 @@ class TestToolBodyExceptionCapture:
         l = _configured_log(tmp_path)
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
         mw = NarrationMiddleware()
-        ctx = _build_context("reason_reason_evaluate_finding",
+        ctx = _build_context("reason_evaluate_finding",
                              {"finding": "x", "entities": "not-a-list", "input_call_ids": [1]})
 
         async def _bad(_ctx):
@@ -119,7 +119,7 @@ class TestToolBodyExceptionCapture:
                 _run_async(mw.on_call_tool(ctx, _bad))
         msg = str(ei.value)
         assert "rejected its input" in msg and "entities" in msg and "entities:str" in msg
-        py_entry = next(e for e in l._entries if e.get("cmd") == "<py>:reason_reason_evaluate_finding")
+        py_entry = next(e for e in l._entries if e.get("cmd") == "<py>:reason_evaluate_finding")
         assert py_entry["gate"] == "input_validation"
         assert py_entry["stderr"].startswith("Unhandled ValidationError: 1 validation error")
         assert "entities:str" in py_entry["stderr"] and "not-a-list" not in py_entry["stderr"]

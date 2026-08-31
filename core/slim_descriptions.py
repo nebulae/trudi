@@ -35,7 +35,7 @@ OVERRIDES: dict[str, str] = {
         "reason.evaluate_finding for the same typed claim, and the tier must be "
         "reachable from the cited artifact classes (gate: tier_contract)."
     ),
-    "dair_dair_assess": (
+    "dair_assess": (
         "DAIR phase director — call after every tool batch with "
         "tool_results_summary, phase_stack (JSON), case_context, and "
         "input_call_ids. Returns directives (priority_tools = the binding work "
@@ -43,7 +43,7 @@ OVERRIDES: dict[str, str] = {
         "observed_principals (typed) so candidate pivots are diffed structurally; "
         "declare the case_question typed on first Triage."
     ),
-    "reason_reason_evaluate_finding": (
+    "reason_evaluate_finding": (
         "Adversarial fact-check before recording a CONFIRMED/LIKELY finding. "
         "Pass finding, supporting_evidence (tool output: command + field + "
         "value), input_call_ids citing the extractor runs, and the SAME typed "
@@ -56,7 +56,7 @@ OVERRIDES: dict[str, str] = {
         "conclusions need misc.record_finding, or pass findings=[...] here to "
         "record them atomically with the narration. Requires input_call_ids."
     ),
-    "reason_reason_hypothesize": (
+    "reason_hypothesize": (
         "Generate competing hypotheses for an observation (hypothesis_kind: "
         "case_question at Triage start, distinct_principal for any new "
         "account/identity, mechanism, coverage_gap). Capture each hypothesis_id "

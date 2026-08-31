@@ -426,7 +426,7 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                analysis/exports/reports.
     chat_app:  auto | skype | whatsapp.
 
-    Read the produced CSVs with read.read_output. Returns _trudi_call_id for
+    Read the produced CSVs with read.output. Returns _trudi_call_id for
     record_finding; participants are annotated onto the trace entry so
     correspondent-exhaustion checks can consume them.
     """
@@ -1150,7 +1150,7 @@ def record_disposition(
     # character apart from another observed correspondent) cannot be EXCLUDED on
     # a roster/senders listing. Excluding asserts it is uninvolved — for a
     # near-twin of an engaged address that must rest on reading ITS messages,
-    # not an assumed typo. Require a body read (read.read_mail mode=messages)
+    # not an assumed typo. Require a body read (read.mail mode=messages)
     # that queried this address among the cited evidence. Symmetric: the same
     # read can equally prove the pair distinct.
     if tk == "correspondent" and rs in ("excluded", "out_of_scope", "noise"):
@@ -1169,7 +1169,7 @@ def record_disposition(
             local = tnorm.split("@", 1)[0]
             stems = {tnorm} | {local[i:i + 4] for i in range(max(1, len(local) - 3))}
             body_read = any(
-                "read.read_mail" in (cmd := str((idx.by_call_id.get(c) or {}).get("cmd", "")).lower())
+                "read.mail" in (cmd := str((idx.by_call_id.get(c) or {}).get("cmd", "")).lower())
                 and "mode=messages" in cmd and any(s in cmd for s in stems)
                 for c in cids)
             if not body_read:
@@ -1180,7 +1180,7 @@ def record_disposition(
                         f"{target_id} is a near-alias (one character apart, same domain) "
                         f"of another observed correspondent — settling it {rs!r} dismisses "
                         f"it, which for a near-twin of an engaged address must rest on "
-                        f"reading ITS messages, not an assumed typo. Cite a read.read_mail "
+                        f"reading ITS messages, not an assumed typo. Cite a read.mail "
                         f"mode=messages call that queried {target_id} (field=body) among "
                         f"evidence_call_ids, or resolve the pair with a finding — do not "
                         f"dismiss it on a roster/senders listing.")}
@@ -1894,13 +1894,13 @@ def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     # ".export" to the -t target, so the real output tree is
     # `<output_dir>.export/` (a call reporting output_dir left it empty and the
     # agent read "no mail" — a false-absence episode). Surface the true path
-    # and a read hint so read.read_mail is pointed at the tree that exists.
+    # and a read hint so read.mail is pointed at the tree that exists.
     r = run([binary, "-q", "-m", mode, "-t", output_dir, pst_path], timeout=1800)
     if isinstance(r, dict) and r.get("success"):
         actual = output_dir + ".export"
         r["output_path"] = actual if os.path.isdir(actual) else output_dir
         r["layout"] = "pffexport_items"
-        r["read_hint"] = (f"read.read_mail over {r['output_path']} — pffexport item tree "
+        r["read_hint"] = (f"read.mail over {r['output_path']} — pffexport item tree "
                           f"(MessageNNNNN/ dirs), consumed natively; or use "
                           f"misc.readpst_extract for an mbox.")
     return r

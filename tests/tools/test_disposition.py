@@ -180,7 +180,7 @@ class TestDispositionEvidenceRelevance:
         rdp = l.record_tool_call("dotnet EvtxECmd.dll -f TerminalServices-RCM.evtx --csv /o",
                                  True, False, 0, 0)
         l.annotate_tool_call(rdp, session_artifact=True)
-        ftp = l.record_tool_call("read.read_mail -o /case/exports/mail mode=senders field=any",
+        ftp = l.record_tool_call("read.mail -o /case/exports/mail mode=senders field=any",
                                  True, False, 0, 0)
         fn = getattr(record_disposition, "fn", record_disposition)
         with patch("core.execution_log.log", l):

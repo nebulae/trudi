@@ -31,7 +31,7 @@ classes:
     label: TerminalServices channel (RDP sessions with source IP)
   logon_session:
     marker: session_artifact
-    tools: [ez.evtxecmd (Security 4624/4625/4778/4779), misc.evtx_filter, net.pcap_identity_timeline, net.http_session_inventory, live.live_recent_logins]
+    tools: [ez.evtxecmd (Security 4624/4625/4778/4779), misc.evtx_filter, net.pcap_identity_timeline, net.http_session_inventory, live.recent_logins]
     label: logon / session artifact (type + source)
   sam_account:
     cmd: 'samparse|config[\\/]sam(?:$|[ ."\\/])|[\\/]sam\.(?:hive|bak|save)\b'
@@ -110,16 +110,16 @@ classes:
   transfer:
     marker: transfer_artifact
     text: '(?:\btransfers?\.log\b|\bftp log\b|\b\d[\d,]*\s*bytes?\s*(?:sent|written|read|transferred|uploaded)\b|\bbytes[_ ](?:sent|written|read)\b|\$j\b|\$usnjrnl|\busnjrnl\b|\busn[ _]journal\b|\b(?:data ?extend|filecreate|file ?write)\b|\bmounteddevices\b|\bdisk ?\[usbstor\]|content-disposition:\s*attachment|\bnetflow\b|\bsrudb\b|\bbytessent\b)'
-    tools: [FTP transfers.log via read.read_output, misc.usnparser_parse, ez.lecmd on the removable volume, ez.recmd_hive SYSTEM MountedDevices, read.read_mail (attachment), ez.sqlecmd SRUM, net.tcpdump_read]
+    tools: [FTP transfers.log via read.output, misc.usnparser_parse, ez.lecmd on the removable volume, ez.recmd_hive SYSTEM MountedDevices, read.mail (attachment), ez.sqlecmd SRUM, net.tcpdump_read]
     label: transfer artifact (bytes moved)
   receipt:
     marker: receipt_artifact
     text: '(?:\bhttp/\d(?:\.\d)?\s+2\d\d\b|\b(?:response|status)(?:[ _]code)?\s*[:=]\s*2\d\d\b|\b226\b[^.\n]{0,30}complete|\btransfer complete\b|\b250\b[^.\n]{0,20}(?:ok|queued|accepted|delivered|2\.\d)|\bmessage (?:accepted for delivery|delivered|queued)\b|\bdsn\b|\bdelivery status notification\b|\bdiagnostic-code\b|\bdelivery receipt\b|\bread receipt\b|\baccess\.log\b)'
-    tools: [destination-side log via read.read_output, net.http_session_inventory (2xx), read.read_mail (250/DSN)]
+    tools: [destination-side log via read.output, net.http_session_inventory (2xx), read.mail (250/DSN)]
     label: destination-side receipt
   mail_store:
     cmd: 'readpst|pff_export|read\.read_mail|\.mbox\b|\.eml\b|\.pst\b|\.ost\b'
-    tools: [misc.readpst_extract, misc.pff_export, read.read_mail]
+    tools: [misc.readpst_extract, misc.pff_export, read.mail]
     label: mail store message
   chat_store:
     marker: chat_db_export
@@ -132,11 +132,11 @@ classes:
     label: packet capture
   memory_process:
     cmd: '(?:^|[\s/])vol(?:atility)?\b.*(?:pslist|pstree|psscan|cmdline|dlllist|handles|getsids|privileges|psxview|envars|consoles|cmdscanner|sessions|thrdscan|mutantscan|filescan|dumpfiles|hashdump|lsadump|cachedump)|live_process'
-    tools: [vol.pslist, vol.pstree, vol.cmdline, vol.dlllist, live.live_processes]
+    tools: [vol.pslist, vol.pstree, vol.cmdline, vol.dlllist, live.processes]
     label: memory process record
   memory_network:
     cmd: 'netscan|netstat|live_network'
-    tools: [vol.netscan, vol.netstat, live.live_network_connections]
+    tools: [vol.netscan, vol.netstat, live.network_connections]
     label: memory network connection
   memory_injection:
     cmd: 'malfind|hollowprocesses|ldrmodules|suspicious_threads|unhooked|callbacks|ssdt|vadyarascan'
@@ -144,11 +144,11 @@ classes:
     label: memory injection / hooking record
   file_content:
     cmd: 'strings_extract|strings_grep|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.read_output|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
-    tools: [strings.strings_grep, tsk.icat, read.read_output, misc.capa_analyze]
+    tools: [strings.grep, tsk.icat, read.output, misc.capa_analyze]
     label: file content read
   hash_match:
     cmd: 'hash_file|hashdeep|md5deep|ssdeep|verify_evidence_hash'
-    tools: [hash.hash_file, hash.ssdeep_compare]
+    tools: [hash.file, hash.ssdeep_compare]
     label: hash match
   yara:
     cmd: 'yara'
@@ -164,7 +164,7 @@ classes:
     label: threat-intel enrichment
   timeline:
     cmd: 'log2timeline|psort|plaso|mactime'
-    tools: [plaso.plaso_create_timeline, tsk.mactime]
+    tools: [plaso.create_timeline, tsk.mactime]
     label: super-timeline row
   filesystem_listing:
     cmd: '(?:^|[ /])fls(?:\s|$)|\bistat\b|\bffind\b|indxparse|mftecmd_dir|\bils\b|tsk_fls'
@@ -172,27 +172,27 @@ classes:
     label: filesystem listing / inode record
   live_host:
     cmd: 'live\.|live_'
-    tools: [live.live_persistence_audit, live.live_open_files]
+    tools: [live.persistence_audit, live.open_files]
     label: live host record
   unix_auth_log:
     cmd: 'auth\.log|[\\/]secure\b|\bwtmp\b|\bbtmp\b|lastlog|journalctl|\bsshd\b|\blast\b -f'
-    tools: [read.read_output on auth.log/secure, live.live_recent_logins, strings.strings_grep on wtmp]
+    tools: [read.output on auth.log/secure, live.recent_logins, strings.grep on wtmp]
     label: unix authentication log
   unix_shell_history:
     cmd: 'bash_history|zsh_history|sh_history|\.histfile'
-    tools: [read.read_output on shell history, strings.strings_extract]
+    tools: [read.output on shell history, strings.extract]
     label: shell history
   unix_persistence:
     cmd: 'crontab|[\\/]cron\.(?:d|daily|hourly)|[\\/]systemd[\\/]|\.service\b|rc\.local|[\\/]init\.d[\\/]|launchagents|launchdaemons'
-    tools: [live.live_persistence_audit, read.read_output on cron/systemd units]
+    tools: [live.persistence_audit, read.output on cron/systemd units]
     label: unix/macOS persistence record
   unix_syslog:
     cmd: '[\\/]syslog\b|[\\/]messages\b|journal(?:ctl)?\b'
-    tools: [read.read_output on syslog, live.live_event_log_tail]
+    tools: [read.output on syslog, live.event_log_tail]
     label: unix system log
   macos_artifacts:
     cmd: 'fseventsd|\.logarchive|log show|unified log|\bplutil\b|\.plist\b|knowledgec\.db|quarantine'
-    tools: [read.read_output on plists/KnowledgeC, strings.strings_extract on fsevents]
+    tools: [read.output on plists/KnowledgeC, strings.extract on fsevents]
     label: macOS system artifact
 
 groups:

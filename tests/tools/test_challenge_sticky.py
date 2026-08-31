@@ -86,7 +86,7 @@ class TestSticky:
     def test_read_call_counts_as_evidence(self, tmp_path):
         l, tid = _log(tmp_path)
         _evaluate(l, "CHALLENGED")
-        l.record_tool_call("read.read_output --output /c/exports/evtx/x.csv", True, False, 0, 0)
+        l.record_tool_call("read.output --output /c/exports/evtx/x.csv", True, False, 0, 0)
         _evaluate(l, "SUPPORTED")
         assert _record(l, tid)["success"] is True
 

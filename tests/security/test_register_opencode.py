@@ -170,7 +170,7 @@ def test_condensed_orchestrator_keeps_load_bearing_contracts():
         "start_execution_log", "dair_assess", "reason.hypothesize",
         "reason.evaluate_finding", "pre_report_check", "record_disposition",
         "record_curiosity_probe", "knowns_pattern_generate",
-        "device_install_inventory", "read.read_mail",
+        "device_install_inventory", "read.mail",
         # gates named so refusals are recognizable
         "mcp_routing", "tier_contract", "negative_completeness",
         "interactive_injection_grounding",

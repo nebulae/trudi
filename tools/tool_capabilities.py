@@ -34,13 +34,13 @@ _CAPABILITIES: list[dict] = [
         "phases": ["Collect", "Analyze", "Scan", "Report"],
         "evidence": ["all"],
         "purpose": ("Traced, citable reads of PRODUCED output — CSV/JSON/TXT under "
-                    "analysis|exports|reports (read.read_output: query/columns/where) "
-                    "and extracted mbox/.eml mail stores (read.read_mail: message "
+                    "analysis|exports|reports (read.output: query/columns/where) "
+                    "and extracted mbox/.eml mail stores (read.mail: message "
                     "BODIES, sender/recipient roster). Replaces bash "
                     "python/jq/cat/mailbox, whose reads are untraced and uncitable."),
         "tools": [
-            "read.read_output",
-            "read.read_mail",
+            "read.output",
+            "read.mail",
         ],
     },
     {
@@ -110,7 +110,7 @@ _CAPABILITIES: list[dict] = [
             "misc.evtx_filter",
             "misc.evtx_dump",
             "misc.chainsaw_hunt",
-            "live.live_event_log_tail",
+            "live.event_log_tail",
         ],
     },
     {
@@ -153,10 +153,10 @@ _CAPABILITIES: list[dict] = [
         "tools": [
             "strings.stat_file",
             "strings.file_identify",
-            "strings.strings_grep",
+            "strings.grep",
             "strings.floss_extract",
-            "hash.hash_file",
-            "hash.hash_directory",
+            "hash.file",
+            "hash.directory",
             "hash.verify_evidence_hash",
             "misc.capa_analyze",
             "misc.pe_scanner",
@@ -186,11 +186,11 @@ _CAPABILITIES: list[dict] = [
         "evidence": ["disk", "memory"],
         "purpose": "Check for timestomping, log clearing, Sysmon evasion, USN gaps, and prefetch deletion.",
         "tools": [
-            "af.af_timestomp_drift",
-            "af.af_event_log_clear",
-            "af.af_sysmon_evasion",
-            "af.af_usn_gaps",
-            "af.af_prefetch_deletion",
+            "af.timestomp_drift",
+            "af.event_log_clear",
+            "af.sysmon_evasion",
+            "af.usn_gaps",
+            "af.prefetch_deletion",
         ],
     },
     {
@@ -199,17 +199,17 @@ _CAPABILITIES: list[dict] = [
         "evidence": ["live"],
         "purpose": "Read-only live endpoint enumeration through fixed SSH argv wrappers.",
         "tools": [
-            "live.live_hosts",
-            "live.live_processes",
-            "live.live_process_details",
-            "live.live_network_connections",
-            "live.live_recent_logins",
-            "live.live_services",
-            "live.live_scheduled_tasks",
-            "live.live_persistence_audit",
-            "live.live_open_files",
-            "live.live_read_file",
-            "live.live_yara_scan",
+            "live.hosts",
+            "live.processes",
+            "live.process_details",
+            "live.network_connections",
+            "live.recent_logins",
+            "live.services",
+            "live.scheduled_tasks",
+            "live.persistence_audit",
+            "live.open_files",
+            "live.read_file",
+            "live.yara_scan",
         ],
     },
     {
@@ -222,7 +222,7 @@ _CAPABILITIES: list[dict] = [
             "correlate.network_to_process",
             "correlate.mitre_map",
             "correlate.mitre_validate",
-            "coverage.coverage_report",
+            "coverage.report",
             "attribution.attribute_actors",
         ],
     },

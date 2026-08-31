@@ -754,7 +754,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example",
@@ -777,7 +777,7 @@ class TestReasonPreReportCheck:
         # subject WROTE TO (or roster/chat) block; inbound volume alone does not.
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
-        cid = configured_log.record_tool_call("read.read_mail -o /x/mail", True, False, 0, 0)
+        cid = configured_log.record_tool_call("read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example", "handler-b@far.example",
@@ -805,7 +805,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid, observed_correspondents=["handler-b@far.example"],
             correspondents_partial=True)
@@ -818,13 +818,13 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid, observed_correspondents=["handler-b@far.example"],
             correspondents_partial=False)
         configured_log.record_finding(
             "handler correspondence assessed as an unrelated vendor thread",
-            "UNCONFIRMED", "read.read_mail",
+            "UNCONFIRMED", "read.mail",
             claim=_normc(claim_kind="negative", category="other", act="presence",
                          entities=["Handler-B@far.example"]))
         with patch("core.execution_log.log", configured_log):
@@ -835,7 +835,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid, observed_correspondents=["handler-b@far.example"],
             correspondents_partial=False)
@@ -1676,7 +1676,7 @@ class TestPreReportStructuralIntegrity:
         base_log.record_finding("research exfiltrated to buyer", "CONFIRMED", "ost",
                                 claim=_normc(claim_kind="positive", category="delivery", act="delivery",
                                              recipients=["buyer@evil.example"]))
-        base_log.record_tool_call("read.read_mail --output /x/mail", True, False, 0, 0)
+        base_log.record_tool_call("read.mail --output /x/mail", True, False, 0, 0)
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert not any("roster" in w.lower() for w in r["warnings"])

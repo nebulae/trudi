@@ -5,7 +5,7 @@ The typed path: the finding declares `session_binding_call_ids`, the trace
 entries those ids name carry the server-stamped `session_artifact=True` marker
 (set by the wrappers that parse logon events: ez.evtxecmd on 4624/4625/4634/
 4648/4778/4779, misc.evtx_filter on those ids, net.pcap_identity_timeline /
-net.http_session_inventory, live.live_recent_logins). The agent cannot stamp
+net.http_session_inventory, live.recent_logins). The agent cannot stamp
 that marker from prose.
 
 Fallbacks, weakest last: a cited call whose COMMAND is a logon-enumeration tool

@@ -13,16 +13,16 @@ write to the user. Opening narration before the first tool call goes through
 
 ```
 # three parallel calls, one carries the narration
-vol_vol_pstree(image=..., _note="Pre-plan reads complete. Starting memory analysis.")
-vol_vol_netscan(image=...)
-vol_vol_cmdline(image=...)
+vol_pstree(image=..., _note="Pre-plan reads complete. Starting memory analysis.")
+vol_netscan(image=...)
+vol_cmdline(image=...)
 ```
 
 ## `input_call_ids` lineage — the trace as a causal DAG
 
 ```python
 # tool results from the prior batch had cids 17, 18, 19
-dair.dair_assess(
+dair.assess(
     tool_results_summary="vol.pstree showed orphaned PID <PID>; vol.netscan flagged a beacon to <C2_IP>:<PORT>",
     phase_stack="[{\"phase\": \"Triage\", \"depth\": 0}]",
     input_call_ids=[17, 18, 19],

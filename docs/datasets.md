@@ -55,4 +55,4 @@ it by re-running the case against the evidence.
 2. Open `~/cases/<CASE>/CLAUDE.md` (already bundled) — it has the evidence paths and case question.
 3. `cd ~/cases/<CASE> && claude`, then ask TRUDI to investigate.
 4. Compare against the committed trace/report here, or — for CFReDS / DEMO-LIVE —
-   score automatically with `accuracy.accuracy_compare` against `ground_truth.json`.
+   score automatically with `accuracy.compare` against `ground_truth.json`.

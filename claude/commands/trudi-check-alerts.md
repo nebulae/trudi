@@ -116,7 +116,7 @@ reason.hypothesize(
     context="case=<case_id>; investigation=<INV>; alert_ids=...",
     input_call_ids=[genesis_call_id])
 
-dair.dair_assess(
+dair.assess(
     tool_results_summary="Investigation opened on bundle of <N> alerts",
     phase_stack="[]",
     case_context="CASE_QUESTION: ...; investigation_id=<INV>",

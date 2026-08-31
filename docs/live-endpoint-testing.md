@@ -157,9 +157,9 @@ From the TRUDI agent session:
 ```
 misc.start_execution_log("LIVE-TEST-001", "./analysis/LIVE-TEST-001_trace.json")
 # … then per the DAIR loop:
-live.live_processes(host="ubuntu-endpoint")
-live.live_network_connections(host="ubuntu-endpoint")
-live.live_persistence_audit(host="ubuntu-endpoint")
+live.processes(host="ubuntu-endpoint")
+live.network_connections(host="ubuntu-endpoint")
+live.persistence_audit(host="ubuntu-endpoint")
 # pass results into reason.plan → dair_assess → ...
 ```
 
@@ -169,7 +169,7 @@ findings land:
 ```
 attribution.attribute_actors()
 # → ranks MITRE groups by overlap with your detonated TTPs
-coverage.coverage_report()
+coverage.report()
 # → markdown checklist: found T1003.008, T1547.006, T1053.003, … gaps T1190, …
 ```
 

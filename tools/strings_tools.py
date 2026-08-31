@@ -29,7 +29,7 @@ def strings_extract(
         return {
             "success": False,
             "error": f"file not found on mounted filesystem: {file_path}",
-            "hint": "File may have been deleted post-execution. Use vol_vol_dumpfiles --pid <PID> to extract from memory.",
+            "hint": "File may have been deleted post-execution. Use vol_dumpfiles --pid <PID> to extract from memory.",
             "ascii_lines": 0,
             "unicode_lines": 0,
             "ascii_stdout": "",
@@ -104,7 +104,7 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
         return {
             "success": False,
             "error": f"file not found: {file_path}",
-            "hint": "Use vol_vol_dumpfiles to extract from memory.",
+            "hint": "Use vol_dumpfiles to extract from memory.",
             "matches": [],
         }
     file_path = resolved

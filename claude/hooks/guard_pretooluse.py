@@ -61,7 +61,7 @@ _CMD_CHAIN_RE = re.compile(r"[;\n]|&&|\|\|")
 # sidecar (~/.claude/projects/<project>/<session>/tool-results/mcp-*.txt) — the
 # same bytes as analysis/.tool_output/<cid>.txt but outside _PROTECTED_DIRS, so
 # a bash read of it would slip past the produced-output check. Match the cache
-# path so the same reader rule refuses it and steers to read.read_output.
+# path so the same reader rule refuses it and steers to read.output.
 _MCP_RESULT_CACHE_RE = re.compile(
     r"(?:^|[/\\\s'\"=(])\.claude[/\\]projects[/\\][^/\\\s'\"]+[/\\][^/\\\s'\"]+[/\\]"
     r"tool-results[/\\]mcp-[^\s'\"()]+")
@@ -223,7 +223,7 @@ def main() -> None:
                 "Chat/messenger sqlite stores must be exported through "
                 "misc.chat_db_export (strict read-only immutable open, traced, "
                 "citable — messages + Transfers + participants CSVs), then read "
-                "with read.read_output."
+                "with read.output."
             )
             return
     except Exception:
@@ -244,9 +244,9 @@ def main() -> None:
                 "includes the Claude Code MCP result cache "
                 "(~/.claude/projects/*/*/tool-results/mcp-*), which is a second copy "
                 "of the same tool output that lives outside the case sidecar. Use "
-                "read.read_output (CSV/JSON/TXT under analysis|exports|reports — "
+                "read.output (CSV/JSON/TXT under analysis|exports|reports — "
                 "supports query/columns/where; it reads the traced "
-                "analysis/.tool_output/<cid>.txt) or read.read_mail (extracted "
+                "analysis/.tool_output/<cid>.txt) or read.mail (extracted "
                 "mbox/.eml — returns message BODIES) instead; both return a "
                 "_trudi_call_id to cite in record_finding. "
                 "(Emergency override: TRUDI_GUARD_DISABLE=1.)"

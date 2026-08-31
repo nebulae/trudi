@@ -51,7 +51,7 @@ Three independent methods:
 
 1. **Manual review of real traces.** Every example below is cited to a case and a
    `_trudi_call_id`, so a reviewer can open the trace and confirm it.
-2. **The accuracy framework** (`accuracy.accuracy_compare` / `accuracy_export_report`)
+2. **The accuracy framework** (`accuracy.compare` / `accuracy_export_report`)
    scores a run's findings against a per-case `ground_truth.json` — precision,
    recall, F1, plus a **negative-coverage** metric that scores absence assertions
    and flags confidence downgrades. CFReDS-Leak ships with a machine-readable
@@ -415,7 +415,7 @@ label nuance (Q4), one source/scope slip (Q22), one omission (CuteFTP).
 ### CFREDS-LEAK — NIST Data Leakage Case (Iaman Informant / Spy Conspirator)
 
 The one case with a **machine-readable** ground truth (`analysis/ground_truth.json`)
-— TRUDI even auto-generated its own `accuracy.accuracy_export_report`. Against the
+— TRUDI even auto-generated its own `accuracy.export_report`. Against the
 NIST narrative key, the case-question answer is essentially fully correct; the gaps
 are depth artifacts.
 

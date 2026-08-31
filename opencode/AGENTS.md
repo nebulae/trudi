@@ -22,10 +22,10 @@ full rationale lives in `~/trudi/claude/CLAUDE.md` and `~/trudi/docs/gates.md`.
   `fls/icat/…`, EZ `dotnet …Cmd.dll`, `log2timeline.py`, `yara`, `bulk_extractor`,
   `tcpdump`, `hexdump/xxd/exiftool`, `rip.pl`, `clamscan`, mount tools). Findings
   citing bash runs of these are refused (gate `mcp_routing`).
-- **Read produced output with `read.read_output` / `read.read_mail`** — never
+- **Read produced output with `read.output` / `read.mail`** — never
   bash `cat`/`jq`/`python`. Bash reads are untraced and uncitable; `read.*` returns
   a `_trudi_call_id` you can cite. Recipient/dissemination claims MUST cite
-  `read.read_mail` message BODIES (To/Cc + body), never subject lines alone.
+  `read.mail` message BODIES (To/Cc + body), never subject lines alone.
 - Timestamps always UTC. Check `success: true` after every run; on failure read
   stderr, correct, retry. A result with `truncated: true` is INCOMPLETE — re-run
   narrower before recording any negative.
@@ -49,11 +49,11 @@ full rationale lives in `~/trudi/claude/CLAUDE.md` and `~/trudi/docs/gates.md`.
    question>)` — BEFORE reason.plan. Capture each `hypothesis_id`; route findings
    back via `tested_hypothesis_id`.
 4. Pre-plan parallel batch (evidence-type dependent): registry hives via
-   `ez.ez_recmd_hive` (SOFTWARE/SYSTEM/SAM), `vol.vol_symbol_check` on any memory
+   `ez.recmd_hive` (SOFTWARE/SYSTEM/SAM), `vol.symbol_check` on any memory
    image, `strings.stat_file` on evidence. PCAP-only cases: `net.tcpdump_read` +
    `net.tcpdump_extract_ips`/`list_connections` + `net.http_session_inventory`.
 5. `reason.plan(case_description, evidence_available, case_question=…)`.
-6. `dair.dair_assess` — then follow the DAIR loop below for the whole investigation.
+6. `dair.assess` — then follow the DAIR loop below for the whole investigation.
 
 ## DAIR execution loop (DAIR prescribes; you execute)
 
@@ -185,7 +185,7 @@ typed park before Report — `pre_report_check` blocks otherwise.
   each was queried, cross-reference EVERY found identity against the roster.
 - **Recipient exhaustion:** "who received the data" needs a full sender/recipient
   inventory of mail (`misc.readpst_extract`/`pff_export`) AND chat stores
-  (`misc.chat_db_export`), read via `read.read_mail`/`read.read_output`,
+  (`misc.chat_db_export`), read via `read.mail`/`read.output`,
   cross-referenced against the roster. Declare recipients typed; engaged or
   roster-matched correspondents left unreferenced block the report.
 - **Exfil channels:** enumerate ALL candidates (removable, ftp, cloud, email, web,
