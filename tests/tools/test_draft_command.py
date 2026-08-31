@@ -87,3 +87,32 @@ class TestSalvage:
                             {"command": "read.output path=x.csv", "why": "w"}]}})
         assert [c["command"] for c in out["candidates"]] == [
             "read.output path=x.csv"]
+
+
+class TestExtractCase:
+    def _call(self, ask_result):
+        with patch.object(R, "_ask", return_value=ask_result) as ask:
+            fn = getattr(R.reason_extract_case, "fn", R.reason_extract_case)
+            return fn("# case doc\nsuspects: Amy Smith"), ask
+
+    def test_result_block_fields(self):
+        out, _ = self._call({"success": True, "result_block": {
+            "case_id": "X-1", "case_question": "who?", "evidence_root": "/e",
+            "roster": ["Amy Smith", 2], "scenario_summary": "s"}})
+        assert out["case_question"] == "who?" and out["case_id"] == "X-1"
+        assert out["roster"] == ["Amy Smith", "2"]
+
+    def test_json_salvaged_from_prose(self):
+        prose = ('Here is what I found:\n```json\n'
+                 '{"case_question": "who sent it?", "roster": ["Amy Smith"],'
+                 ' "case_id": "N", "evidence_root": "", '
+                 '"scenario_summary": "x"}\n```\nHope that helps.')
+        out, _ = self._call({"success": True, "conclusion": prose,
+                             "result_block": None})
+        assert out["case_question"] == "who sent it?"
+        assert out["roster"] == ["Amy Smith"]
+
+    def test_true_whiff_stays_empty(self):
+        out, _ = self._call({"success": True, "conclusion": "I cannot say.",
+                             "result_block": None})
+        assert out["case_question"] == "" and out["roster"] == []

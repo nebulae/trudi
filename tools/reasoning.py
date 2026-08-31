@@ -12,7 +12,8 @@ from tools.tool_capabilities import (
 # Shared reader engine (also used by the agent-facing read.* tools).
 from tools._llm_parse import (parse_result_block, strip_result_block,
                               result_instruction, str_list, RESULT_JSON,
-                              LEGACY_BLOCK, PROSE_REGEX, NONE as PARSE_NONE)
+                              LEGACY_BLOCK, PROSE_REGEX, NONE as PARSE_NONE,
+                              _balanced_object)
 from tools._output_reader import (
     COMPAT_CITED_FILE_BYTES, _OUTPUT_FLAGS, _OUTPUT_FILE_EXTS, _CITED_TOPK,
     _cited_query_terms, _cmd_output_paths, _read_relevant_from_file,
@@ -4708,6 +4709,25 @@ def reason_extract_case(case_md: str,
                   input_call_ids=input_call_ids)
     rb = result.get("result_block")
     rb = rb if isinstance(rb, dict) else {}
+    if not any(rb.get(k) for k in ("case_question", "roster")):
+        # local models often emit the JSON without the RESULT: marker —
+        # salvage the first balanced object carrying an expected key
+        # (observed live: all-empty extraction from a briefing that
+        # plainly carried a roster)
+        text = result.get("conclusion", "") or ""
+        for m in re.finditer(r"\{", text):
+            end = _balanced_object(text, m.start())
+            if end is None:
+                continue
+            try:
+                cand = json.loads(text[m.start():end])
+            except Exception:
+                continue
+            if isinstance(cand, dict) and any(
+                    k in cand for k in ("case_question", "roster",
+                                        "case_id", "evidence_root")):
+                rb = cand
+                break
     for key in ("case_id", "case_question", "evidence_root",
                 "scenario_summary"):
         result[key] = str(rb.get(key) or "").strip()

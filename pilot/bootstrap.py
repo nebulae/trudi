@@ -207,8 +207,10 @@ async def extract_case_info(client, info: CaseInfo, echo=print) -> None:
 
 
 async def bootstrap(client, info: CaseInfo, echo=print) -> BootState:
-    """Run the bookkeeping against a connected fastmcp client."""
-    await extract_case_info(client, info, echo)
+    """Run the bookkeeping against a connected fastmcp client. The trace
+    log opens FIRST — every later call (extraction included) must land in
+    the trace, not spray 'trace log not configured' warnings (observed
+    live when extraction ran before start_execution_log)."""
     state = BootState(
         trace_path=os.path.join("analysis", f"{info.case_id}_trace.json"))
     state.resumed = os.path.exists(os.path.join(info.case_dir, state.trace_path))
@@ -221,6 +223,8 @@ async def bootstrap(client, info: CaseInfo, echo=print) -> BootState:
     state.dashboard_url = r.get("dashboard_url", "") or ""
     state.entry_count = int(r.get("entries_recovered") or 0)
     state.resumed = bool(r.get("resumed", state.resumed))
+
+    await extract_case_info(client, info, echo)
 
     for path in discover_evidence(info):
         size_mb = os.path.getsize(path) / 1e6
