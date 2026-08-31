@@ -556,6 +556,35 @@ def filter_known(suggestions: list, schema_map: dict,
     return out
 
 
+def _wants_array(prop: dict) -> bool:
+    if prop.get("type") == "array":
+        return True
+    return any(s.get("type") == "array" for s in prop.get("anyOf", [])
+               if isinstance(s, dict))
+
+
+def coerce_args(tool_wire: str, args: dict, schema_map: dict) -> dict:
+    """Schema-aware coercion so readable command-line values satisfy typed
+    params: a comma-joined string becomes a list where the schema wants an
+    array (observed live: reference_set="Amy Smith,Burt Greedom,…" rejected
+    with pydantic list_type — the human-friendly spelling should just
+    work), and numeric strings become numbers."""
+    props = (schema_map.get(tool_wire) or {}).get("properties", {})
+    for key, value in list(args.items()):
+        prop = props.get(key) or {}
+        if _wants_array(prop) and isinstance(value, str):
+            args[key] = [s.strip() for s in value.split(",") if s.strip()]
+        elif prop.get("type") == "integer" and isinstance(value, str) \
+                and value.lstrip("-").isdigit():
+            args[key] = int(value)
+        elif prop.get("type") == "number" and isinstance(value, str):
+            try:
+                args[key] = float(value)
+            except ValueError:
+                pass
+    return args
+
+
 def missing_required(tool_wire: str, args: dict, schema_map: dict) -> list[str]:
     """Required params absent or left empty — checked client-side so an
     unfilled prefill gets coaching, not a server error."""
@@ -959,6 +988,7 @@ async def run(stdio: bool = False) -> None:
             except ValueError as e:
                 print(f"{_YELLOW}parse error: {e}{_RESET}")
                 continue
+            args = coerce_args(tool, args, schema_map)
             gaps = missing_required(tool, args, schema_map)
             if gaps:
                 print(f"{_YELLOW}{line.split()[0]} needs: {', '.join(gaps)} "

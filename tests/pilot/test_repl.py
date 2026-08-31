@@ -441,3 +441,33 @@ class TestOutputParams:
         line = prefill_command("carve.foremost_carve", self.SCHEMAS,
                                ["/e/disk.dd"])
         assert "image=/e/disk.dd" in line and "output_dir=analysis/" in line
+
+
+class TestCoercion:
+    def test_comma_string_becomes_list_for_array_params(self):
+        from pilot.repl import coerce_args
+        schema_map = {"misc_knowns_pattern_generate": {
+            "properties": {"reference_set": {"type": "array"},
+                           "derivation_type": {"type": "string"}},
+            "required": ["reference_set", "derivation_type"]}}
+        args = {"reference_set": "Amy Smith,Burt Greedom, Jenny Kant",
+                "derivation_type": "person_username"}
+        out = coerce_args("misc_knowns_pattern_generate", args, schema_map)
+        assert out["reference_set"] == ["Amy Smith", "Burt Greedom",
+                                        "Jenny Kant"]
+        assert out["derivation_type"] == "person_username"
+
+    def test_anyof_array_and_numbers(self):
+        from pilot.repl import coerce_args
+        schema_map = {"t_x": {"properties": {
+            "ids": {"anyOf": [{"type": "array"}, {"type": "null"}]},
+            "count": {"type": "integer"},
+            "ratio": {"type": "number"}}}}
+        out = coerce_args("t_x", {"ids": "a,b", "count": "42",
+                                  "ratio": "0.5"}, schema_map)
+        assert out == {"ids": ["a", "b"], "count": 42, "ratio": 0.5}
+
+    def test_real_lists_and_unknown_tools_untouched(self):
+        from pilot.repl import coerce_args
+        args = {"reference_set": ["already", "a list"]}
+        assert coerce_args("no_such", dict(args), {}) == args
