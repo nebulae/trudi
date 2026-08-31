@@ -364,6 +364,8 @@ _NS_EVIDENCE = {
     "tsk": {".e01", ".e02", ".ex01", ".dd", ".raw", ".img", ".vmdk",
             ".vhd", ".vhdx"},
     "img": {".e01", ".e02", ".dd", ".raw", ".img", ".vmdk", ".vhd", ".vhdx"},
+    # live.* needs a live endpoint — never applicable to evidence-file cases
+    "live": set(),
 }
 
 
@@ -419,14 +421,20 @@ def validate_candidates(candidates: list[dict], schema_map: dict) -> list[dict]:
 
 # ── prefill & argument checking ──────────────────────────────────────────────
 
-_PATHY = ("file", "path", "image", "evidence", "pcap", "hive", "mail",
-          "db", "dump", "target", "dir")
+# exact generic param names that may take ANY evidence file as a fallback.
+# Substring matching ("file" inside evtx_file/file_hash) put a pcap into an
+# evtx param and a HASH param on live runs — only truly generic names fall
+# back; everything else must match a typed extension hint or stay empty.
+_GENERIC_PATH_PARAMS = {"file", "file_path", "path", "input_path", "target",
+                        "target_path", "source", "evidence_path"}
 _EXT_HINTS = (
     (("pcap",), (".pcap", ".pcapng")),
     (("image", "e01", "disk"), (".e01", ".ex01", ".dd", ".raw", ".img",
                                 ".vmdk", ".vhd", ".vhdx")),
     (("mem", "dump"), (".mem", ".vmem", ".lime", ".dmp")),
     (("mail", "ost", "pst"), (".ost", ".pst")),
+    (("evtx", "evt"), (".evtx", ".evt")),
+    (("hive", "registry", "ntuser"), (".dat", ".hive")),
 )
 
 
@@ -444,13 +452,15 @@ def guess_value(param: str, prop: dict, evidence: list[str],
     if "default" in prop and prop["default"] not in (None, ""):
         return str(prop["default"])
     low = param.lower()
-    if any(p in low for p in _PATHY) and evidence:
-        for names, exts in _EXT_HINTS:
-            if any(n in low for n in names):
-                for path in evidence:
-                    if os.path.splitext(path)[1].lower() in exts:
-                        return path
-                return ""  # typed param, no evidence of that type
+    if not evidence or "hash" in low:   # a hash is never a path
+        return ""
+    for names, exts in _EXT_HINTS:
+        if any(n in low for n in names):
+            for path in evidence:
+                if os.path.splitext(path)[1].lower() in exts:
+                    return path
+            return ""  # typed param, no evidence of that type
+    if low in _GENERIC_PATH_PARAMS:
         return evidence[0]
     return ""
 
@@ -499,13 +509,24 @@ def prefill_command(suggestion: str, schema_map: dict, evidence: list[str],
     return " ".join(frags)
 
 
-def filter_known(suggestions: list, schema_map: dict) -> list[str]:
+def filter_known(suggestions: list, schema_map: dict,
+                 evidence: list[str] | None = None) -> list[str]:
     """Drop suggested tools that don't exist on the server (a model may
-    suggest raw binaries like `sha256sum`) — an unrunnable work-order item
-    is noise."""
-    return [str(s) for s in suggestions
-            if str(s).split() and
-            dotted_to_wire(str(s).split()[0]) in schema_map]
+    suggest raw binaries like `sha256sum`) and, when the case's evidence is
+    known, tools whose namespace needs an evidence type that is absent
+    (observed live: live.processes and vol.* merged into a pcap-only
+    case's work order) — an unrunnable item is noise."""
+    ev_exts = {os.path.splitext(p)[1].lower() for p in (evidence or [])}
+    out = []
+    for s in suggestions:
+        head = str(s).split()[0] if str(s).split() else ""
+        if not head or dotted_to_wire(head) not in schema_map:
+            continue
+        ns = head.split(".", 1)[0]
+        if ev_exts and ns in _NS_EVIDENCE and not (ev_exts & _NS_EVIDENCE[ns]):
+            continue
+        out.append(str(s))
+    return out
 
 
 def missing_required(tool_wire: str, args: dict, schema_map: dict) -> list[str]:
@@ -652,7 +673,7 @@ async def run(stdio: bool = False) -> None:
             d = payload.get("directives")
             if isinstance(d, dict):
                 d["priority_tools"] = filter_known(
-                    d.get("priority_tools") or [], schema_map)
+                    d.get("priority_tools") or [], schema_map, evidence_paths)
             wo.apply_assess(state, payload, prefill=_prefill)
             rationale = payload.get("transition_rationale") or ""
             if rationale:
@@ -762,7 +783,8 @@ async def run(stdio: bool = False) -> None:
             else:
                 print(f"{_YELLOW}no advice returned{_RESET}")
             pts = filter_known((payload.get("directives") or {})
-                               .get("priority_tools") or [], schema_map)
+                               .get("priority_tools") or [], schema_map,
+                               evidence_paths)
             if pts and wo.merge_directives(state, pts, prefill=_prefill):
                 print(wo.render(state, color=True))
 
@@ -931,7 +953,8 @@ async def run(stdio: bool = False) -> None:
                 # into the queue (prefilled); DAIR's replace it at assess.
                 if tool.startswith("reason_") and isinstance(payload, dict):
                     pts = filter_known((payload.get("directives") or {})
-                                       .get("priority_tools") or [], schema_map)
+                                       .get("priority_tools") or [],
+                                       schema_map, evidence_paths)
                     if pts and wo.merge_directives(state, pts, prefill=_prefill):
                         print(wo.render(state, color=True))
                 if wo.needs_nag(state):

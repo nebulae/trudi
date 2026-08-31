@@ -388,3 +388,30 @@ class TestEvidenceTypeAwareness:
         assert "net." in briefs                       # pcap tools rank in
         for wrong in ("ewf.", "vol.", "img.bde"):     # image/memory tools out
             assert wrong not in briefs, wrong
+
+
+class TestTightenedGuessing:
+    def test_substring_params_no_longer_grab_wrong_evidence(self):
+        """observed live: evtx_file= and file_hash= both got the pcap path
+        ("file" substring matched). Typed params need a matching extension;
+        hash params are never paths; only exact generic names fall back."""
+        from pilot.repl import guess_value
+        pcap_only = ["/e/nitroba.pcap"]
+        assert guess_value("evtx_file", {}, pcap_only) == ""
+        assert guess_value("file_hash", {}, pcap_only) == ""
+        assert guess_value("hive_path", {}, pcap_only) == ""
+        assert guess_value("file_path", {}, pcap_only) == "/e/nitroba.pcap"
+        assert guess_value("evtx_file", {}, ["/e/Security.evtx"]) == \
+            "/e/Security.evtx"
+
+    def test_filter_known_drops_inapplicable_namespaces(self):
+        from pilot.repl import filter_known
+        schema_map = {"live_processes": {}, "net_ngrep_search": {},
+                      "vol_pslist": {}, "correlate_mitre_map": {}}
+        sugg = ["live.processes host=", "net.ngrep_search p=x",
+                "vol.pslist image=", "correlate.mitre_map finding_text=x"]
+        # pcap-only case: live and vol are inapplicable, correlate is generic
+        assert filter_known(sugg, schema_map, ["/e/n.pcap"]) == \
+            ["net.ngrep_search p=x", "correlate.mitre_map finding_text=x"]
+        # no evidence context: only existence-checked
+        assert filter_known(sugg, schema_map) == sugg
