@@ -536,24 +536,52 @@ def prefill_command(suggestion: str, schema_map: dict, evidence: list[str],
     return " ".join(frags)
 
 
-def filter_known(suggestions: list, schema_map: dict,
-                 evidence: list[str] | None = None) -> list[str]:
-    """Drop suggested tools that don't exist on the server (a model may
-    suggest raw binaries like `sha256sum`) and, when the case's evidence is
-    known, tools whose namespace needs an evidence type that is absent
-    (observed live: live.processes and vol.* merged into a pcap-only
-    case's work order) — an unrunnable item is noise."""
+def required_unfillable(tool_dotted: str, schema_map: dict,
+                        evidence: list[str]) -> str | None:
+    """A required evidence-typed param with no matching evidence makes the
+    whole suggestion unrunnable (observed live: misc.evtx_filter evtx_file=
+    queued in a pcap-only case, dismissable only by hand)."""
+    schema = schema_map.get(dotted_to_wire(tool_dotted)) or {}
+    props = schema.get("properties", {})
+    ev_exts = {os.path.splitext(p)[1].lower() for p in evidence}
+    for param in schema.get("required", []):
+        low = param.lower()
+        if "hash" in low:
+            continue
+        for names, exts in _EXT_HINTS:
+            if any(n in low for n in names) and not (ev_exts & set(exts)):
+                return param
+    return None
+
+
+def partition_applicable(suggestions: list, schema_map: dict,
+                         evidence: list[str] | None = None
+                         ) -> tuple[list[str], list[str]]:
+    """(kept, dropped): unknown tools, wrong-evidence namespaces, and
+    unfillable required params all drop — and the caller can SAY so."""
     ev_exts = {os.path.splitext(p)[1].lower() for p in (evidence or [])}
-    out = []
+    kept, dropped = [], []
     for s in suggestions:
         head = str(s).split()[0] if str(s).split() else ""
         if not head or dotted_to_wire(head) not in schema_map:
+            if head:
+                dropped.append(head)
             continue
         ns = head.split(".", 1)[0]
         if ev_exts and ns in _NS_EVIDENCE and not (ev_exts & _NS_EVIDENCE[ns]):
+            dropped.append(head)
             continue
-        out.append(str(s))
-    return out
+        if evidence and required_unfillable(head, schema_map, evidence):
+            dropped.append(head)
+            continue
+        kept.append(str(s))
+    return kept, dropped
+
+
+def filter_known(suggestions: list, schema_map: dict,
+                 evidence: list[str] | None = None) -> list[str]:
+    """Runnable suggestions only — see partition_applicable."""
+    return partition_applicable(suggestions, schema_map, evidence)[0]
 
 
 def _wants_array(prop: dict) -> bool:
@@ -592,7 +620,10 @@ def missing_required(tool_wire: str, args: dict, schema_map: dict) -> list[str]:
     props = schema.get("properties", {})
     out = []
     for param in schema.get("required", []):
-        if args.get(param) in (None, ""):
+        value = args.get(param)
+        placeholder = isinstance(value, str) and value.startswith("<") \
+            and value.endswith(">")
+        if value in (None, "") or placeholder:
             ptype = (props.get(param) or {}).get("type", "")
             out.append(f"{param}({ptype})" if ptype else param)
     return out
@@ -614,9 +645,11 @@ async def call_with_progress(client, tool: str, args: dict, label: str = "",
             if done:
                 break
             elapsed = int(time.monotonic() - start)
-            print(f"\r  … {label or tool} running {elapsed}s — a local "
-                  f"reason/DAIR backend can take minutes; ctrl+c cancels ",
-                  end="", flush=True)
+            why = ("a local reason/DAIR backend can take minutes"
+                   if tool.startswith(("reason_", "dair_"))
+                   else "long tool runs stream to the traced sidecar")
+            print(f"\r  … {label or tool} running {elapsed}s — {why}; "
+                  f"ctrl+c cancels ", end="", flush=True)
             ticked = True
     except (KeyboardInterrupt, asyncio.CancelledError):
         task.cancel()
@@ -728,8 +761,12 @@ async def run(stdio: bool = False) -> None:
                 return
             d = payload.get("directives")
             if isinstance(d, dict):
-                d["priority_tools"] = filter_known(
+                kept, dropped = partition_applicable(
                     d.get("priority_tools") or [], schema_map, evidence_paths)
+                d["priority_tools"] = kept
+                if dropped:
+                    print(f"{_YELLOW} dair suggested inapplicable tools, "
+                          f"dropped: {', '.join(dropped[:6])}{_RESET}")
             wo.apply_assess(state, payload, prefill=_prefill)
             rationale = payload.get("transition_rationale") or ""
             if rationale:

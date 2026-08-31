@@ -192,3 +192,25 @@ class TestBaseline:
         texts = [i.text for i in items]
         assert not any("knowns" in t for t in texts)
         assert texts[0].startswith("reason.hypothesize")
+
+
+class TestShakedownFixes:
+    def test_merge_never_readds_done_or_dismissed(self):
+        s = _state(items=[wo.WorkItem("net.tcpdump_list_connections x=1",
+                                      status="done"),
+                          wo.WorkItem("misc.evtx_filter", status="dismissed")])
+        added = wo.merge_directives(
+            s, ["net.tcpdump_list_connections", "misc.evtx_filter",
+                "net.tcpdump_extract_dns"])
+        assert added == 1
+        assert s.items[-1].text == "net.tcpdump_extract_dns"
+
+    def test_opening_summary_honest_mid_investigation(self):
+        s = _state()
+        s.items = [wo.WorkItem("net.tcpdump_read p=x", status="done")]
+        wo.record_ran(s, "net.tcpdump_read p=x", True, cid=1)
+        wo.apply_assess(s, {"directives": {}})  # resets ran, total stays
+        summary = wo.opening_summary(s)
+        assert "No new tool results" in summary
+        assert "net.tcpdump_read" in summary
+        assert "starting" not in summary.lower()

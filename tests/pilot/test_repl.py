@@ -471,3 +471,32 @@ class TestCoercion:
         from pilot.repl import coerce_args
         args = {"reference_set": ["already", "a list"]}
         assert coerce_args("no_such", dict(args), {}) == args
+
+
+class TestShakedownFixes:
+    def test_placeholder_values_flagged_as_missing(self):
+        """observed live: reason.plan ran with case_description=
+        '<state the case question>' and hallucinated a generic case."""
+        from pilot.repl import missing_required
+        schemas = {"reason_plan": {
+            "properties": {"case_description": {"type": "string"}},
+            "required": ["case_description"]}}
+        assert missing_required(
+            "reason_plan",
+            {"case_description": "<state the case question>"}, schemas) == \
+            ["case_description(string)"]
+
+    def test_partition_drops_unfillable_required_typed_params(self):
+        """observed live: misc.evtx_filter evtx_file= queued in a pcap-only
+        case — required evtx param, no evtx evidence."""
+        from pilot.repl import partition_applicable
+        schemas = {"misc_evtx_filter": {
+            "properties": {"evtx_file": {"type": "string"},
+                           "event_ids": {"type": "string"}},
+            "required": ["evtx_file"]},
+            "net_ngrep_search": {"properties": {}, "required": []}}
+        kept, dropped = partition_applicable(
+            ["misc.evtx_filter", "net.ngrep_search p=x"],
+            schemas, ["/e/n.pcap"])
+        assert kept == ["net.ngrep_search p=x"]
+        assert dropped == ["misc.evtx_filter"]

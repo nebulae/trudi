@@ -31,6 +31,7 @@ class SessionState:
     phase_stack: list[dict] = field(default_factory=list)
     items: list[WorkItem] = field(default_factory=list)
     ran: list[dict] = field(default_factory=list)   # calls since last assess
+    total_ran: int = 0                              # calls this whole session
     nag_after: int = 6
     resumed: bool = False   # trace existed at boot (resumption contract)
     last_phase: str = ""    # DAIR's current_phase — display fallback only;
@@ -143,7 +144,11 @@ def merge_directives(state: SessionState, suggestions: list[str],
     """Append priority_tools from a reason.* result to the queue (Directive
     Binding: reason directives merge, DAIR replaces). Items whose tool is
     already open are not duplicated. Returns how many were added."""
-    open_heads = {i.text.split()[0] for i in state.items if i.status == "open"}
+    # dedupe against EVERY item — re-suggesting a DONE tool re-runs work
+    # (observed live: reason.plan re-suggested tcpdump_list_connections,
+    # identical rerun tripped the repeat gate), and a DISMISSED one was
+    # ruled out on purpose
+    open_heads = {i.text.split()[0] for i in state.items}
     added = 0
     for s in suggestions:
         head = str(s).split()[0] if str(s).split() else ""
@@ -172,6 +177,7 @@ def mark_done(state: SessionState, cmd: str) -> None:
 def record_ran(state: SessionState, cmd: str, ok: bool, cid=None,
                headline: str = "") -> None:
     state.ran.append({"cmd": cmd, "ok": ok, "cid": cid, "headline": headline})
+    state.total_ran += 1
     if ok:
         mark_done(state, cmd)
 
@@ -204,9 +210,17 @@ def build_situation(state: SessionState) -> str:
 
 def opening_summary(state: SessionState) -> str:
     """The tool_results_summary for an assess with no calls to summarize —
-    the contract's wording, nothing for the analyst to edit."""
-    if state.resumed:
+    the contract's wording, nothing for the analyst to edit. Mid-
+    investigation (work already done, just nothing since the last assess)
+    it must NOT claim the investigation is starting — that misleads DAIR
+    (observed live after a dismiss-then-assess)."""
+    if state.resumed and state.total_ran == 0:
         return "Resuming after interruption — re-establishing phase state."
+    if state.total_ran > 0:
+        done = [i.label.split()[0] for i in state.items if i.status == "done"]
+        recent = ", ".join(done[-8:]) or f"{state.total_ran} tools"
+        return (f"No new tool results since the last assess "
+                f"(completed so far: {recent}) — need the next work order.")
     return "Investigation starting — no tools run yet"
 
 
