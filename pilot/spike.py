@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
 import sys
 
@@ -141,6 +142,18 @@ async def run(stdio: bool = False) -> None:
     async with client:
         tools = await client.list_tools()
         completer = PilotCompleter(tools, build_alias_map())
+
+        # Session bootstrap (bookkeeping auto-runs; see pilot/bootstrap.py).
+        # Only in a prepared case dir — a bare spike run stays a playground.
+        from pilot.bootstrap import (bootstrap, is_case_dir, parse_case_md,
+                                     render_banner)
+        case_dir = os.environ.get("TRUDI_CASE_DIR") or os.getcwd()
+        if is_case_dir(case_dir):
+            info = parse_case_md(case_dir)
+            state = await bootstrap(client, info)
+            print(render_banner(info, state))
+        else:
+            print("(no case dir — playground session, nothing recorded)")
         print(f"TRUDI pilot (spike) — {len(tools)} tools, tab completes; "
               f"'tools <substr>' lists, 'schema ns.tool' shows params, 'exit' quits")
 
