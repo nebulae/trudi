@@ -160,6 +160,43 @@ else
 fi
 
 
+# ── 1cd. trudi umbrella command ──────────────────────────────────────────────
+
+step "Installing trudi umbrella command"
+
+TRUDI_BIN_SRC="$TRUDI_DIR/bin/trudi"
+TRUDI_BIN_DEST="/usr/local/bin/trudi"
+
+if [ -f "$TRUDI_BIN_SRC" ]; then
+    if [ -L "$TRUDI_BIN_DEST" ] || [ -f "$TRUDI_BIN_DEST" ]; then
+        ok "trudi already installed at $TRUDI_BIN_DEST"
+    else
+        sudo install -m 0755 "$TRUDI_BIN_SRC" "$TRUDI_BIN_DEST" 2>/dev/null \
+            && ok "Installed trudi → $TRUDI_BIN_DEST" \
+            || warn "Could not install $TRUDI_BIN_DEST (sudo needed); use $TRUDI_BIN_SRC directly"
+    fi
+    echo "    Agent mode:       cd <case dir> && trudi --mode agent"
+    echo "    Pilot mode:       cd <case dir> && trudi --mode pilot"
+else
+    warn "trudi wrapper missing at $TRUDI_BIN_SRC"
+fi
+
+# vera (optional, pilot mode's record + UI). Library needs >=3.10; vera's CLI
+# needs python3.12 (PEP 701 f-strings) — the mirror works either way.
+if [ -d "$HOME/vera" ]; then
+    if python3 -c "import vera" 2>/dev/null; then
+        ok "vera importable (pilot mirror available)"
+    else
+        python3 -m pip install --user -e "$HOME/vera" 2>/dev/null \
+            && ok "Installed vera (editable) from ~/vera" \
+            || warn "vera present at ~/vera but pip install failed — pip >=23 needed for editable installs (python3 -m pip install --user --upgrade pip)"
+    fi
+else
+    echo "    vera not found at ~/vera — pilot mode runs without the .vera mirror."
+    echo "    To enable: git clone https://github.com/nebulae/vera ~/vera && python3 -m pip install --user -e ~/vera"
+fi
+
+
 # ── 1d. MITRE ATT&CK reference table ─────────────────────────────────────────
 
 step "Installing MITRE ATT&CK reference table"
