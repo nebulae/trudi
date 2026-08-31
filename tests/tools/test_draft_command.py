@@ -63,3 +63,27 @@ class TestAdvise:
         out, _ = self._call({"success": True, "conclusion": "Check the DNS traffic.",
                              "result_block": None})
         assert out["advice"] == "Check the DNS traffic."
+
+
+class TestSalvage:
+    def test_commands_salvaged_from_prose(self):
+        prose = (
+            "1) Extract HTTP traffic from the PCAP\n"
+            "net.tcpdump_extract_http pcap_file=/e/n.pcap output_path=analysis/http.txt\n"
+            "\nThis gives you the raw pairs. Then:\n"
+            "- `net.ngrep_search pcap_path=/e/n.pcap pattern=Cookie`\n"
+            "You could also try net.tcpdump_read inline in a sentence.\n")
+        out, _ = _call({"success": True, "conclusion": prose,
+                        "result_block": None})
+        assert [c["command"] for c in out["candidates"]] == [
+            "net.tcpdump_extract_http pcap_file=/e/n.pcap output_path=analysis/http.txt",
+            "net.ngrep_search pcap_path=/e/n.pcap pattern=Cookie"]
+        assert all(c["why"] == "salvaged from prose" for c in out["candidates"])
+
+    def test_result_block_wins_over_salvage(self):
+        out, _ = _call({"success": True,
+                        "conclusion": "tsk.fls image=/x other=1\n",
+                        "result_block": {"candidates": [
+                            {"command": "read.output path=x.csv", "why": "w"}]}})
+        assert [c["command"] for c in out["candidates"]] == [
+            "read.output path=x.csv"]

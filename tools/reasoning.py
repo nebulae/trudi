@@ -4552,6 +4552,27 @@ def reason_pre_report_check() -> dict:
 
 # ── task → command drafting (pilot assistance) ───────────────────────────────
 
+# A runnable command on its own line inside prose: optional list prefix,
+# ns.tool, at least one key=value (a bare tool mention in a sentence is not
+# a command). Local models often ignore the RESULT block but still write
+# the command — salvage it rather than discarding the answer.
+_DRAFT_CMD_LINE = re.compile(
+    r"^\s*(?:[-*]\s*|\d+[).]\s*)?`?"
+    r"([a-z][a-z0-9]*\.[a-z0-9_]+(?:\s+[A-Za-z0-9_]+=[^\s`]+)+)`?\s*$")
+
+
+def _salvage_commands(text: str) -> list[dict]:
+    seen, out = set(), []
+    for line in (text or "").splitlines():
+        m = _DRAFT_CMD_LINE.match(line)
+        if m and m.group(1) not in seen:
+            seen.add(m.group(1))
+            out.append({"command": m.group(1), "why": "salvaged from prose"})
+    return out
+
+
+
+
 _DRAFT_COMMAND_SYS = (
     "You draft TRUDI MCP commands for a human DFIR analyst. Given a TASK in "
     "plain English, the AVAILABLE TOOLS (name, purpose, parameters), and "
@@ -4598,6 +4619,10 @@ def reason_draft_command(task: str, tool_briefs: str, context: str = "",
         if isinstance(c, dict) and str(c.get("command", "")).strip():
             candidates.append({"command": str(c["command"]).strip(),
                                "why": str(c.get("why", "")).strip()[:200]})
+    if not candidates:
+        # local models often answer in prose with the command embedded on
+        # its own line — salvage instead of discarding (observed live twice)
+        candidates = _salvage_commands(result.get("conclusion", ""))
     result["candidates"] = candidates[:5]
     return result
 

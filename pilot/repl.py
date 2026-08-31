@@ -624,6 +624,7 @@ async def run(stdio: bool = False) -> None:
         async def do_task(task_text: str) -> list[dict]:
             """Draft commands for a plain-English task via the reason
             backend; returns validated candidates."""
+            nonlocal last_payload
             listing = ", ".join(sorted(os.listdir("analysis"))[:15]) \
                 if os.path.isdir("analysis") else ""
             context = (f"case: {state.case_context}\n"
@@ -640,6 +641,7 @@ async def run(stdio: bool = False) -> None:
                      "input_call_ids": wo.ran_cids(state)},
                     label="reason.draft_command")
                 payload = result.structured_content or {}
+                last_payload = payload
             except KeyboardInterrupt:
                 return []
             except Exception as e:
@@ -648,9 +650,18 @@ async def run(stdio: bool = False) -> None:
             good = validate_candidates(payload.get("candidates") or [],
                                        schema_map)
             if not good:
+                # sometimes the honest answer IS prose (a question, or a task
+                # the tools can't do) — show it as an answer, not an error
                 concl = (payload.get("conclusion") or "").strip()
-                print(f"{_YELLOW}no runnable command drafted"
-                      f"{' — ' + concl[:300] if concl else ''}{_RESET}")
+                if concl:
+                    print(f" {_CYAN}drafter:{_RESET}")
+                    lines = concl.splitlines()
+                    for ln in lines[:20]:
+                        print(f"  {ln}")
+                    if len(lines) > 20:
+                        print(f"  {_YELLOW}… (`last` shows the rest){_RESET}")
+                else:
+                    print(f"{_YELLOW}no runnable command drafted{_RESET}")
             return good
 
         async def do_pick() -> list[str]:
