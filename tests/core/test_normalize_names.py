@@ -49,6 +49,25 @@ class TestLiveServerNames:
         import server
         assert asyncio.run(normalize_tool_names(server.NAMESPACES)) == 0
 
+    def test_import_inside_running_event_loop(self):
+        """The pilot REPL imports server from async code; a bare
+        asyncio.run() at import time raised RuntimeError there (observed
+        live on the spike's first interactive run). Fresh subprocess so the
+        import actually executes."""
+        import subprocess
+        import sys
+        code = (
+            "import asyncio\n"
+            "async def main():\n"
+            "    import server\n"
+            "    tools = {t.name for t in await server.mcp.list_tools()}\n"
+            "    assert 'tsk_mmls' in tools and 'tsk_tsk_mmls' not in tools\n"
+            "asyncio.run(main())\n"
+        )
+        r = subprocess.run([sys.executable, "-c", code],
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stderr[-800:]
+
 
 class TestRenameMechanics:
     @pytest.fixture()

@@ -16,6 +16,28 @@ names read from OLD traces, so replays and recorded cases keep working.
 """
 from __future__ import annotations
 
+import asyncio
+import threading
+
+
+def normalize_tool_names_sync(namespaces) -> int:
+    """Run the normalization pass from synchronous code — including module
+    import that happens INSIDE a running event loop (the pilot REPL and any
+    async client import server.py while their loop runs; asyncio.run() would
+    raise RuntimeError there). If a loop is running, the pass executes on a
+    short-lived thread with its own loop and we block until it finishes —
+    names must be final before the first list_tools."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(normalize_tool_names(namespaces))
+    result: list[int] = []
+    t = threading.Thread(
+        target=lambda: result.append(asyncio.run(normalize_tool_names(namespaces))))
+    t.start()
+    t.join()
+    return result[0]
+
 
 async def normalize_tool_names(namespaces) -> int:
     """Strip one redundant ``<ns>_`` prefix from each child tool's name.
