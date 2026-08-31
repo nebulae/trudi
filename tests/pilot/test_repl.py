@@ -35,6 +35,40 @@ class TestPathCompletion:
         assert complete_path("/no/such/dir/x") == []
 
 
+class TestCallProgress:
+    class _SlowClient:
+        def __init__(self, delay, result=None, exc=None):
+            self.delay, self.result, self.exc = delay, result, exc
+
+        async def call_tool(self, tool, args):
+            await asyncio.sleep(self.delay)
+            if self.exc:
+                raise self.exc
+            return self.result
+
+    def test_fast_call_prints_nothing(self, capsys):
+        from pilot.repl import call_with_progress
+        c = self._SlowClient(0.0, result="ok")
+        out = asyncio.run(call_with_progress(c, "t", {}, tick=0.2))
+        assert out == "ok"
+        assert capsys.readouterr().out == ""
+
+    def test_slow_call_ticks_elapsed(self, capsys):
+        from pilot.repl import call_with_progress
+        c = self._SlowClient(0.35, result="ok")
+        out = asyncio.run(call_with_progress(c, "dair_assess", {},
+                                             label="dair.assess", tick=0.1))
+        assert out == "ok"
+        printed = capsys.readouterr().out
+        assert "dair.assess running" in printed and "ctrl+c cancels" in printed
+
+    def test_exception_propagates(self):
+        from pilot.repl import call_with_progress
+        c = self._SlowClient(0.0, exc=RuntimeError("boom"))
+        with pytest.raises(RuntimeError):
+            asyncio.run(call_with_progress(c, "t", {}, tick=0.2))
+
+
 class TestLookAndFeel:
     def test_enter_with_selected_completion_accepts_not_submits(self):
         """The reported glitch: Enter mid-menu executed the half-finished

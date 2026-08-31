@@ -294,6 +294,35 @@ def print_result(payload) -> None:
         print(text)
 
 
+async def call_with_progress(client, tool: str, args: dict, label: str = "",
+                             tick: float = 5.0):
+    """call_tool with a heartbeat: silent awaits look like a frozen REPL
+    (observed live: dair.assess on a local backend, minutes of nothing).
+    Prints an elapsed counter every `tick` seconds; ctrl+c cancels the call
+    and re-raises so the caller can abandon the step."""
+    import time
+    task = asyncio.ensure_future(client.call_tool(tool, args))
+    start = time.monotonic()
+    ticked = False
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=tick)
+            if done:
+                break
+            elapsed = int(time.monotonic() - start)
+            print(f"\r  … {label or tool} running {elapsed}s — a local "
+                  f"reason/DAIR backend can take minutes; ctrl+c cancels ",
+                  end="", flush=True)
+            ticked = True
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        task.cancel()
+        print("\n  cancelled")
+        raise KeyboardInterrupt
+    if ticked:
+        print()
+    return task.result()
+
+
 # ── the loop ─────────────────────────────────────────────────────────────────
 
 async def run(stdio: bool = False) -> None:
@@ -349,14 +378,17 @@ async def run(stdio: bool = False) -> None:
                 "Investigation starting — no tools run yet"
             summary = (await session.prompt_async(
                 [("class:key", "summary> ")], default=draft)).strip() or draft
+            print("  calling dair.assess…", flush=True)
             try:
-                result = await client.call_tool("dair_assess", {
+                result = await call_with_progress(client, "dair_assess", {
                     "tool_results_summary": summary,
                     "phase_stack": wo.phase_stack_json(state),
                     "case_context": state.case_context,
                     "input_call_ids": wo.ran_cids(state),
-                })
+                }, label="dair.assess")
                 payload = result.structured_content or {}
+            except KeyboardInterrupt:
+                return
             except Exception as e:
                 print(f"{_RED}assess failed: {e}{_RESET}")
                 return
@@ -464,7 +496,8 @@ async def run(stdio: bool = False) -> None:
                 print(f"{_YELLOW}parse error: {e}{_RESET}")
                 continue
             try:
-                result = await client.call_tool(tool, args)
+                result = await call_with_progress(client, tool, args,
+                                                  label=line.split()[0])
                 payload = result.structured_content
                 print_result(payload)
                 ok = isinstance(payload, dict) and payload.get("success", True)
@@ -474,6 +507,8 @@ async def run(stdio: bool = False) -> None:
                     print(f"{_YELLOW}{len(state.ran)} tools since the last "
                           f"assess — type `assess` to get the next work "
                           f"order{_RESET}")
+            except KeyboardInterrupt:
+                continue
             except Exception as e:
                 print(f"{_RED}error: {e}{_RESET}")
                 wo.record_ran(state, line, False)
