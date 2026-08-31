@@ -4581,7 +4581,10 @@ _DRAFT_COMMAND_SYS = (
     "Command syntax: ns.tool key=value key2=\"value with spaces\" — one line "
     "per command, concrete values only (real paths from CONTEXT, never "
     "placeholders like <path>). Use ONLY tools and parameters listed in "
-    "AVAILABLE TOOLS — never invent either. For questions about a produced "
+    "AVAILABLE TOOLS — never invent either. Match tools to the evidence "
+    "types the CONTEXT says are present: a pcap is not a disk image — never "
+    "suggest EWF/registry/memory/BitLocker tools when that evidence type is "
+    "absent. For questions about a produced "
     "CSV/JSON file prefer read.output with query/columns/where. The analyst "
     "selects and edits before anything runs — when two tools could work, "
     "offer both, best first." + result_instruction(

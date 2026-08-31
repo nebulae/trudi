@@ -357,3 +357,34 @@ class TestFilterKnown:
         assert filter_known(
             ["hash.file", "sha256sum", "net.ngrep_search pattern=x", ""],
             schema_map) == ["hash.file", "net.ngrep_search pattern=x"]
+
+
+class TestEvidenceTypeAwareness:
+    def test_typed_param_with_no_matching_evidence_stays_empty(self):
+        """observed live: guess handed nitroba.pcap to ewf.info's image= —
+        a strongly-typed param must stay empty rather than take the wrong
+        evidence type."""
+        from pilot.repl import guess_value
+        pcap_only = ["/e/nitroba.pcap"]
+        assert guess_value("image", {}, pcap_only) == ""
+        assert guess_value("memory_image", {}, pcap_only) == ""
+        assert guess_value("pcap_path", {}, pcap_only) == "/e/nitroba.pcap"
+        # generic pathy params keep the fallback
+        assert guess_value("file_path", {}, pcap_only) == "/e/nitroba.pcap"
+
+    def test_briefs_demote_wrong_evidence_namespaces(self, live_completer):
+        import asyncio as _a
+        from fastmcp import Client
+        import server
+        from pilot.repl import build_tool_briefs
+
+        async def get_tools():
+            async with Client(server.mcp) as c:
+                return await c.list_tools()
+        tools = _a.run(get_tools())
+        briefs = build_tool_briefs(
+            "what should i run to collect the baseline info",
+            tools, evidence=["/e/nitroba.pcap"])
+        assert "net." in briefs                       # pcap tools rank in
+        for wrong in ("ewf.", "vol.", "img.bde"):     # image/memory tools out
+            assert wrong not in briefs, wrong

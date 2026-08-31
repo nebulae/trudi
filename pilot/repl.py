@@ -353,23 +353,45 @@ def print_result(payload, verbose: bool = False) -> None:
 _BRIEF_LIMIT = 12
 
 
-def build_tool_briefs(task: str, tools: list, limit: int = _BRIEF_LIMIT) -> str:
+# evidence-typed namespaces: which evidence extensions make them relevant.
+# A namespace listed here is boosted when matching evidence exists and
+# demoted hard when it does not — ewf/vol/tsk against a pcap-only case is
+# how the drafter suggested BitLocker checks on nitroba.pcap.
+_NS_EVIDENCE = {
+    "net": {".pcap", ".pcapng"},
+    "vol": {".mem", ".vmem", ".lime", ".dmp"},
+    "ewf": {".e01", ".e02", ".ex01", ".aff"},
+    "tsk": {".e01", ".e02", ".ex01", ".dd", ".raw", ".img", ".vmdk",
+            ".vhd", ".vhdx"},
+    "img": {".e01", ".e02", ".dd", ".raw", ".img", ".vmdk", ".vhd", ".vhdx"},
+}
+
+
+def build_tool_briefs(task: str, tools: list, evidence: list[str] | None = None,
+                      limit: int = _BRIEF_LIMIT) -> str:
     """Lexical retrieval over the catalog: score tools by task-word overlap
-    with name+description, return the top briefs (name, purpose, params) so
-    the reason backend sees a dozen relevant schemas, not 278."""
+    with name+description+params, boosted/demoted by whether the tool's
+    evidence type is actually present in the case, so the reason backend
+    sees a dozen RELEVANT schemas, not 278."""
     stop = {"the", "all", "and", "for", "from", "into", "with", "that",
             "this", "then", "them", "have", "what", "each", "another",
             "pull", "get", "show", "give"}
     words = {w for w in re.split(r"[^a-z0-9]+", task.lower())
              if len(w) > 2 and w not in stop}
+    ev_exts = {os.path.splitext(p)[1].lower() for p in (evidence or [])}
     scored = []
     for t in tools:
         desc = (t.description or "").split("\n")[0]
         params = " ".join((t.inputSchema or {}).get("properties", {}))
         hay = f"{t.name} {desc} {params}".lower()
         score = sum(1 for w in words if w in hay)
+        ns = t.name.split("_", 1)[0]
+        if ev_exts and ns in _NS_EVIDENCE:
+            score += 3 if ev_exts & _NS_EVIDENCE[ns] else -5
         scored.append((score, t.name, desc, t.inputSchema or {}))
     scored.sort(key=lambda s: (-s[0], s[1]))
+    if ev_exts:
+        scored = [s for s in scored if s[0] >= 0]
     briefs = []
     for score, name, desc, schema in scored[:limit]:
         props = schema.get("properties", {})
@@ -410,7 +432,10 @@ _EXT_HINTS = (
 
 def guess_value(param: str, prop: dict, evidence: list[str]) -> str:
     """Best-effort default for a required param: schema default first, then
-    an evidence path whose extension matches what the name suggests."""
+    an evidence path whose extension matches what the name suggests. A
+    strongly-typed param (image/pcap/mem) with NO matching evidence stays
+    empty — never hand a pcap to an `image=` param (observed live: ewf.info
+    against nitroba.pcap, guaranteed failure)."""
     if "default" in prop and prop["default"] not in (None, ""):
         return str(prop["default"])
     low = param.lower()
@@ -420,6 +445,7 @@ def guess_value(param: str, prop: dict, evidence: list[str]) -> str:
                 for path in evidence:
                     if os.path.splitext(path)[1].lower() in exts:
                         return path
+                return ""  # typed param, no evidence of that type
         return evidence[0]
     return ""
 
@@ -627,7 +653,12 @@ async def run(stdio: bool = False) -> None:
             nonlocal last_payload
             listing = ", ".join(sorted(os.listdir("analysis"))[:15]) \
                 if os.path.isdir("analysis") else ""
-            context = (f"case: {state.case_context}\n"
+            ev_types = ", ".join(sorted({os.path.splitext(p)[1].lstrip(".")
+                                        or "?" for p in evidence_paths})) \
+                or "none"
+            context = (f"evidence types present: {ev_types} — ONLY suggest "
+                       f"tools that operate on these\n"
+                       f"case: {state.case_context}\n"
                        f"evidence files: {', '.join(evidence_paths) or '(none)'}\n"
                        f"produced output in analysis/: {listing or '(none)'}\n"
                        f"cwd: {os.getcwd()}")
@@ -636,7 +667,8 @@ async def run(stdio: bool = False) -> None:
                 result = await call_with_progress(
                     client, "reason_draft_command",
                     {"task": task_text,
-                     "tool_briefs": build_tool_briefs(task_text, tools),
+                     "tool_briefs": build_tool_briefs(task_text, tools,
+                                                      evidence_paths),
                      "context": context,
                      "input_call_ids": wo.ran_cids(state)},
                     label="reason.draft_command")
@@ -881,7 +913,8 @@ async def run(stdio: bool = False) -> None:
                     print(f"{_YELLOW}{len(state.ran)} tools since the last "
                           f"assess — type `assess` to get the next work "
                           f"order{_RESET}")
-                if queued:
+                if ok and queued:
+                    # a FAILED call keeps the queue put — fix and retry
                     pending_default = queued.pop(0)
                     print(f"  {_CYAN}next queued item prefilled "
                           f"({len(queued)} left){_RESET}")
