@@ -18,11 +18,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shlex
 import sys
 
 from fastmcp import Client
 from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.filters import completion_is_selected
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.styles import Style
 
 
 # ── command-line parsing ─────────────────────────────────────────────────────
@@ -87,7 +92,7 @@ def shell_guard(cmd: str) -> str | None:
 def run_shell(cmd: str) -> None:
     denied = shell_guard(cmd)
     if denied:
-        print(denied)
+        print(_YELLOW + denied + _RESET)
         return
     import subprocess
     if cmd.split()[0] == "ll":
@@ -199,6 +204,96 @@ class PilotCompleter(Completer):
                     yield Completion(hit, start_position=-len(current))
 
 
+# ── look & feel ──────────────────────────────────────────────────────────────
+
+PILOT_STYLE = Style.from_dict({
+    "prompt": "bold fg:ansicyan",
+    "ns": "bold fg:ansiblue",
+    "tool": "fg:ansicyan",
+    "key": "fg:ansigreen",
+    "shell": "fg:ansimagenta",
+    "builtin": "bold",
+})
+
+_RED = "\x1b[31m"
+_YELLOW = "\x1b[33m"
+_GREEN = "\x1b[32m"
+_RESET = "\x1b[0m"
+
+_BUILTINS = {"tools", "schema", "exit", "quit"}
+
+
+def make_key_bindings() -> KeyBindings:
+    """Enter with a highlighted completion ACCEPTS it and keeps editing;
+    Enter otherwise submits. This is the fix for the classic prompt_toolkit
+    footgun where Enter mid-menu executes the half-finished command."""
+    kb = KeyBindings()
+
+    @kb.add("enter", filter=completion_is_selected)
+    def _accept_completion(event):
+        event.current_buffer.complete_state = None
+
+    return kb
+
+
+def classify_line(line: str) -> list[tuple[str, str]]:
+    """Style fragments for one input line (the PilotLexer body)."""
+    stripped = line.lstrip()
+    first = stripped.split()[0] if stripped.split() else ""
+    if stripped.startswith("!") or first in NAV_COMMANDS or first in ("cd", "pwd"):
+        return [("class:shell", line)]
+    if first in _BUILTINS:
+        head = line[: line.index(first) + len(first)]
+        return [("class:builtin", head), ("", line[len(head):])]
+
+    frags: list[tuple[str, str]] = []
+    pos = 0
+    for m in re.finditer(r"\S+", line):
+        if m.start() > pos:
+            frags.append(("", line[pos:m.start()]))
+        tok = m.group(0)
+        if not frags or all(s == "" for s, _ in frags):  # first token
+            if "." in tok:
+                ns, rest = tok.split(".", 1)
+                frags += [("class:ns", ns), ("", "."), ("class:tool", rest)]
+            else:
+                frags.append(("", tok))
+        elif "=" in tok:
+            key, val = tok.split("=", 1)
+            frags += [("class:key", key), ("", "=" + val)]
+        else:
+            frags.append(("", tok))
+        pos = m.end()
+    if pos < len(line):
+        frags.append(("", line[pos:]))
+    return frags
+
+
+class PilotLexer(Lexer):
+    def lex_document(self, document):
+        lines = document.lines
+
+        def get_line(lineno):
+            return classify_line(lines[lineno])
+        return get_line
+
+
+def print_result(payload) -> None:
+    """Colored JSON when pygments is available; a ✓/✗ headline either way."""
+    ok = isinstance(payload, dict) and payload.get("success", True)
+    cid = isinstance(payload, dict) and payload.get("_trudi_call_id")
+    head = f"{_GREEN}✓{_RESET}" if ok else f"{_RED}✗{_RESET}"
+    print(f"{head} cid {cid}" if cid else head)
+    text = json.dumps(payload, indent=2, default=str)[:4000]
+    try:
+        from pygments import highlight
+        from pygments.formatters import TerminalFormatter
+        from pygments.lexers import JsonLexer
+        print(highlight(text, JsonLexer(), TerminalFormatter()), end="")
+    except ImportError:
+        print(text)
+
+
 # ── the loop ─────────────────────────────────────────────────────────────────
 
 async def run(stdio: bool = False) -> None:
@@ -228,7 +323,17 @@ async def run(stdio: bool = False) -> None:
               f"shows params, ls/cd/!cmd navigate, 'exit' quits")
 
         from prompt_toolkit import PromptSession
-        session = PromptSession("trudi> ", completer=completer)
+        from prompt_toolkit.shortcuts import CompleteStyle
+        session = PromptSession(
+            [("class:prompt", "trudi> ")],
+            completer=completer,
+            complete_while_typing=True,
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            key_bindings=make_key_bindings(),
+            style=PILOT_STYLE,
+            lexer=PilotLexer(),
+            reserve_space_for_menu=6,
+        )
 
         while True:
             try:
@@ -277,21 +382,20 @@ async def run(stdio: bool = False) -> None:
             if "." not in first:
                 # not an MCP tool: a bare forensic binary gets the same
                 # coaching the agent gets; anything else, a pointer.
-                print(shell_guard(line) or
+                print(_YELLOW + (shell_guard(line) or
                       f"unknown command {first!r} — MCP tools are ns.tool "
-                      f"(tab completes); prefix shell with !")
+                      f"(tab completes); prefix shell with !") + _RESET)
                 continue
             try:
                 tool, args = parse_command(line)
             except ValueError as e:
-                print(f"parse error: {e}")
+                print(f"{_YELLOW}parse error: {e}{_RESET}")
                 continue
             try:
                 result = await client.call_tool(tool, args)
-                payload = result.structured_content
-                print(json.dumps(payload, indent=2, default=str)[:4000])
+                print_result(result.structured_content)
             except Exception as e:
-                print(f"error: {e}")
+                print(f"{_RED}error: {e}{_RESET}")
 
 
 if __name__ == "__main__":
