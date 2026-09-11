@@ -113,7 +113,13 @@ COMPAT_THINKING_GUIDANCE = _resolve_thinking_guidance(
 # every DAIR call risks tripping that.
 #   TRUDI_COMPAT_NO_THINK_TOOLS  comma list of tool names; unset → default
 #                                below; "none"/"off"/"0" → thinking everywhere.
-#   TRUDI_COMPAT_NO_THINK_MODE   kwargs | soft | both (default both).
+#   TRUDI_COMPAT_NO_THINK_MODE   kwargs | soft | both | effort (default both).
+#                                `effort` sends `reasoning: {"effort": "none"}`
+#                                — the switch Ollama's OpenAI-compatible
+#                                endpoint honours (it ignores
+#                                chat_template_kwargs and the /no_think
+#                                soft switch; verified 2026-09-11 on
+#                                deepseek-v4-flash:cloud and glm-5.3-flash:cloud).
 _DEFAULT_NO_THINK_TOOLS = (
     "dair_assess,reason_cite_check,reason_confidence_score,reason_audit_findings"
 )
@@ -131,7 +137,7 @@ def _resolve_no_think_tools(raw: str | None) -> frozenset[str]:
 COMPAT_NO_THINK_TOOLS = _resolve_no_think_tools(
     os.environ.get("TRUDI_COMPAT_NO_THINK_TOOLS"))
 COMPAT_NO_THINK_MODE = (os.environ.get("TRUDI_COMPAT_NO_THINK_MODE") or "both").strip().lower()
-if COMPAT_NO_THINK_MODE not in ("kwargs", "soft", "both"):
+if COMPAT_NO_THINK_MODE not in ("kwargs", "soft", "both", "effort"):
     COMPAT_NO_THINK_MODE = "both"
 
 
@@ -693,6 +699,10 @@ def _compat_chat(url: str, api_key: str, model: str, system: str, user: str,
             extra = {**extra, "chat_template_kwargs": ctk}
         if COMPAT_NO_THINK_MODE in ("soft", "both"):
             user = f"{user.rstrip()}\n/no_think"
+        if COMPAT_NO_THINK_MODE == "effort":
+            # Ollama (OpenAI-compat) — the only switch it honours; the
+            # template kwargs and /no_think are silently ignored there.
+            extra = {**extra, "reasoning": {"effort": "none"}}
         budget = max_tokens
         max_attempts = 1
     budget = min(budget, COMPAT_MAX_TOKENS_CEILING) if COMPAT_MAX_TOKENS_CEILING > 0 else budget
