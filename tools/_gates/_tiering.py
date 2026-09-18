@@ -26,7 +26,15 @@ from typing import Iterable
 
 import yaml
 
+from tools import _fk
+
 from ._evidence_calls import is_evidence_tool_call, read_target_path
+
+
+def _tool_id(name: str) -> str:
+    """Canonical MCP tool id: lowercase, '.'→'_', namespace de-doubled
+    ('strings.grep' / 'strings_grep' / 'strings_strings_grep' → 'strings_grep')."""
+    return _fk.normalize_tool_name(str(name or "").strip().lower().replace(".", "_"))
 
 TIERING_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "fk" / "tiering.yaml"
 _RANK = {"CONFIRMED": 3, "LIKELY": 2, "SUSPECTED": 1, "UNCONFIRMED": 0}
@@ -67,6 +75,12 @@ def load_contract() -> dict:
         spec = dict(spec or {})
         spec["_cmd"] = re.compile(spec["cmd"], re.IGNORECASE) if spec.get("cmd") else None
         spec["_text"] = re.compile(spec["text"], re.IGNORECASE) if spec.get("text") else None
+        # `mcp_tools`: MCP tools whose run ALONE carries the class, matched on
+        # the entry's mcp_tool stamp (tool identity, not a cmd-line guess).
+        # Deliberately separate from `tools` (the advisory producer list):
+        # classes proven by a marker or by output text (logon_session,
+        # transfer, unix_shell_history …) must not be granted by tool name.
+        spec["_tool_ids"] = frozenset(_tool_id(t) for t in (spec.get("mcp_tools") or []))
         compiled[cid] = spec
     data["classes"] = compiled
     groups = dict(data.get("groups") or {})
@@ -105,11 +119,15 @@ def classify_entry(entry: dict) -> set[str]:
     if not is_evidence_tool_call(entry):
         return set()
     cmd = str(entry.get("cmd") or "")
+    mcp_tool = _tool_id(entry.get("mcp_tool") or "")
     text = None
     out: set[str] = set()
     for cid, spec in load_contract()["classes"].items():
         marker = spec.get("marker")
         if marker and entry.get(marker):
+            out.add(cid)
+            continue
+        if mcp_tool and mcp_tool in spec.get("_tool_ids", ()):
             out.add(cid)
             continue
         rx = spec.get("_cmd")

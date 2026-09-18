@@ -282,6 +282,59 @@ class TestToolBodyExceptionCapture:
         assert len([e for e in new_entries
                     if e.get("type") == "tool_call"]) == 1
 
+    def test_call_initiated_progress_entry_still_gets_baseline(self, tmp_path):
+        """hash_directory writes a `call_initiated` progress entry up front and
+        nothing else. That growth is not self-logging: without a baseline the
+        tool left NO tool_call — uncitable, and read as never-run by the
+        work-order gate (the KOSOWSKI-2026 stall)."""
+        from core.middleware import NarrationMiddleware
+
+        l = _configured_log(tmp_path)
+        l.record_dair_call("Collect", "", False, "", "", "stay", "")
+        before_len = len(l._entries)
+        mw = NarrationMiddleware()
+        ctx = _build_context("hash_directory", {"directory": "/evidence"})
+
+        async def _progress_only(_ctx):
+            l.record_call_initiated("hash_directory", "in-process", {"directory": "/evidence"})
+            return {"success": True, "file_count": 3}
+
+        with patch("core.execution_log.log", l):
+            _run_async(mw.on_call_tool(ctx, _progress_only))
+
+        calls = [e for e in l._entries[before_len:] if e.get("type") == "tool_call"]
+        assert [e["cmd"] for e in calls] == ["<py>:hash_directory"]
+        assert calls[0]["success"] is True
+
+    def test_tool_call_entries_are_stamped_with_mcp_tool(self, tmp_path):
+        """A subprocess tool's cmd is the binary line ('strings -a -n 4 …'),
+        which never names the MCP tool. The entry records the tool identity
+        as mcp_tool so gates can tell which tool ran; the stamp is cleared
+        after the call."""
+        from core.execution_log import current_mcp_tool
+        from core.middleware import NarrationMiddleware
+
+        l = _configured_log(tmp_path)
+        l.record_dair_call("Collect", "", False, "", "", "stay", "")
+        before_len = len(l._entries)
+        mw = NarrationMiddleware()
+        ctx = _build_context("strings_grep", {"file_path": "/x", "pattern": "y"})
+
+        async def _subprocess_tool(_ctx):
+            l.record_tool_call("strings -a -n 4 /evidence/day1.md", True, False, 0, 0)
+            return {"success": True}
+
+        with patch("core.execution_log.log", l):
+            _run_async(mw.on_call_tool(ctx, _subprocess_tool))
+
+        e = [x for x in l._entries[before_len:] if x.get("type") == "tool_call"][0]
+        assert e["cmd"].startswith("strings -a")
+        assert e["mcp_tool"] == "strings_grep"
+        assert current_mcp_tool.get() == ""
+        # outside any MCP call, no stamp
+        l.record_tool_call("stray cmd", True, False, 0, 0)
+        assert "mcp_tool" not in l._entries[-1]
+
     def test_tool_error_passes_through_unmodified(self, tmp_path):
         """ToolError already carries structured info; don't double-wrap or
         emit a duplicate tool_call entry for it."""

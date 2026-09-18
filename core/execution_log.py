@@ -1,4 +1,5 @@
 """Execution trace log — records tool calls, reason calls, and findings per case."""
+import contextvars
 import fcntl
 import json
 import os
@@ -23,6 +24,15 @@ _TRACE_FSYNC = os.environ.get("TRUDI_TRACE_FSYNC", "1") != "0"
 # Shared call_id counter — single monotonic sequence across MCP server + hook
 # so call_ids are dense and reflect global write order.
 _CALL_ID_COUNTER_FILE = os.path.expanduser("~/.cache/trudi/call_id.counter")
+
+# The MCP tool whose handler is running (set by core.middleware around each
+# call). record_tool_call stamps it on the entry as `mcp_tool`, because a
+# subprocess tool's `cmd` is the executed binary line ('strings -a -n 4 …',
+# 'dotnet EvtxECmd.dll …'), which often shares no keyword with the tool name.
+# Gates that ask "did tool X run?" or "what artifact class is this?" need the
+# tool identity, not a guess from the command line.
+current_mcp_tool: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "trudi_current_mcp_tool", default="")
 
 
 @contextmanager
@@ -1284,6 +1294,9 @@ class ExecutionLog:
                 "elapsed_seconds": elapsed_seconds,
                 "stderr": stderr[:512] if stderr else "",
             }
+            _mcp_tool = current_mcp_tool.get()
+            if _mcp_tool:
+                entry["mcp_tool"] = _mcp_tool
             if timed_out:
                 entry["timed_out"] = True
             if stdout_excerpt:

@@ -505,7 +505,15 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
         return
     try:
         from core.execution_log import log
-        if len(log._entries) == entries_before:
+        # Self-logged = the call wrote a real record. A `call_initiated`
+        # progress entry (long in-process tools like hash_directory write one
+        # up front) is not a completion record: counting it as self-logging
+        # left those tools with no tool_call at all — uncitable, and read as
+        # never-run by the work-order gate.
+        new_entries = log._entries[entries_before:]
+        self_logged = any(isinstance(e, dict) and e.get("type") != "call_initiated"
+                          for e in new_entries)
+        if not self_logged:
             payload = _result_payload(result) or {}
             ok = payload.get("success", True) is not False
             err = "" if ok else str(payload.get("error") or "")[:512]
@@ -618,26 +626,40 @@ class NarrationMiddleware(Middleware):
 
         start = time.perf_counter()
 
+        # Tool identity for the trace: record_tool_call stamps it as mcp_tool.
         try:
-            result = await call_next(context)
-        except ToolError:
-            raise
-        except asyncio.CancelledError:
-            _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
-            raise
-        except Exception as e:
-            _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
-            if _is_input_validation(e):
-                # A typed refusal shape, like the gates: name the fields so the
-                # agent fixes the kwarg instead of guessing from a 500.
-                raise ToolError(
-                    f"{tool_name} rejected its input (gate: input_validation): "
-                    f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
-                ) from e
-            raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
+            from core.execution_log import current_mcp_tool as _cur_tool
+            _tool_token = _cur_tool.set(tool_name)
+        except Exception:
+            _cur_tool, _tool_token = None, None
 
-        _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
-                                entries_before, result)
+        try:
+            try:
+                result = await call_next(context)
+            except ToolError:
+                raise
+            except asyncio.CancelledError:
+                _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
+                raise
+            except Exception as e:
+                _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
+                if _is_input_validation(e):
+                    # A typed refusal shape, like the gates: name the fields so the
+                    # agent fixes the kwarg instead of guessing from a 500.
+                    raise ToolError(
+                        f"{tool_name} rejected its input (gate: input_validation): "
+                        f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
+                    ) from e
+                raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
+
+            _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
+                                    entries_before, result)
+        finally:
+            if _cur_tool is not None and _tool_token is not None:
+                try:
+                    _cur_tool.reset(_tool_token)
+                except Exception:
+                    pass
 
         # 4. Forensic-knowledge enrichment — adds interpretive context to the
         #    result (caveats, does_not_prove, field/exit-code meanings, generic

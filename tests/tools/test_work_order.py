@@ -237,3 +237,27 @@ class TestUnrunPriorityTools:
 
     def test_no_dair_directives_no_duty(self):
         assert wo.unrun_priority_tools([_call("dotnet MFTECmd.dll -f /x")]) == []
+
+    def test_tool_whose_cmd_never_names_it_is_recognized(self):
+        """KOSOWSKI-2026 stall: strings.grep runs `strings -a -n 4 <file>` and
+        hash.directory is in-process — neither cmd contains the signature
+        derived from the tool name ('grep', 'directory' only via <py>:), so
+        every dair_assess re-prescribed them and refused the transition."""
+        stamped = [
+            _dair(["strings.grep", "hash.directory"]),
+            {**_call("strings -a -n 4 /cases/k/evidence/transcripts/01_day-01.md"),
+             "mcp_tool": "strings_grep"},
+            {**_call("<py>:hash_directory"), "mcp_tool": "hash_directory"},
+        ]
+        assert wo.unrun_priority_tools(stamped) == []
+        assert wo.unrun_from_list(stamped, ["strings.grep", "hash.directory"]) == []
+
+    def test_old_unstamped_strings_run_is_recognized_by_alias(self):
+        entries = [_dair(["strings.grep(pattern='Tundra', path='/x')"]),
+                   _call("strings -a -n 4 /cases/k/evidence/transcripts/02_day-02.md")]
+        assert wo.unrun_priority_tools(entries) == []
+
+    def test_failed_stamped_run_does_not_count(self):
+        entries = [_dair(["strings.grep"]),
+                   {**_call("strings -a -n 4 /x", success=False), "mcp_tool": "strings_grep"}]
+        assert wo.unrun_from_list(entries, ["strings.grep"]) == ["strings.grep"]

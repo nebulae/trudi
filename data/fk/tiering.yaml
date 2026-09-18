@@ -118,7 +118,8 @@ classes:
     tools: [destination-side log via read.output, net.http_session_inventory (2xx), read.mail (250/DSN)]
     label: destination-side receipt
   mail_store:
-    cmd: 'readpst|pff_export|read\.read_mail|\.mbox\b|\.eml\b|\.pst\b|\.ost\b'
+    cmd: 'readpst|pff_export|read\.(read_)?mail\b|\.mbox\b|\.eml\b|\.pst\b|\.ost\b'
+    mcp_tools: [misc.readpst_extract, misc.pff_export, read.mail]
     tools: [misc.readpst_extract, misc.pff_export, read.mail]
     label: mail store message
   chat_store:
@@ -143,7 +144,14 @@ classes:
     tools: [vol.malfind, vol.hollowprocesses, vol.ldrmodules]
     label: memory injection / hooking record
   file_content:
-    cmd: 'strings_extract|strings_grep|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.read_output|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
+    # strings.grep / strings.extract record the executed binary ('strings -a -n
+    # 4 <file>'), strings.file_identify records 'file <path>', and read.output
+    # records 'read.output --output …' (the old 'read.read_output' spelling is
+    # kept for existing traces). The tool-name keywords never appear in those
+    # command lines, so match the recorded binary as well. New entries also
+    # carry mcp_tool, matched against `mcp_tools` in _tiering.classify_entry.
+    cmd: 'strings_extract|strings_grep|^strings\s|^file\s|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.(read_)?output\b|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
+    mcp_tools: [strings.grep, strings.extract, strings.hexdump, strings.xxd_dump, tsk.icat, read.output]
     tools: [strings.grep, tsk.icat, read.output, misc.capa_analyze]
     label: file content read
   hash_match:

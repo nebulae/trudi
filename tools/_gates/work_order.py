@@ -37,6 +37,10 @@ _BINARY_ALIASES = {
     "plaso_export_json":            "psort",
     "plaso_filter_incident_window": "psort",
     "plaso_info":                   "pinfo",
+    # strings.grep / strings.extract execute `strings -a -n N <file>` — the
+    # cmd never contains 'grep'/'extract' (entries without the mcp_tool stamp).
+    "strings_grep":                 "strings -a",
+    "strings_extract":              "strings -a",
 }
 
 
@@ -130,6 +134,23 @@ def _failed_tool_items(entries) -> list:
     return out
 
 
+def _succ_tool_ids(entries) -> list:
+    """Tool identities of successful calls: the reason/tool entry's `tool` and
+    the `mcp_tool` stamp record_tool_call adds. A subprocess tool's cmd is the
+    binary line ('strings -a -n 4 …' for strings.grep) and may share no keyword
+    with the tool name, so matching on cmd alone reads a tool that DID run as
+    never-run and stalls the phase on it forever."""
+    out = []
+    for e in entries or []:
+        if e.get("type") not in ("reason_call", "tool_call") or e.get("success") is False:
+            continue
+        for k in ("tool", "mcp_tool"):
+            v = str(e.get(k) or "")
+            if v:
+                out.append(_fk.normalize_tool_name(v.lower().replace(".", "_")))
+    return out
+
+
 def unrun_from_list(entries, tools) -> list:
     """Which of `tools` (a single priority_tools work order) were never run
     successfully anywhere nor typed-dispositioned — display names. Control-plane /
@@ -140,8 +161,7 @@ def unrun_from_list(entries, tools) -> list:
         return []
     succ_cmds = [(e.get("cmd") or "").lower() for e in entries
                  if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
-    succ_tools = [str(e.get("tool") or "").lower().replace(".", "_") for e in entries
-                  if e.get("type") in ("reason_call", "tool_call") and e.get("success") is not False]
+    succ_tools = _succ_tool_ids(entries)
     didx = index_from_entries(entries)
     out: list = []
     seen: set = set()
@@ -191,10 +211,9 @@ def unrun_priority_tools(entries) -> list:
         return []
     succ_cmds = [(e.get("cmd") or "").lower() for e in entries
                  if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
-    succ_tools = [str(e.get("tool") or "").lower().replace(".", "_") for e in entries
-                  if e.get("type") in ("reason_call", "tool_call") and e.get("success") is not False]
+    succ_tools = _succ_tool_ids(entries)
     didx = index_from_entries(entries)
-    missing = [disp for sig, disp in sorted(prescribed.items())
+    missing =[disp for sig, disp in sorted(prescribed.items())
                if not (any(sig in c for c in succ_cmds) or any(sig in t for t in succ_tools)
                        or tool_waived(didx, disp))]
     if not missing:

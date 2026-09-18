@@ -135,6 +135,33 @@ class TestArtifactClasses:
                stdout_excerpt="x" * 600, stdout_path=str(side))
         assert "transfer" in T.classify_entry(e)
 
+    def test_recorded_command_lines_of_content_reads_classify(self):
+        """The MCP wrappers record the EXECUTED command, not the tool name:
+        strings.grep/extract → 'strings -a -n 4 <file>', file_identify →
+        'file <path>', read.output → 'read.output --output …', read.mail →
+        'read.mail -o …'. None of these matched the old tool-name keywords, so
+        every transcript citation in a documentary case carried no class and
+        no finding could rise above SUSPECTED (KOSOWSKI-2026)."""
+        assert "file_content" in T.classify_entry(
+            _e(882, "strings -a -n 4 /cases/k/evidence/transcripts/01_day-01.md"))
+        assert "file_content" in T.classify_entry(_e(899, "file /cases/k/evidence/x.md"))
+        assert "file_content" in T.classify_entry(
+            _e(890, "read.output --output /cases/k/analysis/roster_patterns.json"))
+        assert "file_content" in T.classify_entry(
+            _e(891, "read.read_output --output /cases/k/analysis/x.csv"))   # old spelling
+        assert "mail_store" in T.classify_entry(_e(96, "read.mail -o /case/exports/mail/Inbox.mbox"))
+        # 'strings' or 'file' elsewhere in a command line is not a content read
+        assert "file_content" not in T.classify_entry(_e(97, "grep -c strings /x/profile.log"))
+
+    def test_mcp_tool_stamp_classifies_by_identity_only_where_declared(self):
+        s = _e(900, "some-wrapper --opaque", mcp_tool="strings_grep")
+        assert "file_content" in T.classify_entry(s)
+        assert "file_content" in T.classify_entry({**s, "mcp_tool": "strings_strings_grep"})
+        # A marker-proven class is never granted by tool name: an evtx_filter
+        # run without the session_artifact marker is not a logon/session record.
+        e = _e(901, "some-wrapper --opaque", mcp_tool="misc_evtx_filter")
+        assert "logon_session" not in T.classify_entry(e)
+
 
 # ── tier arithmetic on realistic evidence shapes ─────────────────────────────
 
