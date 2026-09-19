@@ -12,7 +12,7 @@ from core import (run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT, HASH_TIMEOUT
 mcp = FastMCP("hashing")
 
 
-# ── Hash cache (keyed by absolute path + size + mtime) ──────────────────────
+# ── Hash cache (keyed by path, size, nanosecond times and inode) ─────────────
 
 _HASH_CACHE_PATH = os.path.expanduser(
     os.environ.get("TRUDI_HASH_CACHE", "~/.cache/trudi/hash_cache.json")
@@ -47,7 +47,28 @@ def _save_hash_cache(cache: dict) -> None:
 
 
 def _cache_key(stat_result, abs_path: str) -> str:
-    return f"{abs_path}|{stat_result.st_size}|{int(stat_result.st_mtime)}"
+    return f"{abs_path}|{stat_result.st_size}|{stat_result.st_mtime_ns}|{stat_result.st_ctime_ns}|{stat_result.st_ino}"
+
+
+def _record_hash_result(result: dict, source_version: str) -> dict:
+    """Retain the typed hash result as evidence, rather than an invocation log."""
+    from core.execution_log import log
+    try:
+        path = os.path.abspath(result['file'])
+        stat = os.stat(path)
+    except OSError as exc:
+        return {'success': False, 'error': str(exc), 'file': result['file']}
+    if _cache_key(stat, path) != source_version:
+        return {'success': False, 'error': 'File changed while hashing; retry', 'file': result['file']}
+    version = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    payload = {k: result[k] for k in ('file', 'size_bytes', 'md5', 'sha1', 'sha256')}
+    cid = log.record_tool_call(cmd=f"hash.file {result['file']}", success=True,
+                               truncated=False, retries=0, exit_code=0,
+                               stdout_full=json.dumps(payload), stdout_excerpt=json.dumps(payload))
+    log.annotate_tool_call(cid, hash_result=payload, source_version=source_version,
+                           hashed_file_version=version,
+                           source_hashes={result['file']: result['sha256']})
+    return {**result, '_trudi_call_id': cid}
 
 
 @mcp.tool()
@@ -57,7 +78,7 @@ def hash_file(file_path: str) -> dict:
     """Compute MD5, SHA1, and SHA256 hashes of a file in one pass.
 
     Results are cached at TRUDI_HASH_CACHE (default ~/.cache/trudi/hash_cache.json)
-    keyed by absolute path + size + mtime. Cache hits are returned instantly
+    keyed by path, size, nanosecond modification/change times and inode. Cache hits are returned instantly
     with `cache_hit: True` for the audit trail.
     """
     try:
@@ -71,7 +92,7 @@ def hash_file(file_path: str) -> dict:
         cache = _load_hash_cache()
         hit = cache.get(key)
         if hit:
-            return {**hit, "cache_hit": True, "file": file_path}
+            return _record_hash_result({**hit, "cache_hit": True, "file": file_path}, key)
 
     try:
         md5 = hashlib.md5()
@@ -107,7 +128,7 @@ def hash_file(file_path: str) -> dict:
         _save_hash_cache(cache)
 
     result["cache_hit"] = False
-    return result
+    return _record_hash_result(result, key)
 
 
 _CACHED_ALGOS = ("md5", "sha1", "sha256")
