@@ -1,5 +1,6 @@
 """Tests for tools/misc.py."""
 import os
+from core.readiness import state_fingerprint
 import pytest
 from unittest.mock import patch
 
@@ -1499,7 +1500,8 @@ class TestExportRequiresPreReportCheck:
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_pre_report_check", True,
                              "READY_TO_REPORT: true\nBLOCKING_ISSUES (0): none", {},
-                             extra={"ready_to_report": True})
+                             extra={"ready_to_report": True,
+                                    "readiness_fingerprint": state_fingerprint(l._entries, l._case_id)})
         with patch("core.execution_log.log", l), \
              patch("tools.misc.assert_output_safe", lambda *a, **kw: None):
             r = export_execution_log(str(tmp_path / "out"))
@@ -1546,7 +1548,8 @@ class TestWriteFinalReportRequiresPreReportCheck:
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_pre_report_check", True,
                              "READY_TO_REPORT: true\nBLOCKING_ISSUES (0): none", {},
-                             extra={"ready_to_report": True})
+                             extra={"ready_to_report": True,
+                                    "readiness_fingerprint": state_fingerprint(l._entries, l._case_id)})
         out = tmp_path / "reports" / "report.md"
         with patch("core.execution_log.log", l):
             r = write_final_report(str(out), "# Report\n")
@@ -1554,9 +1557,8 @@ class TestWriteFinalReportRequiresPreReportCheck:
         assert out.read_text() == "# Report\n"
         assert r.get("_trudi_call_id")
 
-    def test_unresolved_synthesize_blockers_are_appended_as_limitations(self, tmp_path):
-        # H-6: pre_report demoted synthesize blockers ride into the report
-        # server-side; the agent cannot leave them out.
+    def test_adjudicated_limitations_are_appended(self, tmp_path):
+        # Adjudicated evidence limitations ride into the report server-side.
         from tools.misc import write_final_report
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
@@ -1564,6 +1566,7 @@ class TestWriteFinalReportRequiresPreReportCheck:
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_pre_report_check", True, "READY_TO_REPORT: true", {},
                              extra={"ready_to_report": True,
+                                    "readiness_fingerprint": state_fingerprint(l._entries, l._case_id),
                                     "synthesize_blockers_unresolved": ["Verification of X needed"]})
         out = tmp_path / "reports" / "report.md"
         with patch("core.execution_log.log", l):

@@ -102,6 +102,8 @@ class TestScopeInjection:
         import io
         from unittest.mock import MagicMock
         trace.record_tool_call("ewf.mount_full_image /ev/d.E01", True, False, 0, 0)
+        cid = trace.record_tool_call("read.output /ev/rows.txt", True, False, 0, 0,
+                                     stdout_full="Observed record", stdout_excerpt="Observed record")
         resp = MagicMock(); resp.raise_for_status = MagicMock()
         resp.json.return_value = {"choices": [{"finish_reason": "stop",
                                   "message": {"content": "VERDICT: SUPPORTED"}}],
@@ -114,7 +116,7 @@ class TestScopeInjection:
              patch.object(R, "REASON_MODEL", "m"), \
              patch.object(R, "COMPAT_NO_THINK_TOOLS", frozenset()), \
              patch("httpx.post", http):
-            R.reason_evaluate_finding("finding text", "evidence text", input_call_ids=[1])
+            R.reason_evaluate_finding("finding text", "evidence text", input_call_ids=[cid])
         sent = http.call_args[1]["json"]["messages"][1]["content"]
         assert "EVIDENCE COLLECTED THIS INVESTIGATION" in sent
         assert "network capture" in sent

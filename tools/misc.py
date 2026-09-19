@@ -3,6 +3,8 @@
 Also includes email-forensics, packer-detection, capability-analysis, Office-macro,
 Sigma-hunt, and batch-execution helpers.
 """
+from core.execution_log import trace_transaction
+from core.readiness import state_fingerprint
 import os
 import re
 import shutil
@@ -746,7 +748,7 @@ def _pre_report_ready_gate() -> dict | None:
     from core.execution_log import log
 
     pre_report_entry = None
-    pre_report_window = log._entries[-50:] if len(log._entries) > 50 else log._entries
+    pre_report_window = log._entries
     for e in reversed(pre_report_window):
         if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
             pre_report_entry = e
@@ -755,8 +757,7 @@ def _pre_report_ready_gate() -> dict | None:
         return {
             "success": False,
             "error": (
-                "refused: no reason.pre_report_check call found in the last "
-                "50 trace entries. Call reason.pre_report_check() after "
+                "refused: no reason.pre_report_check call found in the trace. Call reason.pre_report_check() after "
                 "reason.synthesize and resolve any blocking_issues before "
                 "exporting the trace or writing the final report."
             ),
@@ -788,6 +789,12 @@ def _pre_report_ready_gate() -> dict | None:
             "gate": "pre_report_check_required",
             "pre_report_conclusion": conclusion[:500],
         }
+    recorded = pre_report_entry.get("readiness_fingerprint")
+    current = state_fingerprint(log._entries, log._case_id)
+    if not recorded or recorded != current:
+        return {"success": False, "gate": "pre_report_check_required",
+                "error": "Report snapshot is missing or stale; run reason.pre_report_check again.",
+                "missing_check": "reason_pre_report_check"}
     return None
 
 @mcp.tool()
@@ -1193,6 +1200,55 @@ def record_disposition(
 
 @mcp.tool()
 @output_safe
+@trace_transaction
+def retract_finding(finding_call_id: int, reason: str, input_call_ids: list[int]) -> dict:
+    """Withdraw a current finding explicitly; retain the full audit history."""
+    from core.execution_log import log, _utcnow
+    from core.findings import active_findings
+    active = {e['call_id'] for e in active_findings(log._entries)}
+    if finding_call_id not in active or not reason.strip():
+        return {"success": False, "error": "Retraction needs a current finding and a reason"}
+    if not input_call_ids or any(cid not in log.index().by_call_id for cid in input_call_ids):
+        return {"success": False, "error": "Retraction needs real supporting call IDs"}
+    cid = log._next_id()
+    log._append_entry({"type": "finding_retracted", "call_id": cid, "ts": _utcnow(),
+                       "finding_call_id": finding_call_id, "reason": reason,
+                       "input_call_ids": input_call_ids})
+    return {"success": True, "_trudi_call_id": cid, "retracted": finding_call_id}
+
+
+@mcp.tool()
+@output_safe
+def submit_finding(description: str, confidence: str, input_call_ids: list[int],
+                   idempotency_key: str, claim: dict, source: str = "",
+                   linked_call_id: int = 0, tested_hypothesis_id: str = "",
+                   supersedes: int = 0, case_context: str = "",
+                   selectors: list[dict] | None = None) -> dict:
+    """Preflight, independently review and record one finding in one operation.
+
+    claim: the typed record_finding fields (claim_kind/category/act/entities,
+        scope/window, attribution and evidence IDs). No confidence downgrade.
+    input_call_ids: real evidence-producing calls; summaries are not evidence.
+    idempotency_key: stable unique key for this exact request; reuse on retries.
+    selectors: optional {call_id, path, start_byte, end_byte}; half-open byte
+        ranges within that call's output. Otherwise relevant lines are selected.
+    Returns status: recorded, needs-evidence, contradicted, invalid, or
+        retryable-review-failure; failures include concrete next actions.
+    """
+    from core.execution_log import log
+    from core.finding_submission import make_request, submit
+    from core.evidence_packets import PacketError
+    try:
+        request = make_request(description, confidence, input_call_ids, claim, source,
+                               linked_call_id, tested_hypothesis_id, supersedes, case_context)
+    except (PacketError, TypeError, ValueError) as exc:
+        return {"success": False, "status": "invalid", "error": str(exc)}
+    return submit(log, request, idempotency_key, selectors)
+
+
+@mcp.tool()
+@output_safe
+@trace_transaction
 def record_finding(
     description: str,
     confidence: str,
@@ -1328,6 +1384,12 @@ def record_finding(
         transfer_call_ids=transfer_call_ids, receipt_call_ids=receipt_call_ids,
         rule_outs=rule_outs, resolves=resolves, answers_case_question=answers_case_question)
 
+    from core.findings import validate_revision
+    try:
+        validate_revision(log._entries, supersedes, claim)
+    except ValueError as exc:
+        return {"success": False, "gate": "finding_revision", "error": str(exc)}
+
     ctx = GateContext(
         description=description,
         confidence=confidence,
@@ -1341,8 +1403,19 @@ def record_finding(
         input_call_ids=list(input_call_ids) if input_call_ids else [],
         supporting_evidence=supporting_evidence or "",
         claim=claim,
+        supersedes=supersedes,
     )
 
+    from core.finding_submission import submission_commit, receipt_matches
+    submission = submission_commit.get()
+    if submission:
+        review = log.index().by_call_id.get(submission['review_call_id'], {})
+        if any(e.get('gated_by_evaluate_call_id') == submission['review_call_id']
+               for e in log.index().by_type.get('finding', [])):
+            return {"success": False, "gate": "review_receipt", "error": "Review receipt already used by a finding"}
+        if not receipt_matches(ctx, review):
+            return {"success": False, "gate": "review_receipt", "error": "Exact claim/evidence review receipt missing or stale"}
+        ctx.review_call_id = submission['review_call_id']
     failure = run_gates(ctx)
     if failure is not None:
         # Refusal ledger — the single write site (record_agent_message delegates
@@ -1372,6 +1445,10 @@ def record_finding(
     # foreign key. The chain view, accuracy report, and synthesize all use
     # these directly instead of inferring links from user_message substrings.
     gate_metadata = {}
+    if submission:
+        gate_metadata.update({k: submission[k] for k in
+                              ('submission_key', 'submission_request_hash', 'evidence_packet_id')})
+        gate_metadata['gated_by_evaluate_call_id'] = submission['review_call_id']
     if ctx.gated_by_evaluate_call_id:
         gate_metadata["gated_by_evaluate_call_id"] = ctx.gated_by_evaluate_call_id
     if ctx.gated_by_confidence_call_id:
@@ -1396,7 +1473,7 @@ def record_finding(
         gate_metadata["tier_rule"] = ctx.tier_rule
         gate_metadata["artifact_classes"] = ctx.artifact_classes
 
-    log.record_finding(
+    finding_cid = log.record_finding(
         description, confidence, source, linked_call_id, tested_hypothesis_id,
         gate_metadata=gate_metadata,
         input_call_ids=input_call_ids,
@@ -1404,7 +1481,9 @@ def record_finding(
         supporting_evidence=supporting_evidence or "",
         claim=claim if _claim_declared(claim) else None,
     )
-    result = {"success": True, "description": description, "confidence": confidence}
+    result = {"success": True, "description": description, "confidence": confidence,
+              "_trudi_call_id": finding_cid, "finding_id": log.index().by_call_id[finding_cid]["finding_id"],
+              "revision": log.index().by_call_id[finding_cid]["revision"]}
     if ctx.tier_achievable:
         from tools._gates._tiering import _RANK as _TRANK
         result["tier_achievable"] = ctx.tier_achievable
@@ -1505,6 +1584,7 @@ def record_self_correction(
 
 @mcp.tool()
 @output_safe
+@trace_transaction
 def export_execution_log(output_path: str) -> dict:
     """
     Export the execution trace to <output_path>.json and <output_path>.md.
@@ -1539,6 +1619,7 @@ def export_execution_log(output_path: str) -> dict:
 
 @mcp.tool()
 @output_safe
+@trace_transaction
 def write_final_report(output_path: str, content: str) -> dict:
     """
     Write the final Markdown report only after reason.pre_report_check returned
@@ -1559,10 +1640,7 @@ def write_final_report(output_path: str, content: str) -> dict:
     assert_output_safe(output_path)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     from core.execution_log import log
-    # H-6: synthesize blockers that pre_report_check demoted to warnings (round
-    # 2+ with no new evidence) are carried into the report verbatim, so the
-    # reader sees what the reviewer could not settle. Appended server-side —
-    # the agent cannot leave them out.
+    # Explicitly adjudicated evidence limitations always accompany the report.
     limitations: list = []
     try:
         for e in reversed(log._entries):
@@ -1648,12 +1726,22 @@ def write_final_report(output_path: str, content: str) -> dict:
                        f"(derived by misc.knowns_pattern_generate).")
         if inv_rows:
             content = content.rstrip() + "\n".join(sec) + "\n"
+    from core.findings import active_findings
+    current = active_findings(log._entries)
+    if current:
+        section = ["\n\n## Current recorded findings",
+                   "Current revisions at report approval. Earlier versions remain in the execution trace."]
+        for finding in current:
+            fid = finding.get('finding_id') or f"F-{finding['call_id']}"
+            section.append(f"\n### {fid} · call {finding['call_id']} · {finding.get('confidence', '')}\n\n"
+                           + finding.get('description', ''))
+        content = content.rstrip() + "\n".join(section) + "\n"
     appended = 0
-    if limitations and "reviewer limitations" not in content.lower():
-        content = (content.rstrip() + "\n\n## Reviewer limitations (unresolved synthesize blockers)\n"
+    if limitations:
+        content = (content.rstrip() + "\n\n## Reviewer limitations (adjudicated evidence gaps)\n"
                    "The adversarial reviewer raised the following points that could not be settled "
-                   "with the evidence in scope; the recorded tiers already reflect the evaluate "
-                   "reviewer's caps.\n"
+                   "with the evidence in scope. A reviewed narrower claim and a typed "
+                   "evidence disposition support each limitation.\n"
                    + "\n".join(f"- {b}" for b in limitations) + "\n")
         appended = len(limitations)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -2386,4 +2474,3 @@ def knowns_pattern_generate(
             pass
 
     return result
-

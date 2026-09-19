@@ -42,4 +42,4 @@ class TestParseResultBlock:
 
     def test_instruction_names_shape(self):
         t = LP.result_instruction('{"verdict": "X"}')
-        assert "RESULT:" in t and '{"verdict": "X"}' in t
+        assert "RESULT:" in t and '"verdict": "X"' in t and '"schema_version": 1' in t

@@ -10,7 +10,9 @@ Used in two places, from the same computation: dair_assess (Analyze advances to
 Scan while leads are open, else Report) and reason.pre_report_check (warns —
 never blocks on content — while a lead is open).
 """
+
 from __future__ import annotations
+from core.findings import active_findings
 
 from ._entities import entity_matches, norm_entity
 from ._dispositions import index_from_entries, find_disposition, any_disposition
@@ -26,7 +28,7 @@ def _referenced(entries) -> tuple[set, list]:
     finding — the things already driven to a finding."""
     norms: set = set()
     raws: list = []
-    for e in entries or []:
+    for e in active_findings(entries or []):
         if not (isinstance(e, dict) and e.get("type") == "finding"):
             continue
         c = e.get("claim") if isinstance(e.get("claim"), dict) else {}

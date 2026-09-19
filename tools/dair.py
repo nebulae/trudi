@@ -255,6 +255,9 @@ def _parse_dair_assessment(raw: str) -> dict:
     text = re.sub(r"\s*//[^\n]*", "", match.group(1))
     try:
         parsed = json.loads(text)
+        if not isinstance(parsed, dict) or not all(k in parsed for k in (
+                'current_phase', 'stack_action', 'transition_recommended')):
+            return _EMPTY_ASSESSMENT.copy()
         return {**_EMPTY_ASSESSMENT, **parsed}
     except (json.JSONDecodeError, ValueError):
         return _EMPTY_ASSESSMENT.copy()
@@ -310,6 +313,7 @@ def _ask_claude(system: str, user: str, max_tokens: int = 2048) -> dict:
         return {
             "success": True,
             "raw": raw,
+            "truncated": getattr(resp, "stop_reason", None) == "max_tokens",
             "input_tokens": getattr(resp.usage, "input_tokens", 0),
             "output_tokens": getattr(resp.usage, "output_tokens", 0),
         }
@@ -350,6 +354,7 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int = 2048) -> dict:
     return {
         "success": True,
         "raw": chat["text"],
+        "truncated": bool(chat["meta"].get("truncated")),
         "input_tokens": chat["prompt_tokens"],
         "output_tokens": chat["completion_tokens"],
         "backend_meta": chat["meta"],
@@ -376,6 +381,12 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
               case_question: str = "") -> int:
     try:
         from core.execution_log import log
+        if error:
+            return log.record_reason_call("dair_assess", False, error, {},
+                                          input_tokens=input_tokens, output_tokens=output_tokens,
+                                          inputs=inputs, input_call_ids=input_call_ids,
+                                          error=error, backend_meta=backend_meta,
+                                          extra={"schema_error": parse_path == PARSE_NONE})
         return log.record_dair_call(
             current_phase=assessment.get("current_phase", ""),
             phase_rationale=assessment.get("phase_rationale", ""),
@@ -618,55 +629,19 @@ Triage indefinitely — acceptable residual uncertainty is normal.
 
 
 OUTPUT FORMAT:
-Write your analysis first. Then output the structured blocks in this order:
-
-If current_phase is Triage, output VERIFICATION_CHALLENGES first:
-VERIFICATION_CHALLENGES:
-[
-  {
-    "claim": "...",
-    "challenge_method": "strings.stat_file",
-    "verified": null,
-    "confidence_impact": "—",
-    "notes": ""
-  }
-]
-
-Then always output DAIR_ASSESSMENT (no markdown bold, no code fences, no // comments):
-DAIR_ASSESSMENT:
-{
-  "current_phase": "Triage",
-  "phase_rationale": "...",
-  "transition_recommended": false,
-  "next_phase": "",
-  "transition_rationale": "",
-  "stack_action": "stay",
-  "investigation_focus": "...",
-  "verification_satisfied": false,
-  "verification_challenges": [],
-  "recommended_actions": [],
-  "directives": {
-    "priority_tools": [],
-    "skip_tools": [],
-    "focus_pids": [],
-    "focus_paths": [],
-    "max_depth": "",
-    "next_hypothesis_triggers": [],
-    "curiosity_budget": 0
-  }
-}
-
-verification_challenges in DAIR_ASSESSMENT must mirror VERIFICATION_CHALLENGES block \
-exactly when in Triage phase. recommended_actions is populated ONLY when \
-transitioning to Report — list specific Improve & Response actions for the IR team. \
-Tool names in directives must use TRUDI MCP format: namespace.tool and must \
-come from the Tool Capability Manifest below. \
-Remember: priority_tools is the investigator's complete work order for this batch. \
-Make it specific and executable — every entry will be run before you see results.\
-""" + result_instruction(
-    '{"assessment": { … the DAIR_ASSESSMENT object … }, "challenges": [ … the '
-    'VERIFICATION_CHALLENGES array (Triage only) … ], "directives": { … the DIRECTIVES object … }}'
-)
+Return one RESULT object with schema_version=1 and assessment. The assessment contains:
+current_phase, phase_rationale, transition_recommended (boolean), next_phase,
+transition_rationale, stack_action (push/pop/stay), investigation_focus,
+verification_satisfied (boolean), verification_challenges (array of claim,
+challenge_method, verified true/false/null, confidence_impact, notes),
+recommended_actions, and directives (priority_tools, skip_tools, focus_pids,
+focus_paths, max_depth, next_hypothesis_triggers, curiosity_budget).
+Include each field once. Put concise analysis in phase_rationale. No separate challenge
+or directives blocks. Use only tools from the manifest. recommended_actions is for Report.
+""" + result_instruction('{"assessment": {"current_phase": "Triage", "phase_rationale": "...", '
+    '"transition_recommended": false, "next_phase": "", "transition_rationale": "", '
+    '"stack_action": "stay", "investigation_focus": "...", "verification_satisfied": false, '
+    '"verification_challenges": [], "recommended_actions": [], "directives": {"priority_tools": []}}}')
 
 _DAIR_SYS = _DAIR_SYS + "\n\n" + format_tool_manifest_for_prompt()
 
@@ -868,27 +843,51 @@ def dair_assess(
         result["_trudi_call_id"] = 0
         return result
 
-    raw = backend_result["raw"]
-    # Structured-first: RESULT {"assessment": {...}, "challenges": [...],
-    # "directives": {...}}; the legacy DAIR_ASSESSMENT / VERIFICATION_CHALLENGES
-    # blocks remain the fallback. parse_path records which one was used.
-    rb, _ = parse_result_block(raw)
-    parse_path = PARSE_NONE
-    if isinstance(rb, dict) and isinstance(rb.get("assessment"), dict):
-        assessment = {**_EMPTY_ASSESSMENT, **rb["assessment"]}
-        challenges = rb.get("challenges") if isinstance(rb.get("challenges"), list) else []
-        if isinstance(rb.get("directives"), dict) and rb["directives"]:
-            assessment["directives"] = dict(rb["directives"])
-        parse_path = RESULT_JSON
-    else:
-        challenges = _parse_challenges(raw)
-        assessment = _parse_dair_assessment(raw)
-        if re.search(r"DAIR_ASSESSMENT|VERIFICATION_CHALLENGES", raw or "", re.IGNORECASE):
+    from tools._llm_parse import validate_assessment
+    assessment, parse_path = {}, PARSE_NONE
+    for attempt in range(2):
+        raw = backend_result.get("raw", "")
+        rb, _ = parse_result_block(raw)
+        err = ""
+        if isinstance(rb, dict) and isinstance(rb.get("assessment"), dict):
+            assessment = {**_EMPTY_ASSESSMENT, **rb["assessment"]}
+            # Read-only compatibility with former RESULT layout.
+            if isinstance(rb.get("challenges"), list) and rb['challenges']:
+                assessment['verification_challenges'] = rb['challenges']
+            if isinstance(rb.get("directives"), dict):
+                assessment['directives'] = rb['directives']
+            parse_path = RESULT_JSON
+            if not all(k in rb['assessment'] for k in ('current_phase', 'stack_action', 'transition_recommended')):
+                err = "Assessment is missing required phase/transition fields"
+            if type(rb.get('schema_version', 1)) is not int or rb.get('schema_version', 1) != 1:
+                err = "Unsupported schema_version"
+        elif rb is None and 'RESULT:' not in raw:
+            assessment = _parse_dair_assessment(raw)
+            challenges = _parse_challenges(raw)
+            if challenges:
+                assessment['verification_challenges'] = challenges
             parse_path = LEGACY_BLOCK
-
-    # challenges from dedicated block take precedence over those embedded in assessment
-    if challenges:
-        assessment["verification_challenges"] = challenges
+        else:
+            err = "Malformed RESULT assessment"
+        if not backend_result.get("success"):
+            err = backend_result.get("error") or "Assessment backend failed"
+        elif backend_result.get("truncated"):
+            err = "Assessment output was truncated; review is incomplete"
+        err = err or validate_assessment(assessment)
+        if not err:
+            break
+        if attempt == 0:
+            repaired = _ask(_DAIR_SYS, user + "\nFORMAT REPAIR: " + err +
+                            ". Return the required RESULT assessment.", max_tokens=MAX_TOKENS_DAIR)
+            for key in ('input_tokens', 'output_tokens'):
+                repaired[key] = backend_result.get(key, 0) + repaired.get(key, 0)
+            backend_result = repaired
+        else:
+            cid = _log_dair({}, backend_result.get('input_tokens', 0),
+                            backend_result.get('output_tokens', 0), inputs=call_inputs,
+                            input_call_ids=input_call_ids, error=err, parse_path=PARSE_NONE)
+            return {'success': False, 'error': err, 'gate': 'dair_schema',
+                    'retryable': True, '_trudi_call_id': cid, 'schema_repair_attempted': True}
 
     # Server-side: a challenge whose challenge_method ALREADY ran successfully
     # in this trace is verified by that run — DAIR can re-issue challenges for
@@ -1004,7 +1003,7 @@ def dair_assess(
     server_override = None
     try:
         from core.execution_log import log as _flog
-        _n_findings = len((_flog.index().by_type.get("finding") or [])) if getattr(_flog, "_path", None) else 0
+        _n_findings = len(_flog.index().active_findings) if getattr(_flog, "_path", None) else 0
     except Exception:
         _n_findings = 0
     if assessment.get("next_phase") == "Report" and _n_findings == 0:

@@ -73,7 +73,7 @@ def coverage_report(relevant_tactics: str = "") -> dict:
     from tools.mitre import load_techniques
 
     idx = log.index()
-    findings = idx.by_type.get("finding", [])
+    findings = idx.active_findings
     dair_calls = idx.by_type.get("dair_call", [])
     tool_calls = idx.by_type.get("tool_call", [])
 

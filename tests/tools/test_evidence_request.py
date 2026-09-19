@@ -178,7 +178,7 @@ class TestRoundTrip:
             r = R.reason_evaluate_finding("Account defaultprinter was created (EID 4720)",
                                           f"Security.evtx (cid{cid}): 4720", input_call_ids=[cid])
         assert http.call_count == 2
-        assert "EVIDENCE INVENTORY" in _payload(http, 0)
+        assert "EVIDENCE PACKET" in _payload(http, 0)
         assert "TargetUserName: defaultprinter" in _payload(http, 0)   # pushed in round 1
         p2 = _payload(http, 1)
         assert "EVIDENCE_REQUEST RESULTS (round 1/" in p2
@@ -207,7 +207,11 @@ class TestRoundTrip:
         assert http.call_count == 1
         p = _payload(http, 0)
         assert "TargetUserName: defaultprinter" in p
-        assert "showing 1 of 1 rows matching" in p and "41 rows scanned; source COMPLETE" in p
+        packet = pull_env["log"].index().by_call_id[r["_trudi_call_id"]]["evidence_packet"]
+        source = packet["evidence"][0]
+        selection = source["selections"][0]
+        assert selection["matched_lines"] == selection["shown_lines"] == 1
+        assert selection["scanned_rows"] == 41 and source["retained_output_complete"]
         assert "a selection with its totals" in p and "EVIDENCE_REQUEST" in p   # pull still offered
         assert r["verdict"] == "SUPPORTED" and "verdict_note" not in r
         assert r["evidence_pushed"] == {"rows": 1, "cids": [cid]}
@@ -220,7 +224,10 @@ class TestRoundTrip:
         with patch("httpx.post", http):
             r = R.reason_evaluate_finding("4799 group membership enumerated", "x", input_call_ids=[cid])
         p = _payload(http, 0)
-        assert f"showing {R.COMPAT_PUSH_ROWS_PER_CID} of 40 rows matching" in p
+        packet = pull_env["log"].index().by_call_id[r["_trudi_call_id"]]["evidence_packet"]
+        selection = packet["evidence"][0]["selections"][0]
+        assert selection["shown_lines"] == R.COMPAT_PUSH_ROWS_PER_CID
+        assert selection["matched_lines"] == 40 and not selection["selection_complete"]
         assert "request more via EVIDENCE_REQUEST" in p
         assert r["evidence_pushed"]["rows"] == R.COMPAT_PUSH_ROWS_PER_CID
 
@@ -241,8 +248,9 @@ class TestRoundTrip:
             r = R.reason_evaluate_finding("MSPAuth cookie findme69 FOUND", "x", input_call_ids=[full, legacy])
         p = _payload(http, 0)
         assert "FOUND: MSPAuth cookie for findme69@hotmail.example" in p
-        assert "source COMPLETE" in p
-        assert "PARTIAL" in p and "a term missing here is NOT absent" in p
+        packet = log.index().by_call_id[r["_trudi_call_id"]]["evidence_packet"]
+        assert any(e["retained_output_complete"] for e in packet["evidence"])
+        assert any(not e["retained_output_complete"] for e in packet["evidence"]) and "a term missing here is NOT absent" in p
         assert r["evidence_pushed"]["cids"] == [full]
 
     def test_no_request_and_not_supported_stays_as_answered(self, pull_env):

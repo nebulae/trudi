@@ -16,7 +16,9 @@ wording of a finding or a narration. Source waivers are typed dispositions:
   misc.record_disposition(target_kind="destruction_scope", target_id=<finding cid>,
                           reason="undetermined")
 """
+
 from __future__ import annotations
+from core.findings import active_findings
 
 import re
 
@@ -47,8 +49,8 @@ def _cmds(entries) -> list:
 
 
 def _findings(entries, tiers=("CONFIRMED", "LIKELY")) -> list:
-    return [e for e in (entries or []) if e.get("type") == "finding"
-            and (e.get("confidence") or "").upper() in tiers]
+    return [e for e in active_findings(entries or [])
+            if (e.get("confidence") or "").upper() in tiers]
 
 
 def coverage_gaps(entries) -> list:

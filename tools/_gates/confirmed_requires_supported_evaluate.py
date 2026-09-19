@@ -129,6 +129,18 @@ def check(ctx) -> Optional[dict]:
         return None
     claim = getattr(ctx, "claim", None) or {}
 
+    from core.finding_submission import receipt_matches
+    reviews = _evaluates_full(ctx)
+    exact = next((e for e in reversed(reviews) if e.get('review_receipt') and
+                  receipt_matches(ctx, e) and int(e.get('call_id') or 0) not in _spent_evaluates(ctx)), None)
+    if getattr(ctx, 'review_call_id', 0):
+        exact = ctx.idx.by_call_id.get(ctx.review_call_id)
+        if (not exact or ctx.review_call_id in _spent_evaluates(ctx)
+                or not receipt_matches(ctx, exact)):
+            return {'success': False, 'gate': 'review_receipt', 'error': 'Submission review receipt is stale'}
+    if exact:
+        ctx.gated_by_evaluate_call_id = exact['call_id']
+        return None
     match = "claim"
     eval_entry = find_by_claim(_evaluates_full(ctx), "reason_evaluate_finding", claim,
                                used=_spent_evaluates(ctx))
@@ -159,6 +171,14 @@ def check(ctx) -> Optional[dict]:
             "gate": "confirmed_requires_supported_evaluate",
             "evaluate_match": "none",
         }
+
+    if eval_entry.get('receipt_required') or eval_entry.get('review_receipt'):
+        return {'success': False, 'gate': 'review_receipt',
+                'error': 'Review does not match the exact current claim/evidence; submit or evaluate that revision'}
+    if eval_entry.get("success") is False or eval_entry.get("review_pending"):
+        return {"success": False, "gate": "confirmed_requires_supported_evaluate",
+                "error": "Matched evaluation failed; complete a successful evidence review first",
+                "evaluate_call_id": eval_entry.get("call_id"), "evaluate_match": match}
 
     # The reviewer must have judged the claim actually being recorded.
     mismatch = claim_mismatch(claim, eval_entry.get("claim") or {})

@@ -45,6 +45,8 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "reason_extract_case",
     "reason_synthesize",
     "reason_pre_report_check",
+    "reason_readiness_status",
+    "misc_retract_finding",
     "accuracy_compare",
     "accuracy_export_report",
     "correlate_mitre_validate",
@@ -572,7 +574,7 @@ class NarrationMiddleware(Middleware):
             # A CORRECTION of an existing finding (supersedes=<cid>) is
             # report-phase work — re-tiering, dropping an unprovable field —
             # and must not be refused in Report; only NEW findings are.
-            if (should_block and tool_name.endswith("record_finding")
+            if (should_block and tool_name.endswith(("record_finding", "submit_finding"))
                     and args.get("supersedes")):
                 should_block, reason = False, "finding correction (supersedes) allowed in Report"
             if should_block:

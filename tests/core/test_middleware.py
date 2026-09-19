@@ -72,6 +72,24 @@ class TestDairGateMiddleware:
             with pytest.raises(ToolError, match="Report"):
                 asyncio.run(_run_middleware(mw, "vol_psscan"))
 
+    @pytest.mark.parametrize('correction', [False, True])
+    def test_submission_in_report_requires_revision_target(self, tmp_path, correction):
+        from core.execution_log import ExecutionLog
+        from core.middleware import NarrationMiddleware
+        from fastmcp.exceptions import ToolError
+        log = ExecutionLog()
+        log.configure('SUBMISSION-REPORT', str(tmp_path / 'trace.json'), save_session=False)
+        parent = log.record_finding('Previous claim', 'SUSPECTED')
+        log.record_dair_call('Analyze', '', True, 'Report', '', 'push', '')
+        args = {'supersedes': parent} if correction else {}
+        with patch('core.execution_log.log', log):
+            if correction:
+                _, next_call = asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
+                assert next_call.await_count == 1
+            else:
+                with pytest.raises(ToolError, match='Report'):
+                    asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
+
     def test_long_collect_batch_never_blocks(self, tmp_path):
         """Regression: a long lead-following batch in a collection phase must
         not be blocked — findings/narration/tool churn do not close the gate."""

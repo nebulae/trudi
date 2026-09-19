@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 
 
-MANIFEST_VERSION = "2026-08-25.1"
+MANIFEST_VERSION = "2026-09-19.1"
 
 
 _CAPABILITIES: list[dict] = [
@@ -27,6 +27,9 @@ _CAPABILITIES: list[dict] = [
             "reason.cite_check",
             "reason.synthesize",
             "reason.pre_report_check",
+            "reason.readiness_status",
+            "reason.audit_findings",
+            "misc.submit_finding",
         ],
     },
     {

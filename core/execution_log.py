@@ -9,6 +9,7 @@ import tempfile
 import threading
 import datetime
 from contextlib import contextmanager
+from functools import wraps
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -31,6 +32,8 @@ _CALL_ID_COUNTER_FILE = os.path.expanduser("~/.cache/trudi/call_id.counter")
 # 'dotnet EvtxECmd.dll …'), which often shares no keyword with the tool name.
 # Gates that ask "did tool X run?" or "what artifact class is this?" need the
 # tool identity, not a guess from the command line.
+_flock_local = threading.local()
+
 current_mcp_tool: contextvars.ContextVar[str] = contextvars.ContextVar(
     "trudi_current_mcp_tool", default="")
 
@@ -41,17 +44,31 @@ def _hook_flock():
     call-id counter or trace must hold it — the MCP server here, the
     claude/hooks scripts on their side — so concurrent sessions can't rewind
     the counter or trample each other's writes."""
+    if getattr(_flock_local, "depth", 0):
+        yield
+        return
     os.makedirs(os.path.dirname(_TRACE_LOCK_FILE), exist_ok=True)
     fp = open(_TRACE_LOCK_FILE, "w")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        _flock_local.depth = 1
         yield
     finally:
+        _flock_local.depth = 0
         try:
             fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
         except OSError:
             pass
         fp.close()
+
+
+def trace_transaction(fn):
+    """Serialize a short local operation with trace writers in other processes."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with log.transaction():
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _scan_trace_max_cid(trace_path: str) -> int:
@@ -166,6 +183,12 @@ def _render_entries(case_id: str | None, entries: list[dict]) -> str:
                 f"- [{blk['phase']}](#{blk['anchor']}) — entries #{blk['start_cid']}–#{blk['end_cid']}"
             )
         lines.append("")
+
+    from core.findings import finding_view
+    view = finding_view(entries)
+    active_ids = {e['call_id'] for e in view.active}
+    if view.anomalies:
+        lines.append(f"Lifecycle anomalies require adjudication: {view.anomalies}\n")
 
     # Markdown navigability: lookup table for evidence-chain rendering on
     # finding entries.
@@ -292,7 +315,8 @@ def _render_entries(case_id: str | None, entries: list[dict]) -> str:
             conf = e.get("confidence", "").upper()
             linked = e.get("linked_call_id", 0)
             link_str = f" ← tool call #{linked}" if linked else ""
-            lines.append(f"- `{ts}` {prefix}**FINDING** [{conf}] {e.get('description', '')}{link_str}")
+            lifecycle = "current" if cid in active_ids else "retired revision"
+            lines.append(f"- `{ts}` {prefix}**FINDING** [{conf}] [{lifecycle}] {e.get('description', '')}{link_str}")
             if e.get("source"):
                 lines.append(f"  - source: {e['source']}")
             if e.get("tested_hypothesis_id"):
@@ -354,6 +378,8 @@ class LogIndex:
     by_call_id: dict[int, dict] = field(default_factory=dict)
     by_type: dict[str, list[dict]] = field(default_factory=dict)
     by_tool: dict[str, list[dict]] = field(default_factory=dict)
+    active_findings: list[dict] = field(default_factory=list)
+    finding_anomalies: list[dict] = field(default_factory=list)
     findings_by_linked: dict[int, list[dict]] = field(default_factory=dict)
     hypotheses_by_id: dict[str, dict] = field(default_factory=dict)
     # Evidence registries — built from server-stamped annotate_tool_call
@@ -429,6 +455,23 @@ class ExecutionLog:
         self._owns_beacon: bool = False
         self._flush_count: int = 0
         self._trace_missing_noted: bool = False
+
+    @contextmanager
+    def transaction(self):
+        """Refresh under the shared cross-process lock, then commit atomically.
+
+        No network/model calls belong in this critical section.
+        """
+        with self._lock, _hook_flock():
+            if self._path and os.path.exists(self._path):
+                with open(self._path) as f:
+                    disk = json.load(f).get("entries", [])
+                anonymous = [e for e in self._entries if e.get("call_id") is None]
+                merged = {e["call_id"]: e for e in self._entries if e.get("call_id") is not None}
+                merged.update({e["call_id"]: e for e in disk if e.get("call_id") is not None})
+                self._entries = sorted(merged.values(), key=lambda e: e["call_id"]) + anonymous
+                self._index_version += 1
+            yield
 
     def _next_id(self) -> int:
         # Shared counter across MCP server + PostToolUse hook so call_ids form
@@ -540,6 +583,10 @@ class ExecutionLog:
                             irec = idx.identities.setdefault(v, {"first_cid": cid})
                             if _IDENTITY_NOISE_RE.search(v):
                                 irec["bulk"] = True
+            from core.findings import finding_view
+            view = finding_view(self._entries)
+            idx.active_findings = view.active
+            idx.finding_anomalies = view.anomalies
             self._cached_index = (self._index_version, idx)
             return idx
 
@@ -907,18 +954,7 @@ class ExecutionLog:
         if not self._path:
             return
 
-        # Acquire the shared lock with the hook. Best-effort: if we can't
-        # open the lock file (cache dir missing, etc.) skip the lock and
-        # accept the small race window rather than dropping the flush.
-        lock_fp = None
-        try:
-            os.makedirs(os.path.dirname(_TRACE_LOCK_FILE), exist_ok=True)
-            lock_fp = open(_TRACE_LOCK_FILE, "w")
-            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            lock_fp = None
-
-        try:
+        with _hook_flock():
             # 1) Read what's currently on disk and pull out hook entries that
             # the MCP server doesn't own.
             disk_entries: list[dict] = []
@@ -967,8 +1003,7 @@ class ExecutionLog:
             our_ids = {e.get("call_id") for e in self._entries}
             hook_entries = [
                 e for e in disk_entries
-                if (e.get("_source_tool_use_id") or e.get("_source_uuid"))
-                and e.get("call_id") not in our_ids
+                if e.get("call_id") not in our_ids
             ]
 
             # 2) Merge: our in-memory entries + hook entries on disk we don't
@@ -1019,14 +1054,6 @@ class ExecutionLog:
                 # (record_*, _log_tool, middleware) can surface a clear
                 # ToolError instead of silently losing the entry.
                 raise
-        finally:
-            if lock_fp is not None:
-                try:
-                    fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-                lock_fp.close()
-
     # ── Record methods ────────────────────────────────────────────────────────
 
     def _require_configured(self, kind: str) -> None:
@@ -1682,12 +1709,23 @@ class ExecutionLog:
         the final tier. Used to re-tier a finding upward once new evidence earns
         a SUPPORTED evaluate.
         """
-        with self._lock:
+        with self.transaction():
             self._auto_recover()
             self._require_configured(f"finding: {description[:60]}")
+            from core.findings import validate_revision
+            parent = validate_revision(self._entries, supersedes, claim)
             cid = self._next_id()
+            root, depth = parent, 1
+            by_id = {e['call_id']: e for e in self._entries if e.get('type') == 'finding'}
+            visited = set()
+            while root and root.get('supersedes') in by_id and root['call_id'] not in visited:
+                visited.add(root['call_id'])
+                root = by_id[root['supersedes']]
+                depth += 1
             entry: dict = {
                 "call_id": cid,
+                "finding_id": (parent.get("finding_id") or f"F-{root['call_id']}") if parent else f"F-{cid}",
+                "revision": int(parent.get("revision", depth)) + 1 if parent else 1,
                 "type": "finding",
                 "ts": _utcnow(),
                 "description": description,

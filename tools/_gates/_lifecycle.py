@@ -15,7 +15,9 @@ or its sources examined (supporting either) — so it is evidence-symmetric: fin
 an attack and proving its absence both count. Windows-first; extensible to
 Linux/macOS via alt source ids (last/wtmp, cron, launchd).
 """
+
 from __future__ import annotations
+from core.findings import active_findings
 
 import re
 
@@ -122,7 +124,7 @@ def coverage(entries) -> dict:
       examined     — the phase's artifact sources were touched (no verdict yet),
       not_examined — none of the above (the coverage gap to surface).
     Advisory only: this is the coverage skeleton, never a demand that attacks exist."""
-    findings = [e for e in (entries or []) if e.get("type") == "finding"]
+    findings = active_findings(entries or [])
     # tool commands + stdout excerpts of successful tool calls (regexes run over
     # these, never over agent prose).
     haystack = [
