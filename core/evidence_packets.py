@@ -93,7 +93,9 @@ def _selection(raw, query, selector, budget, path=''):
             nonlocal position
             for line in source:
                 position += len(line)
-                yield line.decode('utf-8-sig' if position == len(line) else 'utf-8', errors='replace')
+                # csv rejects NUL; byte offsets still come from the raw line.
+                yield line.decode('utf-8-sig' if position == len(line) else 'utf-8',
+                                  errors='replace').replace('\x00', '')
         reader = csv.reader(lines(), delimiter='\t' if path.lower().endswith('.tsv') else ',')
         try:
             columns = next(reader, [])
@@ -200,12 +202,20 @@ def build_packet(log, request, selectors=None):
                             for a in authored):
                 raise PacketError(f'Call {cid} points at agent-authored output')
             before = file_version(path) if path else None
+            scan_truncated = False
             if path:
                 if before is None:
                     raise PacketError(f'Output unavailable for call {cid}: {path}', 'needs-evidence')
                 try:
                     with open(path, 'rb') as stream:
                         raw = stream.read(MAX_SOURCE_BYTES + 1)
+                    if len(raw) > MAX_SOURCE_BYTES:
+                        # Search the leading MAX_SOURCE_BYTES (whole lines) and
+                        # mark the source partial, rather than refusing review of
+                        # a large extractor output (MFT/EVTX CSVs). A miss over a
+                        # partial scan is never read as absence.
+                        cut = raw.rfind(b'\n', 0, MAX_SOURCE_BYTES) + 1 or MAX_SOURCE_BYTES
+                        raw, scan_truncated = raw[:cut], True
                 except OSError as exc:
                     raise PacketError(f'Cannot read output for call {cid}: {exc}', 'needs-evidence') from exc
                 if before != file_version(path):
@@ -214,10 +224,12 @@ def build_packet(log, request, selectors=None):
             else:
                 raw = source.text.encode('utf-8')
             if len(raw) > MAX_SOURCE_BYTES:
-                raise PacketError('Output exceeds packet scan limit; use a traced narrower extraction', 'needs-evidence')
+                cut = raw.rfind(b'\n', 0, MAX_SOURCE_BYTES) + 1 or MAX_SOURCE_BYTES
+                raw, scan_truncated = raw[:cut], True
+            if scanned_bytes + len(raw) > MAX_SCAN_BYTES:
+                cut = raw.rfind(b'\n', 0, max(0, MAX_SCAN_BYTES - scanned_bytes)) + 1
+                raw, scan_truncated = raw[:cut], True
             scanned_bytes += len(raw)
-            if scanned_bytes > MAX_SCAN_BYTES:
-                raise PacketError('Packet exceeds aggregate scan limit; cite narrower traced outputs', 'needs-evidence')
             selected = [(i, s) for i, s in enumerate(selectors) if s['call_id'] == cid
                         and (not s.get('path') or os.path.abspath(s['path']) == path)]
             if selectors and any(s['call_id'] == cid for s in selectors) and not selected:
@@ -229,7 +241,8 @@ def build_packet(log, request, selectors=None):
                 selections.append(result)
                 if i >= 0:
                     used_selectors.add(i)
-            retained_complete = bool(source.complete) and not bool(entry.get('stdout_partial'))
+            retained_complete = (bool(source.complete) and not bool(entry.get('stdout_partial'))
+                                 and not scan_truncated)
             if source.kind != 'file':
                 retained_complete = retained_complete and not bool(entry.get('truncated'))
                 if not raw and entry.get('stdout_chars') is None:
@@ -237,6 +250,7 @@ def build_packet(log, request, selectors=None):
             evidence.append({'call_id': cid, 'kind': 'artifact_output' if has_artifact else 'tool_stdout',
                              'path': path or None, 'output_sha256': hashlib.sha256(raw).hexdigest(),
                              'output_bytes': len(raw), 'retained_output_complete': retained_complete,
+                             'scan_truncated': scan_truncated,
                              'search_scope': 'only this retained output, not the entire original evidence',
                              'extractor_scope_complete': entry.get('scope_complete'),
                              'provenance': provenance, 'selections': selections})

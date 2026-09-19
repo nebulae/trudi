@@ -1820,7 +1820,10 @@ def _ask(system: str, user: str, max_tokens: int = 2048, _tool_name: str = "",
                                   output_tokens=result.get("output_tokens", 0),
                                   review_pending=False,
                                   schema_error=result.get("schema_error", False),
-                                  schema_repair_attempted=repair_used)
+                                  schema_repair_attempted=repair_used,
+                                  # the unparsed answer, so a format failure can be diagnosed
+                                  raw_answer=(str(result.get("_raw") or "")[:20000]
+                                              if result.get("schema_error") else None))
     if not want_raw:
         result.pop("_raw", None)
     return result

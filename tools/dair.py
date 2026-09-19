@@ -378,7 +378,8 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
               server_override: dict | None = None,
               observed_principals: list[dict] | None = None,
               observed_hosts: list[str] | None = None,
-              case_question: str = "") -> int:
+              case_question: str = "",
+              raw_answer: str = "") -> int:
     try:
         from core.execution_log import log
         if error:
@@ -386,7 +387,8 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
                                           input_tokens=input_tokens, output_tokens=output_tokens,
                                           inputs=inputs, input_call_ids=input_call_ids,
                                           error=error, backend_meta=backend_meta,
-                                          extra={"schema_error": parse_path == PARSE_NONE})
+                                          extra={"schema_error": parse_path == PARSE_NONE,
+                                                 **({"raw_answer": raw_answer} if raw_answer else {})})
         return log.record_dair_call(
             current_phase=assessment.get("current_phase", ""),
             phase_rationale=assessment.get("phase_rationale", ""),
@@ -885,7 +887,8 @@ def dair_assess(
         else:
             cid = _log_dair({}, backend_result.get('input_tokens', 0),
                             backend_result.get('output_tokens', 0), inputs=call_inputs,
-                            input_call_ids=input_call_ids, error=err, parse_path=PARSE_NONE)
+                            input_call_ids=input_call_ids, error=err, parse_path=PARSE_NONE,
+                            raw_answer=str(backend_result.get("raw") or "")[:20000])
             return {'success': False, 'error': err, 'gate': 'dair_schema',
                     'retryable': True, '_trudi_call_id': cid, 'schema_repair_attempted': True}
 

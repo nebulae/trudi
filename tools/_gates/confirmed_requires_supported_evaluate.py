@@ -172,13 +172,16 @@ def check(ctx) -> Optional[dict]:
             "evaluate_match": "none",
         }
 
+    # A failed review is the actionable cause; report it before a receipt mismatch.
+    if eval_entry.get("success") is False or eval_entry.get("review_pending"):
+        return {"success": False, "gate": "confirmed_requires_supported_evaluate",
+                "error": "Matched evaluation failed" +
+                         (f" ({eval_entry.get('error')})" if eval_entry.get("error") else "") +
+                         "; complete a successful evidence review first",
+                "evaluate_call_id": eval_entry.get("call_id"), "evaluate_match": match}
     if eval_entry.get('receipt_required') or eval_entry.get('review_receipt'):
         return {'success': False, 'gate': 'review_receipt',
                 'error': 'Review does not match the exact current claim/evidence; submit or evaluate that revision'}
-    if eval_entry.get("success") is False or eval_entry.get("review_pending"):
-        return {"success": False, "gate": "confirmed_requires_supported_evaluate",
-                "error": "Matched evaluation failed; complete a successful evidence review first",
-                "evaluate_call_id": eval_entry.get("call_id"), "evaluate_match": match}
 
     # The reviewer must have judged the claim actually being recorded.
     mismatch = claim_mismatch(claim, eval_entry.get("claim") or {})

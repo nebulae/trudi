@@ -490,7 +490,7 @@ def _result_payload(result) -> dict | None:
 
 
 def _trace_success_baseline(tool_name: str, elapsed: float,
-                             entries_before: int | None, result=None) -> None:
+                             entries_before: int | None, result=None) -> int:
     """Write a baseline tool_call entry if the tool didn't self-log.
 
     Subprocess tools self-log via core.executor._log_tool. reason_*/dair_*
@@ -504,7 +504,7 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
     refusal must never read as a successful run in the audit trail.
     """
     if entries_before is None:
-        return
+        return 0
     try:
         from core.execution_log import log
         # Self-logged = the call wrote a real record. A `call_initiated`
@@ -519,7 +519,14 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
             payload = _result_payload(result) or {}
             ok = payload.get("success", True) is not False
             err = "" if ok else str(payload.get("error") or "")[:512]
-            log.record_tool_call(
+            # A successful pure-Python tool's result IS its output: retain it
+            # so the call can be cited and its rows reviewed like any other.
+            try:
+                import json as _json
+                body = _json.dumps(payload, default=str) if ok and payload else ""
+            except Exception:
+                body = ""
+            return log.record_tool_call(
                 cmd=f"<py>:{tool_name}",
                 success=ok,
                 truncated=False,
@@ -529,10 +536,29 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
                 elapsed_seconds=elapsed,
                 input_call_ids=_parent_cids(),
                 gate=str(payload.get("gate") or "") if not ok else "",
-            )
+                **({"stdout_full": body, "stdout_excerpt": body[:600]} if body else {}),
+            ) or 0
     except Exception as err:
         print(f"[TRUDI WARN] success-baseline log failed for {tool_name}: "
               f"{err!r}", file=sys.stderr)
+    return 0
+
+
+def _stamp_call_id(result, cid: int):
+    """Return the baseline call id to the agent, as self-logging tools do, so
+    the result can be cited. Never overwrites an id the tool set itself."""
+    if not cid:
+        return result
+    if isinstance(result, dict):
+        result.setdefault("_trudi_call_id", cid)
+        return result
+    sc = getattr(result, "structured_content", None)
+    if isinstance(sc, dict) and "_trudi_call_id" not in sc:
+        try:
+            return result.model_copy(update={"structured_content": {**sc, "_trudi_call_id": cid}})
+        except Exception:
+            return result
+    return result
 
 
 # ── Middleware ────────────────────────────────────────────────────────────────
@@ -654,8 +680,8 @@ class NarrationMiddleware(Middleware):
                     ) from e
                 raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
 
-            _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
-                                    entries_before, result)
+            result = _stamp_call_id(result, _trace_success_baseline(
+                tool_name, round(time.perf_counter() - start, 2), entries_before, result))
         finally:
             if _cur_tool is not None and _tool_token is not None:
                 try:

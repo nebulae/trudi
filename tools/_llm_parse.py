@@ -23,7 +23,6 @@ NONE = "none"
 # `RESULT:` / `**RESULT**:` / `RESULT:\n```json` … followed by an object.
 _RESULT_HEAD_RE = re.compile(
     r"\**RESULT\**\s*:?\**\s*(?:```(?:json)?\s*)?(?=\{)", re.IGNORECASE)
-_COMMENT_RE = re.compile(r"(?m)^\s*//[^\n]*\n?|\s+//[^\n]*$")
 
 
 def _balanced_object(text: str, start: int) -> int | None:
@@ -56,11 +55,41 @@ def _balanced_object(text: str, start: int) -> int | None:
 _FENCE_OPEN_RE = re.compile(r"```(?:json)?\s*$", re.IGNORECASE)
 
 
+def _strip_comments(body: str) -> str:
+    """Drop `// …` line comments that sit OUTSIDE JSON strings. A regex over
+    the whole body also ate ` //StarkResearch/…` inside a string, which on a
+    single-line answer deleted the rest of the object."""
+    out, i, n, in_str, esc = [], 0, len(body), False, False
+    while i < n:
+        c = body[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+            out.append(c)
+        elif c == "/" and body.startswith("//", i):
+            j = body.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _load(body: str):
-    try:
-        return json.loads(_COMMENT_RE.sub("", body))
-    except (json.JSONDecodeError, ValueError):
-        return None
+    for text in (body, _strip_comments(body)):
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
 
 
 def _with_closing_fence(text: str, end: int) -> int:

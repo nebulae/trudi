@@ -66,3 +66,15 @@ class TestParseResultBlock:
     def test_instruction_names_shape(self):
         t = LP.result_instruction('{"verdict": "X"}')
         assert "RESULT:" in t and '"verdict": "X"' in t and '"schema_version": 1' in t
+
+    def test_slashes_inside_strings_survive(self):
+        # A ` //` inside a string on a one-line answer used to be taken as a
+        # comment, deleting the rest of the object (VANKO-2016-DEEPSEEK41).
+        raw = ('RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED", '
+               '"rationale": "copied from //StarkResearch/Level 5-8", "gaps": ["x"]}')
+        obj, _ = LP.parse_result_block(raw)
+        assert obj["verdict"] == "SUPPORTED" and obj["gaps"] == ["x"]
+
+    def test_real_line_comments_still_stripped(self):
+        raw = 'RESULT:\n{\n  "schema_version": 1, // note\n  "verdict": "SUPPORTED"\n}'
+        assert LP.parse_result_block(raw)[0]["verdict"] == "SUPPORTED"
