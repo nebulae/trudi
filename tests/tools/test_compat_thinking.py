@@ -598,6 +598,29 @@ class TestPerToolThinking:
         assert "chat_template_kwargs" not in body
         assert body["messages"][1]["content"].endswith("/no_think")
 
+    def test_mode_effort_ollama(self, trace_log):
+        """`effort` sends reasoning={"effort":"none"} (the only switch Ollama
+        honours) and neither of the Qwen switches."""
+        import tools.reasoning as R
+        from tools.reasoning import reason_cite_check
+        http = MagicMock(return_value=_resp(content="ALL_CITED"))
+        with patch.object(R, "COMPAT_NO_THINK_MODE", "effort"), patch("httpx.post", http):
+            reason_cite_check("finding text", "evidence text")
+        body = http.call_args[1]["json"]
+        assert body["reasoning"] == {"effort": "none"}
+        assert "chat_template_kwargs" not in body
+        assert not body["messages"][1]["content"].endswith("/no_think")
+
+    def test_mode_effort_not_sent_on_thinking_surface(self, trace_log):
+        """A thinking surface (hypothesize) must not carry the effort=none switch."""
+        import tools.reasoning as R
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(content="CONCLUSION: x"))
+        with patch.object(R, "COMPAT_NO_THINK_MODE", "effort"), patch("httpx.post", http):
+            reason_hypothesize("observation text")
+        body = http.call_args[1]["json"]
+        assert "reasoning" not in body
+
     def test_kwargs_merge_with_extra_body(self, trace_log):
         import tools.reasoning as R
         from tools.reasoning import reason_cite_check
