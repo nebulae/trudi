@@ -52,39 +52,68 @@ def _balanced_object(text: str, start: int) -> int | None:
     return None
 
 
-def find_result_span(text: str) -> tuple[int, int] | None:
-    """(start, end) of the LAST well-formed RESULT block in `text`, header
-    included, or None."""
+# An opening ```json fence directly before a bare object.
+_FENCE_OPEN_RE = re.compile(r"```(?:json)?\s*$", re.IGNORECASE)
+
+
+def _load(body: str):
+    try:
+        return json.loads(_COMMENT_RE.sub("", body))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _with_closing_fence(text: str, end: int) -> int:
+    tail = re.match(r"\s*```[ \t]*\n?", text[end:])
+    return end + (tail.end() if tail else 0)
+
+
+def _find_result(text: str) -> tuple[int, int, int, int] | None:
+    """(start, body_start, body_end, end) of the LAST well-formed RESULT
+    object in `text`, or None.
+
+    A `RESULT:`-headed object wins. Some backends (deepseek via Ollama) return
+    the requested object bare — no header, sometimes fenced — so without a
+    header the last top-level object carrying `schema_version` is taken."""
     if not text:
         return None
     best = None
     for m in _RESULT_HEAD_RE.finditer(text):
         end = _balanced_object(text, m.end())
+        if end is None or _load(text[m.end():end]) is None:
+            continue
+        best = (m.start(), m.end(), end, _with_closing_fence(text, end))
+    if best is not None:
+        return best
+    i = text.find("{")
+    while i != -1:
+        end = _balanced_object(text, i)
         if end is None:
-            continue
-        body = text[m.end():end]
-        try:
-            json.loads(_COMMENT_RE.sub("", body))
-        except (json.JSONDecodeError, ValueError):
-            continue
-        # swallow a closing fence
-        tail = re.match(r"\s*```[ \t]*\n?", text[end:])
-        best = (m.start(), end + (tail.end() if tail else 0))
+            break
+        obj = _load(text[i:end])
+        if isinstance(obj, dict) and "schema_version" in obj:
+            fence = _FENCE_OPEN_RE.search(text[:i])
+            best = (fence.start() if fence else i, i, end, _with_closing_fence(text, end))
+            i = text.find("{", end)
+        else:
+            i = text.find("{", i + 1)
     return best
+
+
+def find_result_span(text: str) -> tuple[int, int] | None:
+    """(start, end) of the LAST well-formed RESULT block in `text`, header
+    (or fence) included, or None."""
+    found = _find_result(text)
+    return (found[0], found[3]) if found else None
 
 
 def parse_result_block(text: str) -> tuple[dict | None, str]:
     """(object, path) — the last RESULT JSON object in `text` and
     RESULT_JSON, or (None, '') when absent/malformed."""
-    span = find_result_span(text)
-    if span is None:
+    found = _find_result(text)
+    if found is None:
         return None, ""
-    m = _RESULT_HEAD_RE.search(text, span[0])
-    end = _balanced_object(text, m.end())
-    try:
-        obj = json.loads(_COMMENT_RE.sub("", text[m.end():end]))
-    except (json.JSONDecodeError, ValueError):
-        return None, ""
+    obj = _load(text[found[1]:found[2]])
     return (obj, RESULT_JSON) if isinstance(obj, dict) else (None, "")
 
 

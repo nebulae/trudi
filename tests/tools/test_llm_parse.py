@@ -28,6 +28,29 @@ class TestParseResultBlock:
 
     def test_absent_or_malformed(self):
         assert LP.parse_result_block("no block here") == (None, "")
+
+    # Regression (VANKO-2016-DEEPSEEK41, 2026-09-19): deepseek-v4.1 via Ollama
+    # returns the requested object with no RESULT: header. DAIR read that as an
+    # empty assessment and reason.* stored the raw JSON as the conclusion.
+    def test_bare_object_without_header(self):
+        raw = '{"schema_version": 1, "rationale": "r", "assessment": {"current_phase": "Triage"}}'
+        obj, path = LP.parse_result_block(raw)
+        assert obj["assessment"]["current_phase"] == "Triage" and path == "result_json"
+        assert LP.strip_result_block(raw) == ""
+
+    def test_bare_fenced_object_after_prose(self):
+        raw = 'Some reasoning.\n```json\n{"schema_version": 1, "hypotheses": [{"id": "a"}]}\n```\n'
+        obj, _ = LP.parse_result_block(raw)
+        assert obj["hypotheses"] == [{"id": "a"}]
+        assert LP.strip_result_block(raw) == "Some reasoning."
+
+    def test_bare_object_needs_schema_version(self):
+        assert LP.parse_result_block('prose {"a": 1} more') == (None, "")
+
+    def test_header_wins_over_bare_object(self):
+        raw = ('{"schema_version": 1, "verdict": "UNCERTAIN"}\n'
+               'RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED"}')
+        assert LP.parse_result_block(raw)[0]["verdict"] == "SUPPORTED"
         assert LP.parse_result_block('RESULT:\n{"a": ') == (None, "")
         assert LP.parse_result_block("") == (None, "")
 

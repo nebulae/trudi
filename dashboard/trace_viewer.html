@@ -502,8 +502,10 @@ function entrySummary(e) {
     }
     case 'reason_call': {
       const verdict = (() => {
+        const rb = reasonResult(e);
+        if (rb && typeof rb.verdict === 'string') return ` [${rb.verdict.toUpperCase()}]`;
         const c = e.conclusion || '';
-        const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)/i);
+        const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN|CONTRADICTED|UNVERIFIABLE)/i);
         return m ? ` [${m[1].toUpperCase()}]` : '';
       })();
       const status = e.success ? '' : ' FAIL';
@@ -854,10 +856,47 @@ function renderEvidenceFetch(e) {
   `;
 }
 
+// A reviewer answer's structured RESULT object: the logged result_block, or —
+// for entries recorded before the parser accepted a bare object — a
+// conclusion that is itself the JSON object (optionally ```json-fenced).
+function reasonResult(e) {
+  if (e.result_block && typeof e.result_block === 'object' && Object.keys(e.result_block).length) {
+    return e.result_block;
+  }
+  const c = (e.conclusion || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  if (!c.startsWith('{')) return null;
+  try {
+    const obj = JSON.parse(c);
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+  } catch (_) { return null; }
+}
+
+function renderResultValue(v) {
+  if (v === null || v === undefined || v === '') return '<span style="color:var(--fg-dim)">—</span>';
+  if (typeof v !== 'object') return `<pre>${escapeHtml(String(v))}</pre>`;
+  if (Array.isArray(v) && v.every(x => typeof x !== 'object' || x === null)) {
+    return v.length ? `<ul>${v.map(x => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul>` : '<span style="color:var(--fg-dim)">none</span>';
+  }
+  return `<pre>${escapeHtml(JSON.stringify(v, null, 2))}</pre>`;
+}
+
+function renderResultBlock(rb, e) {
+  const shown = new Set(['schema_version', 'rationale']);
+  if ((e.directives || {}).priority_tools) shown.add('directives');
+  const rest = Object.keys(rb).filter(k => !shown.has(k));
+  return `
+    ${rb.rationale ? `<h3>rationale</h3><pre>${escapeHtml(rb.rationale)}</pre>` : ''}
+    ${rest.map(k => `<h3>${escapeHtml(k.replace(/_/g, ' '))}</h3>${renderResultValue(rb[k])}`).join('')}
+    <details><summary style="cursor:pointer;color:var(--fg-dim)">raw RESULT JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(rb, null, 2))}</pre></details>`;
+}
+
 function renderReasonCall(e) {
   const inputs = e.inputs || {};
   const directives = e.directives || {};
   const audit = e.evidence_audit || [];
+  const rb = reasonResult(e);
+  const conclusionIsJson = rb && !(e.result_block && Object.keys(e.result_block).length);
   return `
     <div class="kv">
       <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool)}</code></span>
@@ -872,7 +911,10 @@ function renderReasonCall(e) {
     </div>
     ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
     ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
-    ${e.conclusion ? `<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
+    ${e.error ? `<h3>error</h3><pre style="color:var(--error)">${escapeHtml(e.error)}</pre>` : ''}
+    ${e.conclusion && !conclusionIsJson && e.conclusion !== e.error
+      && !(rb && (rb.rationale || '').trim() === e.conclusion.trim()) ?`<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
+    ${rb ? renderResultBlock(rb, e) : ''}
     ${directives.priority_tools && directives.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(directives.priority_tools, null, 2))}</pre>` : ''}
     ${audit.length ? `<h3>evidence audit</h3><pre>${escapeHtml(JSON.stringify(audit, null, 2))}</pre>` : ''}
     ${_findingsLinkedHere(e.call_id)}
