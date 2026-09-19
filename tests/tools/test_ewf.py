@@ -118,3 +118,30 @@ class TestMountFullImage:
         # Second call (mmls) should reference ewf_mp/ewf1
         mmls_cmd = m.call_args_list[1][0][0]
         assert "ewf1" in mmls_cmd[-1]
+
+
+class TestMountOptionCompatibility:
+    """Regression: ntfs-3g spells the journal-safety option `norecover`, not
+    `norecovery`. The old spelling was rejected by the helper and surfaced as
+    'wrong fs type, bad option, bad superblock', blocking every NTFS mount."""
+
+    def test_options_use_correct_norecover_spelling(self, mock_run, tmp_path):
+        from tools.ewf import mount_ntfs
+        mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=1048576)
+        cmd = mock_run.call_args[0][0]
+        assert any("norecover" in str(x) and "norecovery" not in str(x) for x in cmd), cmd
+
+    def test_explicit_type_fallback_when_autodetect_fails(self, tmp_path):
+        """On hosts with no kernel NTFS driver (WSL2), the bare `mount` fails;
+        the helper must retry with `-t ntfs-3g`."""
+        from tools.ewf import mount_ntfs
+        ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+              "truncated": False, "cmd": ""}
+        bad = {"success": False, "stdout": "", "stderr": "wrong fs type, bad option",
+               "exit_code": 32, "truncated": False, "cmd": ""}
+        with patch("tools.ewf.run", side_effect=[bad, ok]) as m:
+            r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=345001984)
+        assert r["success"] is True
+        assert m.call_count == 2
+        second_cmd = m.call_args_list[1][0][0]
+        assert "-t" in second_cmd and "ntfs-3g" in second_cmd

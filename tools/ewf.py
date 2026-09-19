@@ -40,6 +40,29 @@ def ewf_umount(mount_point: str) -> dict:
     return run(["umount", mount_point], needs_sudo=True)
 
 
+def _mount_ntfs_ro(ewf_device: str, mount_point: str, offset_bytes: int) -> dict:
+    """Read-only NTFS mount, robust to hosts with no in-kernel NTFS driver.
+
+    ntfs-3g spells the journal-safety option ``norecover`` (NOT ``norecovery``);
+    the misspelling is rejected by the helper and surfaces as
+    "wrong fs type, bad option, bad superblock". Also, on hosts whose kernel has
+    no NTFS module (e.g. WSL2), ``mount`` without ``-t`` cannot auto-detect and
+    fails the same way — so we retry with an explicit ``-t ntfs-3g``.
+    """
+    options = f"ro,loop,norecover,offset={offset_bytes}"
+    first = run(["mount", "-o", options, ewf_device, mount_point], needs_sudo=True)
+    if first["success"]:
+        return first
+    second = run(
+        ["mount", "-t", "ntfs-3g", "-o", options, ewf_device, mount_point],
+        needs_sudo=True,
+    )
+    if second["success"]:
+        return second
+    second["first_attempt_stderr"] = first.get("stderr", "")
+    return second
+
+
 @mcp.tool()
 def mount_ntfs(
     ewf_device: str,
@@ -50,16 +73,14 @@ def mount_ntfs(
     """
     Mount an NTFS partition from a raw EWF device.
     offset_bytes: byte offset = sector_start * sector_size (from mmls output).
-    Always mounts read-only. Adds norecovery to prevent NTFS journal replay.
+    Always mounts read-only, with norecover to prevent NTFS journal replay.
+    Falls back to an explicit ntfs-3g filesystem type when the kernel has no
+    in-built NTFS driver.
     """
     os.makedirs(mount_point, exist_ok=True)
-    options = f"ro,loop,norecovery,offset={offset_bytes}"
     if not read_only:
         return {"success": False, "stderr": "Read-only mount is required for evidence integrity."}
-    return run(
-        ["mount", "-o", options, ewf_device, mount_point],
-        needs_sudo=True,
-    )
+    return _mount_ntfs_ro(ewf_device, mount_point, offset_bytes)
 
 
 @mcp.tool()
@@ -118,12 +139,8 @@ def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) 
 
     offset_bytes = offset_sectors * sector_size
 
-    # Step 3: mount NTFS
-    options = f"ro,loop,norecovery,offset={offset_bytes}"
-    mount_result = run(
-        ["mount", "-o", options, ewf_device, fs_mount_point],
-        needs_sudo=True,
-    )
+    # Step 3: mount NTFS (read-only, explicit ntfs-3g fallback)
+    mount_result = _mount_ntfs_ro(ewf_device, fs_mount_point, offset_bytes)
     mount_result["ntfs_offset_bytes"] = offset_bytes
     mount_result["ntfs_offset_sectors"] = offset_sectors
     mount_result["ewf_device"] = ewf_device
