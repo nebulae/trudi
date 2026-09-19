@@ -84,9 +84,16 @@
 
   .layout {
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr) minmax(360px, 480px);
+    grid-template-columns: 240px minmax(0, 1fr) 6px var(--detail-w, minmax(360px, 480px));
     height: calc(100vh - 44px);
   }
+  /* Drag handle between the entry list and the detail pane. */
+  .splitter {
+    cursor: col-resize; background: var(--bg-2);
+    border-left: 1px solid var(--border); touch-action: none;
+  }
+  .splitter:hover, .splitter.dragging { background: var(--accent); }
+  body.resizing { cursor: col-resize; user-select: none; }
   .pane { overflow: auto; }
   .pane.filters { background: var(--bg-2); border-right: 1px solid var(--border); padding: 12px; }
   .pane.entries { padding: 0; }
@@ -309,6 +316,9 @@
     <div id="entries-list"></div>
     <div class="empty" id="empty-state">Load a trace to begin.</div>
   </main>
+
+  <div class="splitter" id="detail-splitter" role="separator" aria-orientation="vertical"
+       title="Drag to resize · double-click to reset"></div>
 
   <aside class="pane detail" id="detail">
     <div class="empty">Click an entry on the left to see its details.</div>
@@ -1301,7 +1311,60 @@ const CasePicker = {
   },
 };
 
+// ── Resizable detail pane ───────────────────────────────────────────────────
+const DETAIL_W_KEY = 'trudi.detailWidth';
+const DETAIL_MIN = 280;
+const ENTRIES_MIN = 320;
+
+function setupDetailResize() {
+  const layout = $('.layout');
+  const handle = $('#detail-splitter');
+  const clamp = (w) => {
+    const max = layout.clientWidth - 240 - 6 - ENTRIES_MIN;
+    return Math.round(Math.max(DETAIL_MIN, Math.min(w, max)));
+  };
+  const apply = (w) => layout.style.setProperty('--detail-w', `${clamp(w)}px`);
+
+  try {
+    const saved = parseInt(localStorage.getItem(DETAIL_W_KEY), 10);
+    if (saved > 0) apply(saved);
+  } catch (_) { /* storage unavailable: keep the default width */ }
+
+  handle.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    try { handle.setPointerCapture(ev.pointerId); } catch (_) {}
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    const right = layout.getBoundingClientRect().right;
+    const move = (e) => apply(right - e.clientX);
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      try {
+        localStorage.setItem(DETAIL_W_KEY, String(parseInt($('#detail').offsetWidth, 10)));
+      } catch (_) {}
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+
+  handle.addEventListener('dblclick', () => {
+    layout.style.removeProperty('--detail-w');
+    try { localStorage.removeItem(DETAIL_W_KEY); } catch (_) {}
+  });
+
+  // Keep a saved width valid when the window shrinks.
+  window.addEventListener('resize', () => {
+    if (layout.style.getPropertyValue('--detail-w')) apply($('#detail').offsetWidth);
+  });
+}
+
 function init() {
+  setupDetailResize();
   const url = getQueryParam('trace');
   if (url) {
     State.traceUrl = url;
