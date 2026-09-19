@@ -115,14 +115,31 @@ host pivots exist) appear in the trace's phase history.
   intended, collect the named missing classes or record at the reachable tier.
 - `reason.cite_check` — before recording findings with concrete claims (paths, IPs,
   hashes, technique IDs).
+- Before Report, call `reason.readiness_status` to settle deterministic prerequisites.
+  Call `reason.audit_findings` explicitly for new substantive narration; unchanged audits are cached.
 - Report phase: `reason.synthesize(findings=<narrative>)` → `reason.pre_report_check`
   → resolve ALL `blocking_issues` with evidence or typed dispositions (never
   wording) → `misc.export_execution_log("./reports/<case_id>_trace")` →
-  `misc.write_final_report`.
+  `misc.write_final_report`. Approval expires when relevant state changes. Repeated review
+  rounds never waive factual blockers; resolve structured issue IDs with evidence or a
+  reviewed correction. `supersedes` must target the current revision of the same claim;
+  use `misc.retract_finding` to withdraw an unsupported claim explicitly.
 - ATT&CK ids in findings are auto-validated; scout with `correlate.mitre_map` /
   `correlate.mitre_validate`.
 
 ## Recording findings (typed claims — the control plane reads these, not prose)
+
+Prefer `misc.submit_finding` for a complete draft: pass description, confidence,
+explicit evidence IDs, a stable idempotency key, and `claim={...}` containing the
+same typed fields as record_finding. It preflights, reviews and commits one finding.
+Reuse that exact key/request after timeout; a changed draft uses a new key.
+`recorded` means committed; otherwise act on the returned issues. This operation
+never silently lowers confidence. Legacy evaluate/record calls remain available,
+with new review receipts bound to the exact description, typed claim and evidence.
+The separate evaluate/confidence-score/cite-check steps above are handled inside
+submission; do not repeat them before submitting. For a preview, use the separate
+checks and finish with record_finding on the exact reviewed inputs.
+
 
 Every CONFIRMED/LIKELY/UNCONFIRMED finding via `misc.record_finding` needs:
 

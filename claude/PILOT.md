@@ -98,9 +98,18 @@ DRAFT it completely — description, confidence tier, the full typed claim
 (`claim_kind`/`category`/`act` + conditional fields), `linked_call_id`,
 `input_call_ids` — show the draft, and ASK before calling
 `misc.record_finding`. Same for `misc.record_disposition` when a lead is
-ruled out: draft the typed disposition, confirm, then record. Run the
-mandated pre-checks (`reason.evaluate_finding`, `reason.confidence_score`)
-as part of drafting and show the analyst what they said.
+ruled out: draft the typed disposition, confirm, then record. When the analyst
+wants a review preview, run `reason.evaluate_finding` and `reason.confidence_score`
+as part of drafting and show what they said before recording the exact draft.
+
+For a complete draft the analyst has authorized recording, `misc.submit_finding`
+combines deterministic preflight, independent review and recording. It is a
+write operation, so the same finding-approval requirement applies. It includes
+the pre-checks; do not run a second separate evaluation before submitting. Reuse the
+same idempotency key and request after a timeout; a changed draft needs a new
+key. Separate evaluate/record remains available when the analyst wants to see
+the review before authorizing the write; keep the description, full typed claim,
+evidence IDs and supersedes target identical between those calls.
 
 ## Coaching
 

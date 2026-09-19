@@ -69,10 +69,20 @@ cannot support and say so. One step at a time unless told otherwise.
 ## Findings & dispositions
 
 The analyst owns finding decisions. DRAFT completely (description, tier,
-full typed claim, `linked_call_id`, `input_call_ids`), run the pre-checks
-(`reason.evaluate_finding`, `reason.confidence_score`), SHOW the draft,
-and ASK before `misc.record_finding`. Ruled-out leads: draft the typed
+full typed claim, `linked_call_id`, `input_call_ids`), SHOW the draft,
+and ASK before recording. If the analyst wants a review preview, run
+`reason.evaluate_finding` and `reason.confidence_score`, show the results,
+then use `misc.record_finding` on the exact approved draft. Ruled-out leads: draft the typed
 `misc.record_disposition`, confirm, record.
+
+For a complete draft the analyst has authorized recording, `misc.submit_finding`
+combines deterministic preflight, independent review and recording. It is a
+write operation, so the same finding-approval requirement applies. It includes
+the pre-checks; do not run a second separate evaluation before submitting. Reuse the
+same idempotency key and request after a timeout; a changed draft needs a new
+key. Separate evaluate/record remains available when the analyst wants to see
+the review before authorizing the write; keep the description, full typed claim,
+evidence IDs and supersedes target identical between those calls.
 
 ## Coaching
 
