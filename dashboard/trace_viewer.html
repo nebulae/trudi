@@ -502,8 +502,10 @@ function entrySummary(e) {
     }
     case 'reason_call': {
       const verdict = (() => {
+        const rv = reviewState(e);
+        if (rv.pending) return ` [⏳ reviewing · round ${rv.round}/${rv.maxRounds}]`;
         const rb = reasonResult(e);
-        if (rb && typeof rb.verdict === 'string') return ` [${rb.verdict.toUpperCase()}]`;
+        if (rb && typeof rb.verdict === 'string') return ` [${rb.verdict.toUpperCase()}${rv.fetches ? ` after ${rv.fetches} fetch${rv.fetches > 1 ? 'es' : ''}` : ''}]`;
         const c = e.conclusion || '';
         const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN|CONTRADICTED|UNVERIFIABLE)/i);
         return m ? ` [${m[1].toUpperCase()}]` : '';
@@ -645,6 +647,8 @@ function entrySummary(e) {
 function entryMatchesFilters(e) {
   const F = State.filters;
   if (F.types.size && !F.types.has(e.type)) return false;
+  if (e.type === 'reason_evidence_fetch' && !F.types.has('reason_evidence_fetch')
+      && e.reason_call_id && State.entriesById.has(e.reason_call_id)) return false;
   if (F.jump !== null) return e.call_id === F.jump;
   if (F.phase) {
     const blk = State.phaseBlocks.find(b => b.anchor === F.phase);
@@ -775,7 +779,7 @@ function renderDetail(e) {
     default: body = `<pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
   }
   $('#detail').innerHTML = head + body;
-  $('#detail').querySelectorAll('.link[data-jump]').forEach(el => {
+  $('#detail').querySelectorAll('[data-jump]').forEach(el => {
     el.addEventListener('click', () => selectEntry(parseInt(el.dataset.jump, 10)));
   });
 }
@@ -856,6 +860,49 @@ function renderEvidenceFetch(e) {
   `;
 }
 
+// Evidence fetches grouped under the review that requested them.
+function buildFetchIndex(entries) {
+  const m = new Map();
+  for (const e of entries) {
+    if (e.type === 'reason_evidence_fetch' && e.reason_call_id) {
+      if (!m.has(e.reason_call_id)) m.set(e.reason_call_id, []);
+      m.get(e.reason_call_id).push(e);
+    }
+  }
+  return m;
+}
+
+// A review is logged at round 1 and rewritten in place when its last round
+// finishes; review_pending stays true until then.
+const MAX_EVIDENCE_ROUNDS = 3;
+function reviewState(e) {
+  const fetches = ((State.fetchesByReview && State.fetchesByReview.get(e.call_id)) || []).length;
+  const pending = e.tool === 'reason_evaluate_finding' && e.review_pending === true;
+  return { fetches, pending, round: Math.min(fetches + 1, MAX_EVIDENCE_ROUNDS + 1),
+           maxRounds: MAX_EVIDENCE_ROUNDS + 1 };
+}
+
+function renderReviewFetches(e) {
+  const fetches = (State.fetchesByReview && State.fetchesByReview.get(e.call_id)) || [];
+  const rv = reviewState(e);
+  if (!fetches.length && !rv.pending) return '';
+  const rows = fetches.map((f, i) => {
+    const reqs = Array.isArray(f.requests) ? f.requests : [];
+    return reqs.map(r => `<tr>
+      <td>${i + 1}</td>
+      <td>${_linkChip(f.call_id, '#' + f.call_id)}</td>
+      <td>${r.call_id ? _linkChip(r.call_id, '#' + r.call_id) : ''}</td>
+      <td><code>${escapeHtml(shorten(r.query || '', 60))}</code></td>
+      <td>${r.rows_returned ?? ''}</td>
+      <td>${escapeHtml(r.status || '')}</td></tr>`).join('');
+  }).join('');
+  const note = rv.pending
+    ? `<p style="color:var(--self-correct)">⏳ Review in progress — round ${rv.round} of ${rv.maxRounds}. The verdict below is from an earlier round and will be replaced.</p>`
+    : `<p style="color:var(--fg-dim)">Final verdict reached after ${fetches.length} evidence fetch round${fetches.length === 1 ? '' : 's'}; earlier-round answers were replaced.</p>`;
+  return `<h3>evidence fetches</h3>${note}
+    ${rows ? `<table><thead><tr><th>round</th><th>fetch</th><th>source</th><th>query</th><th>rows</th><th>status</th></tr></thead><tbody>${rows}</tbody></table>` : ''}`;
+}
+
 // A reviewer answer's structured RESULT object: the logged result_block, or —
 // for entries recorded before the parser accepted a bare object — a
 // conclusion that is itself the JSON object (optionally ```json-fenced).
@@ -911,6 +958,7 @@ function renderReasonCall(e) {
     </div>
     ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
     ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
+    ${renderReviewFetches(e)}
     ${e.error ? `<h3>error</h3><pre style="color:var(--error)">${escapeHtml(e.error)}</pre>` : ''}
     ${e.conclusion && !conclusionIsJson && e.conclusion !== e.error
       && !(rb && (rb.rationale || '').trim() === e.conclusion.trim()) ?`<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
@@ -1124,6 +1172,7 @@ async function load() {
     State.entries = newEntries;
     State.entriesById = new Map(newEntries.map(e => [e.call_id, e]));
     State.reverseIndex = buildReverseFindingIndex(newEntries);
+    State.fetchesByReview = buildFetchIndex(newEntries);
     State.phaseBlocks = buildPhaseIndex(newEntries);
     $('#case-id').textContent = State.caseId;
     $('#last-fetch').textContent = `fetched ${_fmtLocalHMS(new Date())}`;
