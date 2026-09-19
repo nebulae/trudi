@@ -341,3 +341,38 @@ def test_followup_fetch_uses_only_versioned_packet_sources(case, tmp_path):
         [{'call_id': cid, 'query': 'Alpha', 'columns': []}], [cid], 4000,
         evidence_packet=packet)
     assert records[0]['rows_returned'] == 1 and 'Alpha' in text
+
+
+# Regression (VANKO-2016-DEEPSEEK41): every refusal after a CHALLENGED or failed
+# review read "Review does not match the exact current claim", so the agent kept
+# rewording instead of collecting evidence or dropping to SUSPECTED.
+@pytest.mark.parametrize('verdict', ['CHALLENGED', 'CONTRADICTED', 'UNVERIFIABLE'])
+def test_non_supported_review_is_reported_as_its_verdict(case, verdict):
+    from tools.misc import record_finding
+    import tools.reasoning as R
+    log, cid = case
+    claim = {'claim_kind': 'positive', 'category': 'other', 'act': 'other'}
+    with patch.object(R, '_ask', side_effect=fake_review(log, verdict=verdict)):
+        R.reason_evaluate_finding('Observed alpha record', 'Observed alpha record',
+                                  input_call_ids=[cid], linked_call_id=cid, **claim)
+    r = record_finding('Observed alpha record', 'LIKELY', linked_call_id=cid,
+                       input_call_ids=[cid], supporting_evidence='Observed alpha record', **claim)
+    assert not r['success']
+    # stored verdicts are normalized (CONTRADICTED→CHALLENGED, UNVERIFIABLE→UNCERTAIN)
+    names = {verdict, {'CONTRADICTED': 'CHALLENGED', 'UNVERIFIABLE': 'UNCERTAIN'}.get(verdict, verdict)}
+    assert any(n in r['error'] for n in names) and 'SUSPECTED' in r['error']
+    assert 'does not match' not in r['error']
+
+
+def test_receipt_mismatch_names_the_differing_field(case):
+    from tools.misc import record_finding
+    import tools.reasoning as R
+    log, cid = case
+    claim = {'claim_kind': 'positive', 'category': 'other', 'act': 'other'}
+    with patch.object(R, '_ask', side_effect=fake_review(log)):
+        R.reason_evaluate_finding('Observed alpha record', 'Observed alpha record',
+                                  input_call_ids=[cid], linked_call_id=cid, **claim)
+    r = record_finding('Observed alpha record', 'LIKELY', linked_call_id=cid, input_call_ids=[cid],
+                       supporting_evidence='Observed alpha record', techniques=['T1048'], **claim)
+    assert not r['success'] and r.get('detail_gate') == 'review_receipt'
+    assert 'claim.techniques' in r['error']

@@ -124,6 +124,43 @@ def claim_mismatch(finding_claim: dict, eval_claim: dict) -> list:
     return out
 
 
+def _receipt_refusal(ctx, review: dict, match: str) -> dict:
+    """Say WHY a receipt-bound review does not authorise this record. A
+    non-SUPPORTED verdict is the usual cause and must not read as a wording
+    mismatch — the agent then rephrases instead of collecting evidence."""
+    base = {"success": False, "evaluate_call_id": review.get("call_id"), "evaluate_match": match,
+            "description": ctx.description, "confidence": ctx.confidence}
+    verdict = (review.get("result_block") or {}).get("verdict") or review.get("verdict")
+    if verdict != "SUPPORTED":
+        return {**base, "gate": "confirmed_requires_supported_evaluate",
+                "error": (f"{ctx.tier} refused: the review of this claim (call "
+                          f"{review.get('call_id')}) returned {verdict or 'no verdict'}, and "
+                          f"{ctx.tier} needs SUPPORTED. Collect the evidence the review names and "
+                          f"evaluate again, or record at SUSPECTED.")}
+    from core.evidence_packets import cited_ids, packet_current
+    packet = review.get("evidence_packet") or {}
+    req = packet.get("request") or {}
+    diffs = []
+    if (req.get("description") or "").strip() != (ctx.description or "").strip():
+        diffs.append("description")
+    rc, cc = req.get("claim") or {}, getattr(ctx, "claim", None) or {}
+    diffs += [f"claim.{k}" for k in sorted(set(rc) | set(cc)) if rc.get(k) != cc.get(k)]
+    reviewed_ids = sorted({e.get("call_id") for e in packet.get("evidence") or []})
+    ids = [c for c in cited_ids({"input_call_ids": ctx.input_call_ids,
+                                 "linked_call_id": ctx.linked_call_id, "claim": cc})
+           if (ctx.idx.by_call_id.get(c) or {}).get("type") == "tool_call"]
+    if sorted(set(ids)) != reviewed_ids:
+        diffs.append(f"evidence call ids (reviewed {reviewed_ids}, recording {sorted(set(ids))})")
+    if int(req.get("supersedes") or 0) != int(getattr(ctx, "supersedes", 0) or 0):
+        diffs.append("supersedes")
+    if not diffs and packet and not packet_current(ctx.log, packet):
+        diffs.append("the cited evidence changed after the review")
+    return {**base, "gate": "review_receipt", "differs": diffs,
+            "error": ("The review (call " + str(review.get("call_id")) + ") covered a different "
+                      "claim/evidence than this record: " + (", ".join(diffs) or "unknown difference") +
+                      ". Record exactly what was reviewed, or evaluate this revision.")}
+
+
 def check(ctx) -> Optional[dict]:
     if ctx.tier not in {"CONFIRMED", "LIKELY"}:
         return None
@@ -172,7 +209,13 @@ def check(ctx) -> Optional[dict]:
             "evaluate_match": "none",
         }
 
-    # A failed review is the actionable cause; report it before a receipt mismatch.
+    # The review's own outcome is the actionable cause; report it before any
+    # receipt mismatch. A CHALLENGED review is logged success=False with a
+    # verdict — that is a verdict, not a failed review.
+    _verdict = (eval_entry.get("result_block") or {}).get("verdict") or eval_entry.get("verdict")
+    if (eval_entry.get("review_receipt") or eval_entry.get("receipt_required")) and _verdict \
+            and _verdict != "SUPPORTED":
+        return _receipt_refusal(ctx, eval_entry, match)
     if eval_entry.get("success") is False or eval_entry.get("review_pending"):
         return {"success": False, "gate": "confirmed_requires_supported_evaluate",
                 "error": "Matched evaluation failed" +
@@ -180,8 +223,7 @@ def check(ctx) -> Optional[dict]:
                          "; complete a successful evidence review first",
                 "evaluate_call_id": eval_entry.get("call_id"), "evaluate_match": match}
     if eval_entry.get('receipt_required') or eval_entry.get('review_receipt'):
-        return {'success': False, 'gate': 'review_receipt',
-                'error': 'Review does not match the exact current claim/evidence; submit or evaluate that revision'}
+        return _receipt_refusal(ctx, eval_entry, match)
 
     # The reviewer must have judged the claim actually being recorded.
     mismatch = claim_mismatch(claim, eval_entry.get("claim") or {})
