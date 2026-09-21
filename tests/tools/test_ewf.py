@@ -80,7 +80,9 @@ class TestMountFullImage:
         from tools.ewf import mount_full_image
         ewf_mp = str(tmp_path / "ewf")
         fs_mp = str(tmp_path / "fs")
-        side = [self._ok(), self._ok(MMLS_OUTPUT), self._ok()]
+        # ewfmount, mmls, fsstat probe of the candidate, mount
+        side = [self._ok(), self._ok(MMLS_OUTPUT),
+                self._ok("File System Type: NTFS\n"), self._ok()]
         with patch("tools.ewf.run", side_effect=side) as m:
             r = mount_full_image("/fake/image.E01", ewf_mp, fs_mp)
         assert r["success"] is True
@@ -101,13 +103,22 @@ class TestMountFullImage:
         assert r["success"] is False
 
     def test_no_ntfs_partition_detected(self, tmp_path):
+        # A real table whose only partition is not NTFS: fsstat says so, and the
+        # refusal reports what was probed instead of guessing from the label.
         from tools.ewf import mount_full_image
-        mmls_no_ntfs = "Slot  Start  End  Length  Description\n000  0  2047  2048  Linux\n"
-        side = [self._ok(), self._ok(mmls_no_ntfs)]
+        mmls_linux = MMLS_OUTPUT.replace("NTFS (0x07)", "Linux (0x83)")
+        side = [self._ok(), self._ok(mmls_linux), self._ok("File System Type: Ext4\n")]
         with patch("tools.ewf.run", side_effect=side):
             r = mount_full_image("/fake/image.E01", str(tmp_path / "ewf"), str(tmp_path / "fs"))
         assert r["success"] is False
-        assert "NTFS" in r["stderr"]
+        assert "NTFS" in r["stderr"] and "Ext4" in r["stderr"]
+
+    def test_unreadable_partition_table_is_reported(self, tmp_path):
+        from tools.ewf import mount_full_image
+        side = [self._ok(), self._ok("Slot  Start  End  Length  Description\n")]
+        with patch("tools.ewf.run", side_effect=side):
+            r = mount_full_image("/fake/image.E01", str(tmp_path / "ewf"), str(tmp_path / "fs"))
+        assert r["success"] is False and "partition" in r["stderr"].lower()
 
     def test_ewf_device_path_constructed(self, tmp_path):
         from tools.ewf import mount_full_image
@@ -145,3 +156,76 @@ class TestMountOptionCompatibility:
         assert m.call_count == 2
         second_cmd = m.call_args_list[1][0][0]
         assert "-t" in second_cmd and "ntfs-3g" in second_cmd
+
+
+class TestPartitionDetection:
+    """Regression (VANKO-2016-DEEPSEEK41 run 2, 2026-09-20): a GPT table names
+    no partition "NTFS", so description matching found nothing, mount_full_image
+    returned "Could not detect NTFS partition", and the agent hand-derived an
+    offset one sector off ("NTFS signature is missing")."""
+
+    GPT = """GUID Partition Table (EFI)
+Offset Sector: 0
+Units are in 512-byte sectors
+
+      Slot      Start        End          Length       Description
+000:  Meta      0000000000   0000000000   0000000001   Safety Table
+001:  -------   0000000000   0000002047   0000002048   Unallocated
+002:  Meta      0000000001   0000000001   0000000001   GPT Header
+004:  000       0000002048   0000739327   0000737280   Basic data partition
+007:  003       0001411072   0232294399   0230883328   Basic data partition
+009:  005       0233216000   0244275199   0011059200   Basic data partition
+"""
+
+    def test_parses_gpt_rows_and_skips_meta(self):
+        from tools.ewf import _mmls_partitions
+        parts = _mmls_partitions(self.GPT)
+        assert [p["start"] for p in parts][0] == 1411072      # largest first
+        assert all(p["slot"][0].isdigit() for p in parts)     # no Meta/unallocated
+        assert len(parts) == 3
+
+    def test_sector_size_is_read_not_assumed(self):
+        from tools.ewf import _mmls_sector_size
+        assert _mmls_sector_size(self.GPT) == 512
+        assert _mmls_sector_size(self.GPT.replace("512-byte", "4096-byte")) == 4096
+        assert _mmls_sector_size("no units line") == 512
+
+    def test_mount_full_image_probes_with_fsstat_and_mounts_that_offset(self, tmp_path):
+        from tools.ewf import mount_full_image
+        ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+              "truncated": False, "cmd": ""}
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "mmls":
+                return {**ok, "stdout": self.GPT}
+            if cmd[0] == "fsstat":
+                # the first (largest) candidate is the Windows volume
+                fs = "NTFS" if cmd[2] == "1411072" else "FAT32"
+                return {**ok, "stdout": f"File System Type: {fs}\n"}
+            return dict(ok)
+
+        with patch("tools.ewf.run", side_effect=fake_run):
+            r = mount_full_image("/ev/d.E01", str(tmp_path / "ewf"), str(tmp_path / "c"))
+        assert r["success"] and r["ntfs_offset_sectors"] == 1411072
+        assert r["ntfs_offset_bytes"] == 1411072 * 512
+        assert any(c[0] == "mount" and f"offset={1411072 * 512}" in " ".join(c) for c in calls)
+
+    def test_no_ntfs_anywhere_reports_what_was_probed(self, tmp_path):
+        from tools.ewf import mount_full_image
+        ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+              "truncated": False, "cmd": ""}
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "mmls":
+                return {**ok, "stdout": self.GPT}
+            if cmd[0] == "fsstat":
+                return {**ok, "stdout": "File System Type: Ext4\n"}
+            return dict(ok)
+
+        with patch("tools.ewf.run", side_effect=fake_run):
+            r = mount_full_image("/ev/d.E01", str(tmp_path / "ewf"), str(tmp_path / "c"))
+        assert r["success"] is False
+        assert "Ext4" in r["stderr"] and "1411072" in r["stderr"]
+        assert len(r["partitions"]) == 3
