@@ -1,6 +1,7 @@
 """EWF / Expert Witness Format tools — mount and verify E01 images."""
 import subprocess
 import os
+import re
 from typing import Optional
 from fastmcp import FastMCP
 from core import run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
@@ -89,17 +90,47 @@ def umount_filesystem(mount_point: str) -> dict:
     return run(["umount", mount_point], needs_sudo=True)
 
 
+_MMLS_ROW_RE = re.compile(r"^\d{3}:\s+(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s*(.*)$")
+
+
+def _mmls_sector_size(stdout: str) -> int:
+    """mmls prints its unit ("Units are in 512-byte sectors"); 4Kn media differ."""
+    m = re.search(r"Units are in (\d+)-byte sectors", stdout or "")
+    return int(m.group(1)) if m else 512
+
+
+def _mmls_partitions(stdout: str) -> list[dict]:
+    """Real partitions from an mmls table, largest first.
+
+    Skips the Meta and Unallocated rows and keeps every data partition whatever
+    its description: a GPT table calls them "Basic data partition", so matching
+    the word NTFS in the description finds nothing at all.
+    """
+    out = []
+    for line in (stdout or "").splitlines():
+        m = _MMLS_ROW_RE.match(line.strip())
+        if not m:
+            continue
+        slot, start, end, length, desc = m.groups()
+        if not slot[0].isdigit():      # Meta / ------- rows carry no partition
+            continue
+        out.append({"slot": slot, "start": int(start), "end": int(end),
+                    "length": int(length), "description": desc.strip()})
+    # A description that names the filesystem is the strongest hint; size breaks ties.
+    return sorted(out, key=lambda p: ("ntfs" in p["description"].lower(), p["length"]),
+                  reverse=True)
+
+
 @mcp.tool()
 def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) -> dict:
     """
     Convenience: mount an E01 image end-to-end.
     1. ewfmount the E01 to ewf_mount_point (exposes ewf1)
     2. Read partition table via mmls
-    3. Mount the largest NTFS partition to fs_mount_point
+    3. Probe candidate partitions with fsstat and mount the NTFS one
 
     Returns the mount result and the detected NTFS offset in bytes.
     """
-    import re
 
     os.makedirs(ewf_mount_point, exist_ok=True)
     os.makedirs(fs_mount_point, exist_ok=True)
@@ -116,26 +147,37 @@ def mount_full_image(image_e01: str, ewf_mount_point: str, fs_mount_point: str) 
     if not mmls_result["success"]:
         return mmls_result
 
-    # Parse largest NTFS partition start sector
+    sector_size = _mmls_sector_size(mmls_result["stdout"])
+    candidates = _mmls_partitions(mmls_result["stdout"])
+    if not candidates:
+        return {"success": False,
+                "stderr": "Could not read any partition from mmls output.",
+                "mmls": mmls_result["stdout"]}
+
+    # Confirm with fsstat which candidate actually holds NTFS. A GPT table
+    # labels its partitions "Basic data partition", so the description does not
+    # name the filesystem; guessing from it mounted nothing and left the agent
+    # deriving an offset by hand.
     offset_sectors = None
-    sector_size = 512
-    best_len = 0
-    for line in mmls_result["stdout"].splitlines():
-        if "NTFS" in line or "0x07" in line:
-            parts = line.split()
-            # mmls columns: slot, start, end, length, description
-            for i, p in enumerate(parts):
-                try:
-                    start = int(p)
-                    length = int(parts[i + 2]) if i + 2 < len(parts) else 0
-                    if length > best_len:
-                        best_len = length
-                        offset_sectors = start
-                except (ValueError, IndexError):
-                    continue
+    checked = []
+    for part in candidates:
+        probe = run(["fsstat", "-o", str(part["start"]), ewf_device], needs_sudo=True)
+        fs_type = ""
+        for line in (probe.get("stdout") or "").splitlines():
+            if line.lower().startswith("file system type:"):
+                fs_type = line.split(":", 1)[1].strip()
+                break
+        checked.append({**part, "fs_type": fs_type})
+        if "ntfs" in fs_type.lower():
+            offset_sectors = part["start"]
+            break
 
     if offset_sectors is None:
-        return {"success": False, "stderr": "Could not detect NTFS partition from mmls output.", "mmls": mmls_result["stdout"]}
+        return {"success": False,
+                "stderr": ("No NTFS filesystem found in any partition (fsstat probed "
+                           + ", ".join(f"sector {c['start']}: {c['fs_type'] or 'unreadable'}"
+                                       for c in checked) + ")."),
+                "partitions": checked, "mmls": mmls_result["stdout"]}
 
     offset_bytes = offset_sectors * sector_size
 
