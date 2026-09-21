@@ -1155,6 +1155,12 @@ def record_disposition(
                 return {'success': False, 'gate': 'job_disposition', 'job_id': work['job_id'],
                         'error': 'Use target_kind=job with this job_id after stopping and collecting its worker.'}
             related = {work.get('result_call_id'), work.get('trigger_call_id')}
+            if work.get('scope_unspecified'):
+                # Registered before its DAIR entry receives an ID: the trigger is
+                # any assessment whose directives name this bare tool.
+                from core.work_obligations import names_bare_tool
+                related |= {e['call_id'] for e in idx.by_type.get('dair_call') or []
+                            if names_bare_tool(e.get('directives') or {}, work['tool'])}
             if not note or not cids or any(c not in related for c in cids):
                 return {'success': False, 'gate': 'follow_up',
                         'error': 'Provide a reasoned note and the request result/trigger call IDs.'}

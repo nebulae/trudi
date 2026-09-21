@@ -118,6 +118,42 @@ def test_unspecified_work_can_be_refined_with_required_schema(monkeypatch):
     assert not completed(log._entries, scoped)
 
 
+def test_exact_completed_run_settles_bare_tool_obligation():
+    """A bare DAIR tool name carries no target, so the analyst's exact completed run is its scope."""
+    from core.phase_routing import pending_work
+    from core.work_obligations import register
+    bare = register(log, ['misc.regripper_hive', 'ez.evtxecmd'])
+    work, _, _ = reserve(log, 'misc.regripper_hive', {'hive_path': '/mnt/x/SAM', 'plugin': 'samparse'}, 'Collect')
+    assert work_state(log)[bare[0]['request_id']]['status'] == 'needs_specification'
+    cid = log.record_tool_call('rip.pl -r SAM -p samparse', True, False, 0, 0)
+    finish(log, work, {'success': True, '_trudi_call_id': cid})
+    settled = work_state(log)[bare[0]['request_id']]
+    assert settled['status'] == 'superseded' and settled['superseded_by'] == work['request_id']
+    # Another tool's bare obligation, and a failed run of the same tool, stay open.
+    assert [w['tool'] for w in pending_work(log)] == ['ez_evtxecmd']
+    failed, _, _ = reserve(log, 'ez.evtxecmd', {'path': '/mnt/x/Security.evtx'}, 'Collect')
+    finish(log, failed, {'success': False})
+    assert work_state(log)[bare[1]['request_id']]['status'] == 'needs_specification'
+    # Naming the bare tool again does not reopen a settled obligation.
+    register(log, ['misc.regripper_hive'])
+    assert work_state(log)[bare[0]['request_id']]['status'] == 'superseded'
+
+
+def test_bare_tool_obligation_can_be_dispositioned_by_its_dair_call():
+    from core.work_obligations import register
+    from tools.misc import record_disposition
+    bare = register(log, ['misc.evtx_filter'])[0]
+    other = log.record_dair_call('Triage', '', False, '', '', 'stay', '',
+                                 directives={'priority_tools': ['strings.grep']})
+    named = log.record_dair_call('Triage', '', False, '', '', 'stay', '',
+                                 directives={'required_work': ['misc.evtx_filter']})
+    refused = record_disposition('follow_up', bare['request_id'], 'inapplicable', [other], 'Wrong trigger')
+    assert not refused['success']
+    result = record_disposition('follow_up', bare['request_id'], 'inapplicable', [named],
+                                'No event logs are present in this evidence set')
+    assert result['success'] and work_state(log)[bare['request_id']]['status'] == 'dispositioned'
+
+
 def test_question_outcome_commits_reviewed_indeterminate_answer():
     from tools.misc import declare_questions
     from core.question_outcomes import record, answered

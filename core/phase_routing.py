@@ -287,7 +287,19 @@ def finish(log, work, payload=None, *, status=None, error=''):
         except ValueError:
             fields['executable_versions'] = {}
 
-        return append_event(log, 'phase_work', **fields)
+        done = append_event(log, 'phase_work', **fields)
+        if status == 'completed' and not current.get('scope_unspecified'):
+            # A bare tool directive names no target; the exact completed run is its scope.
+            supersede_unspecified(log, current['tool'], current['request_id'])
+        return done
+
+
+def supersede_unspecified(log, tool, request_id):
+    for old in work_state(log).values():
+        if old.get('scope_unspecified') and old['tool'] == tool and old['status'] == 'needs_specification':
+            fields = {k: v for k, v in old.items() if k not in ('call_id', 'type', 'ts')}
+            append_event(log, 'phase_work', **{**fields, 'status': 'superseded',
+                                             'superseded_by': request_id})
 
 
 def reconcile_job(log, tool, arguments, payload):

@@ -93,9 +93,12 @@ issues are actionable. Empty issues alone are not approval. A watchdog result
 with `operation_id` and `status: running` means the original work still owns the
 request: use `misc.operation_status` instead of starting a duplicate.
 
-DAIR `directives.required_work` names exact `tool` and `arguments` objects. A bare
-tool priority requires scope specification. Complete the named target or settle
-its exact work ID; another use of the same tool does not count. Request-scoped
+DAIR `directives.required_work` names exact `tool` and `arguments` objects. For an
+exact obligation, complete the named target or settle its exact work ID; another
+use of the same tool does not count. A bare tool priority names no target: it
+stays open (`needs_specification`) until an exact run of that tool completes, a
+later assessment scopes it, or it is settled with `target_kind="follow_up"`,
+its work ID and the DAIR call that named it. A failed run settles nothing. Request-scoped
 `execution_failed`, `dependency_unavailable`, `incompatible` and `parse_failed`
 dispositions document failure while leaving the obligation open. Failed scope
 can be settled as unavailable only with exhausted alternatives and a stated

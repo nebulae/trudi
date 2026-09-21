@@ -33,6 +33,12 @@ def parse_work(item):
         return None
 
 
+def names_bare_tool(directives, tool):
+    declared = directives.get('required_work') or directives.get('priority_tools') or []
+    return any(not parse_work(item) and str(item).strip().replace('.', '_') == tool
+               for item in declared)
+
+
 def canonical(tool, arguments):
     from core.phase_routing import _TOOL_SCHEMAS, validate_arguments
     schema = _TOOL_SCHEMAS.get(tool)
@@ -70,7 +76,8 @@ def completed(entries, item):
 
 
 def register(log, items, call_id=0):
-    from core.phase_routing import reserve, action_phase, work_state, append_event, normalized
+    from core.phase_routing import (reserve, action_phase, work_state, append_event, normalized,
+                                    supersede_unspecified)
     from core.readiness import digest
     from tools._gates.work_order import _control_plane_tool
     registered = []
@@ -102,11 +109,7 @@ def register(log, items, call_id=0):
             continue
         with log.transaction():
             work, _, _ = reserve(log, tool, arguments, phase, execute=False, trigger_call_id=call_id)
-            for old in work_state(log).values():
-                if old.get('scope_unspecified') and old['tool'] == tool and old['status'] == 'needs_specification':
-                    fields = {k: v for k, v in old.items() if k not in ('call_id', 'type', 'ts')}
-                    append_event(log, 'phase_work', **{**fields, 'status': 'superseded',
-                                                     'superseded_by': work['request_id']})
+            supersede_unspecified(log, tool, work['request_id'])
         registered.append({'request_id': work['request_id'], 'status': work['status'],
                            'tool': tool, 'arguments': arguments})
     return registered
