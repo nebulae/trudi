@@ -36,6 +36,8 @@ _flock_local = threading.local()
 
 current_mcp_tool: contextvars.ContextVar[str] = contextvars.ContextVar(
     "trudi_current_mcp_tool", default="")
+current_mcp_arguments: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    'trudi_current_mcp_arguments', default={})
 
 
 @contextmanager
@@ -149,8 +151,8 @@ def _build_phase_index(entries: list[dict]) -> list[dict]:
     current_block: dict | None = None
     phase_count: dict[str, int] = {}
     for e in entries:
-        if e.get("type") == "dair_call":
-            phase = e.get("current_phase", "") or "unknown"
+        if e.get("type") in ('dair_call', 'phase_transition'):
+            phase = e.get('to_phase') or e.get('dair_phase') or e.get("current_phase", "") or "unknown"
             cid = e.get("call_id", 0)
             if phase != current_phase:
                 if current_block:
@@ -256,6 +258,12 @@ def _render_entries(case_id: str | None, entries: list[dict]) -> str:
                 f"- `{ts}` {prefix}**✗ ABANDONED** `{e.get('tool', '')}` "
                 f"reason: {e.get('reason', '')[:200]}"
             )
+        elif t == 'phase_transition':
+            lines.append(f"- `{ts}` {prefix}**DAIR POLICY** {e['from_phase']} → {e['to_phase']} "
+                         f"request={e['request_id']} reason={e['reason']}")
+        elif t == 'phase_work':
+            lines.append(f"- `{ts}` {prefix}**FOLLOW-UP** `{e['tool']}` {e['status']} "
+                         f"request={e['request_id']}")
         elif t == "dair_call":
             phase = e.get("current_phase", "")
             next_p = e.get("next_phase", "")
@@ -433,6 +441,7 @@ class ExecutionLog:
         self._entries: list[dict] = []
         self._path: Optional[str] = None
         self._case_id: Optional[str] = None
+        self._run_id: Optional[str] = None
         self._seq: int = 0
         self._lock = threading.RLock()
         # DAIR phase state — the active phase + stack at write time. Each
@@ -465,12 +474,16 @@ class ExecutionLog:
         with self._lock, _hook_flock():
             if self._path and os.path.exists(self._path):
                 with open(self._path) as f:
-                    disk = json.load(f).get("entries", [])
+                    document = json.load(f)
+                    if self._run_id and document.get('run_id') not in (None, self._run_id):
+                        raise RuntimeError('Investigation run changed; reconnect before writing')
+                    disk = document.get("entries", [])
                 anonymous = [e for e in self._entries if e.get("call_id") is None]
                 merged = {e["call_id"]: e for e in self._entries if e.get("call_id") is not None}
                 merged.update({e["call_id"]: e for e in disk if e.get("call_id") is not None})
                 self._entries = sorted(merged.values(), key=lambda e: e["call_id"]) + anonymous
                 self._index_version += 1
+                self._rehydrate_phase_state()
             yield
 
     def _next_id(self) -> int:
@@ -484,6 +497,8 @@ class ExecutionLog:
         return cid
 
     def _append_entry(self, entry: dict) -> None:
+        from core.operations import check_owner
+        check_owner(self)
         """Append `entry` and flush. Must be called under self._lock.
 
         Stamps `dair_phase` + `dair_depth` when phase state is known.
@@ -608,6 +623,12 @@ class ExecutionLog:
         the post-transition phase.
         """
         sa = (stack_action or "stay").lower()
+        if sa == 'push' and next_phase == 'Report' and self._phase_stack:
+            if self._phase_stack[-1].get('report_follow_up'):
+                self._phase_stack.pop()
+            if self._phase_stack and self._phase_stack[-1]['phase'] == 'Report':
+                self._current_phase = 'Report'
+                return
         if sa == "push" and next_phase:
             self._phase_stack.append({
                 "phase": next_phase,
@@ -685,11 +706,22 @@ class ExecutionLog:
     def _rehydrate_phase_state(self) -> None:
         """Replay the dair_call history to reconstruct current phase state.
         Used after configure() rehydrates an existing trace."""
-        self._current_phase = ""
-        self._phase_stack = []
+        self._current_phase = 'Triage'
+        self._phase_stack = [{'phase': 'Triage', 'entry_reason': 'session_start_default', 'depth': 0}]
+        self._last_dair_cid = 0
         for e in self._entries:
+            if e.get('type') == 'phase_transition':
+                from core.phase_routing import apply_return
+                apply_return(self, e['to_phase'], e.get('reason', 'report_follow_up'))
+                continue
+            if e.get('tool') == 'reason_pre_report_check' and e.get('phase_returned_to'):
+                # Old traces changed this state only in memory.
+                from core.phase_routing import apply_return
+                apply_return(self, e['phase_returned_to'], 'legacy_report_follow_up')
+                continue
             if e.get("type") != "dair_call":
                 continue
+            self._last_dair_cid = e.get('call_id', 0)
             self._apply_dair_transition(
                 current_phase=e.get("current_phase", "") or "",
                 stack_action=e.get("stack_action", "") or "",
@@ -743,7 +775,18 @@ class ExecutionLog:
             points at a different case, a loud WARN is emitted before
             the overwrite happens.
         """
+        from core.operations import running as running_operations
+        if self._run_id and running_operations(run_id=self._run_id):
+            try:
+                with open(path) as stream:
+                    target = json.load(stream)
+                same = target.get('case_id') == case_id and target.get('run_id') == self._run_id
+            except (OSError, ValueError):
+                same = False
+            if not same:
+                raise RuntimeError('In-process writers are active; wait for owned operations before replacing the run')
         with self._lock:
+            replace_run_id = ...
             try:
                 with open(path) as f:
                     data = json.load(f)
@@ -754,6 +797,7 @@ class ExecutionLog:
                     self._seq = max((e.get("call_id", 0) for e in entries), default=0)
                     self._case_id = case_id
                     self._path = path
+                    self._run_id = data.get('run_id') or self._legacy_run_id(case_id, entries)
                     self._index_version += 1  # invalidate any cached LogIndex
                     self._cached_index = None
                     self._rehydrate_phase_state()
@@ -766,6 +810,7 @@ class ExecutionLog:
                         self._save_session()
                     return len(entries)
                 elif existing_id:
+                    replace_run_id = data.get('run_id')
                     _warn(
                         f"existing trace has case_id={existing_id!r}, "
                         f"overwriting with {case_id!r} at {path}"
@@ -779,6 +824,8 @@ class ExecutionLog:
             self._last_dair_cid = 0
             self._case_id = case_id
             self._path = path
+            import uuid
+            self._run_id = uuid.uuid4().hex
             # Default to Triage — the DAIR spec says every investigation starts
             # there ("with a confirmed positive detection already in hand"),
             # so every entry from session start should be stamped with a phase.
@@ -796,7 +843,7 @@ class ExecutionLog:
             self._owns_beacon = bool(save_session)
             self._flush_count = 0
             self._trace_missing_noted = False
-            self._flush()
+            self._flush(replace_run_id=replace_run_id)
             if save_session:
                 self._save_session()
             return 0
@@ -938,7 +985,7 @@ class ExecutionLog:
         except OSError:
             pass
 
-    def _flush(self) -> None:
+    def _flush(self, *, replace_run_id=...) -> None:
         """Must be called under self._lock. Atomic write via temp file + rename.
 
         Read-merge-write to preserve hook-written entries (marked with
@@ -951,6 +998,8 @@ class ExecutionLog:
         `~/.cache/trudi/hook.lock` so the read/merge/write cycle is atomic
         cross-process.
         """
+        from core.operations import check_owner
+        check_owner(self)
         if not self._path:
             return
 
@@ -961,7 +1010,10 @@ class ExecutionLog:
             try:
                 with open(self._path) as f:
                     disk_data = json.load(f)
-                disk_entries = disk_data.get("entries", []) or []
+                replacing = replace_run_id is not ... and disk_data.get('run_id') == replace_run_id
+                if self._run_id and disk_data.get('run_id') not in (None, self._run_id) and not replacing:
+                    raise RuntimeError('Investigation run changed; refusing to merge an old writer')
+                disk_entries = [] if replacing else disk_data.get("entries", []) or []
             except FileNotFoundError:
                 disk_entries = []
                 if self._flush_count > 0 and not self._trace_missing_noted:
@@ -1023,6 +1075,7 @@ class ExecutionLog:
                 data_dict = {
                     "schema_version": "2.0",
                     "case_id": self._case_id,
+                    "run_id": self._run_id,
                     "entry_count": len(merged),
                     "entries": merged,
                 }
@@ -1060,6 +1113,8 @@ class ExecutionLog:
         """Raise if no trace path is set. Replaces the old warn-and-drop
         behaviour so callers can't silently lose entries when
         start_execution_log was skipped."""
+        from core.operations import check_owner
+        check_owner(self)
         if self._path is None:
             raise RuntimeError(
                 f"trace log not configured — cannot record {kind}. Call "
@@ -1110,8 +1165,8 @@ class ExecutionLog:
 
         Budget-gated by the caller (tools/_gates/curiosity_budget.py); this
         method only writes the entry. A probe carries NO evidentiary weight on
-        its own: to support a finding its call_id must flow into reason.* /
-        record_finding via input_call_ids, where the finding gates apply. So a
+        its own: a resulting finding must cite the actual forensic output
+        call IDs, where the finding gates apply. So a
         probe can widen what gets looked at without ever loosening a gate.
 
         rationale  — the hunch + what would confirm or kill it (the audit hook).
@@ -1165,7 +1220,10 @@ class ExecutionLog:
                                                "status", "source_kind", "source_complete",
                                                "clipped_rows", "truncation_reason",
                                                "missing_columns", "columns_ignored",
-                                               "scan_incomplete") if k in r}
+                                               "scan_incomplete", "searched", "sources", "matched_rows",
+                                               "requested_path", "finding_call_id", "request_id",
+                                               "replaces_request_id", "scan_complete", "permitted_sources",
+                                               "source_selections") if k in r}
                         for r in (requests or []) if isinstance(r, dict)
                     ],
                 }
@@ -1287,6 +1345,9 @@ class ExecutionLog:
         output_path: str | None = None,
         exit_meaning: str = "",
         gate: str = "",
+        output_manifest: dict | None = None,
+        stdout_chars_total: int | None = None,
+        extra: dict | None = None,
     ) -> int:
         """Record a tool execution.
 
@@ -1324,6 +1385,9 @@ class ExecutionLog:
             _mcp_tool = current_mcp_tool.get()
             if _mcp_tool:
                 entry["mcp_tool"] = _mcp_tool
+                entry["mcp_arguments"] = dict(current_mcp_arguments.get())
+                from core.phase_routing import source_versions
+                entry["input_versions"] = source_versions(entry["mcp_arguments"])
             if timed_out:
                 entry["timed_out"] = True
             if stdout_excerpt:
@@ -1338,8 +1402,17 @@ class ExecutionLog:
                     0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
                 if len(stdout_full) > len(entry.get("stdout_excerpt") or ""):
                     self._write_stdout_sidecar(cid, stdout_full, entry)
+                if stdout_chars_total is not None and stdout_chars_total > len(stdout_full):
+                    entry['stdout_chars'] = stdout_chars_total
+                    entry['stdout_partial'] = True
             if output_path:
                 entry["output_path"] = str(output_path)
+            if output_manifest is not None:
+                from copy import deepcopy
+                entry['output_manifest'] = deepcopy(output_manifest)
+                for item in entry['output_manifest'].get('files', []):
+                    item['producer_call_id'] = cid if item.get('role') == 'produced_output' else None
+                    item['observed_call_id'] = cid
             if exit_meaning:
                 entry["exit_meaning"] = str(exit_meaning)[:200]
             if gate:
@@ -1352,8 +1425,19 @@ class ExecutionLog:
             # long collection batch is never flagged. Surfaced in the trace so a
             # protocol lapse stays auditable.
             phase = self._current_phase or ""
-            if phase and phase not in ("Triage", "Collect", "Analyze", "Scan"):
-                entry["protocol_violation"] = f"forensic_tool_in_{phase.lower()}_phase"
+            if phase == 'Report':
+                from core.phase_routing import action_phase
+                tool = entry.get('mcp_tool') or (cmd.split()[0] if cmd else '')
+                if success and action_phase(tool.removeprefix('<py>:'), current_mcp_arguments.get(), self):
+                    entry["protocol_violation"] = "forensic_tool_in_report_phase"
+            if extra:
+                from copy import deepcopy
+                entry.update({k: deepcopy(v) for k, v in extra.items()
+                              if k not in ('call_id', 'type', 'ts')})
+                if entry.get('job_completion'):
+                    entry.pop('protocol_violation', None)
+                    entry['job_result']['_trudi_call_id'] = cid
+                    entry['job_result']['status'] = 'finished'
             self._append_entry(entry)
             return entry["call_id"]
 
@@ -1393,6 +1477,8 @@ class ExecutionLog:
                     pass
                 raise
             entry["stdout_path"] = final
+            from core.evidence_packets import file_version
+            entry['stdout_version'] = file_version(final)
             if partial:
                 entry["stdout_partial"] = True
         except Exception as e:
@@ -1509,6 +1595,7 @@ class ExecutionLog:
         evidence: str = "",
         linked_call_id: int = 0,
         input_call_ids: list[int] | None = None,
+        candidate_source_ids: list[int] | None = None,
     ) -> int:
         """Record a first-class self-correction event in the trace.
 
@@ -1528,6 +1615,7 @@ class ExecutionLog:
                 "new_belief": new_belief,
                 "evidence": evidence,
                 "linked_call_id": linked_call_id,
+                "candidate_source_ids": list(candidate_source_ids or []),
             }
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
@@ -1623,10 +1711,26 @@ class ExecutionLog:
         observed_principals: list[dict] | None = None,
         observed_hosts: list[str] | None = None,
         case_question: str = "",
+        enforce_readiness: bool = False,
     ) -> int:
-        with self._lock:
+        with self.transaction():
             self._auto_recover()
             self._require_configured(f"dair_call: phase={current_phase}")
+            enters_report = next_phase == 'Report' or (stack_action == 'stay' and current_phase == 'Report')
+            if enters_report:
+                from core.phase_routing import pending_work
+                pending = pending_work(self)
+                readiness = {}
+                if enforce_readiness:
+                    from tools._readiness import assess_readiness
+                    readiness = assess_readiness(self, include_synthesis=False)
+                if pending or (readiness and not readiness['ready_for_synthesis']):
+                    server_override = {'kind': 'report_prerequisites',
+                                       'pending_request_ids': [w['request_id'] for w in pending],
+                                       'issues': readiness.get('issues', [])}
+                    current_phase = self._current_phase
+                    next_phase, stack_action, transition_recommended = '', 'stay', False
+                    transition_rationale = 'Required follow-up/readiness must be settled before Report.'
             # Apply the transition BEFORE creating the entry so that
             # _append_entry stamps the dair_call entry itself with its
             # post-transition phase. Subsequent record_* calls inherit too.
@@ -1786,9 +1890,18 @@ class ExecutionLog:
         return {
             "schema_version": "2.0",
             "case_id": self._case_id,
+            "run_id": self._run_id,
             "entry_count": len(self._entries),
             "entries": list(self._entries),  # snapshot
         }
+
+    @staticmethod
+    def _legacy_run_id(case_id, entries):
+        # Deterministic adoption permits concurrent reconnects to the same old
+        # trace. A new/reset trace always receives a freshly minted UUID.
+        import hashlib
+        seed = json.dumps([case_id, entries[:1]], sort_keys=True, default=str)
+        return 'legacy-' + hashlib.sha256(seed.encode()).hexdigest()[:32]
 
     def to_markdown(self) -> str:
         with self._lock:

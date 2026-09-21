@@ -24,6 +24,36 @@ questions", "run fully autonomously"). Every other rule — the evidence
 path, gates, typed claims, citability, reason checkpoints — applies
 unchanged in both modes.
 
+
+**Bounded guidance and exploration.** Large control results provide `details`;
+use `reason.readiness_status(section=..., state_version=...)` or
+`reason.review_details(call_id=..., section=..., state_version=...)`. Follow
+`next_offset`, concatenate `json_chunk`, then parse JSON. Do not rerun a model
+or read internal caches just to retrieve its result. Synthesis checks deterministic
+prerequisites before model work and shares finding-scoped evidence. A mistaken
+reviewer premise can be independently corrected with existing source quotes;
+do not retract supported observations merely to clear a gate.
+
+Review responses carry `review_call_id`, verdict or access status, and a
+versioned `details` route. Read the named blocker sections with
+`reason.review_details` before retrying; never guess IDs or rerun an evaluation
+to retrieve it. `access_failure` means required evidence was not reached: repair
+the request/source, rather than treating it as a factual challenge or collecting
+new evidence automatically. Fetch repairs use `replaces_request_id` and retain
+successful reads. `uncited_sources` are optional leads from retained outputs,
+including inline stdout: inspect them before citing, and obtain a new independent
+review after changing citations. Empty/capped suggestions do not require new
+collection. Narrowing the claim remains available.
+
+`reason.hypothesize(mode="absence")` returns optional `exploratory_suggestions`;
+do not merge them into mandatory `priority_tools` or extract binding work from
+its prose. Choose a useful check within DAIR's allowance after the required batch,
+or record that no useful candidate remains in the next normal summary. Link the
+actual tool output when recording a curiosity probe. Budget is permission, not a
+quota; probe metadata alone never supports a finding. Follow the actual question
+and available evidence, including benign alternatives, rather than a fixed
+platform or attack checklist.
+
 ## Operator Preferences
 
 - **NEVER ask questions during a task.** Run workflows fully autonomously. No check-ins, no confirmations. Deliver final findings only. If blocked, pick the most reasonable path and note it in the output.
@@ -42,7 +72,7 @@ unchanged in both modes.
 - **Timestamps** — always UTC.
 - **Verification** — check `success: true` after every run. On failure: read `stderr` → hypothesize → correct → retry.
 - **Control-plane notices** — a tool result carrying `dair_notice` or `finding_notice` is an instruction: make the named call (exact shape included in the notice) before any further forensic tool calls. Ignoring it escalates to a refusal (`dair_engagement_gate`).
-- **Background jobs** — carve-class tools (`net.tcpxtract_streams`, and other long carves) return a `job_id` immediately instead of blocking the turn. Poll `misc.job_status(job_id)` between other work — never sit idle on a running job; a timed-out carve still yields usable partials in its output dir. The finished `job_status` result carries the citable `_trudi_call_id` for findings from the carve.
+- **Background jobs** — long operations wait up to 15 seconds, then return a `job_id` if still running. Poll `misc.job_status` between useful work. Only validated partial outputs are citable; incomplete scope remains open. See the resumable review and jobs contract below.
 - **MCP routing is mandatory.** Never invoke these binaries via Bash: `vol`, `dotnet …Cmd.dll`, `fls/icat/istat/blkls/mactime/tsk_recover`, `hexdump/xxd/exiftool`, `log2timeline.py/psort.py`, `yara`, `bulk_extractor/foremost/scalpel`, `ewfmount/vshadowmount/bdemount/xmount`, `tcpdump`, `clamscan`, `rip.pl`. `record_finding` refuses any finding whose `linked_call_id` points to a `source="claude_code_bash"` entry executing one of these (gate: `mcp_routing`). Use the MCP wrapper (`vol_*`, `ez_*`, `tsk_*`, `strings_*`, `plaso_*`, `yara_*`, `carve_*`, `ewf_*`, `net_*`, `misc_regripper_*`).
 
 ---
@@ -261,7 +291,7 @@ Investigation begins with a confirmed positive detection in hand.
 
 1. Call `dair_assess` → receive `directives.priority_tools` and `directives.curiosity_budget`
 2. Execute the `priority_tools`, in order. Parallelize where independent (different hosts/artifacts). No additions to the *work order*.
-3. **Curiosity probes (only after the work order is done).** If `directives.curiosity_budget` > 0, you MAY run up to that many read-only exploratory calls of your own choosing — to chase a hunch about a less-obvious artifact the work order didn't name (a second SID's `$Recycle.Bin`, an untouched comms store, `setupapi.dev.log`, a weaker-but-unchecked exfil channel). For each: run the read-only tool, then call `misc.record_curiosity_probe(rationale=…, seeded_by=<absence-hypothesis_id, if any>, input_call_ids=[…])` — it enforces the budget and logs *why* you looked. A probe is **not** a finding and carries no weight alone; to turn one that paid off into evidence, feed its `call_id` into `reason.hypothesize` / `record_finding` via `input_call_ids`, where the normal gates apply. This widens coverage without loosening a single gate. Budget 0 (e.g. Report) ⇒ no probes.
+3. **Curiosity probes (only after the work order is done).** If `directives.curiosity_budget` > 0, you MAY run up to that many read-only exploratory calls of your own choosing — to chase a hunch about a less-obvious artifact the work order didn't name (a second SID's `$Recycle.Bin`, an untouched comms store, `setupapi.dev.log`, a weaker-but-unchecked exfil channel). For each: run the read-only tool, then call `misc.record_curiosity_probe(rationale=…, seeded_by=<absence-hypothesis_id, if any>, input_call_ids=[…])` — it enforces the budget and logs *why* you looked. A probe is **not** a finding and carries no weight alone; any resulting finding must cite the actual forensic output `call_id` values via `input_call_ids`, where the normal gates apply; the probe entry records intent only. This widens coverage without loosening a single gate. Budget 0 (e.g. Report) ⇒ no probes.
 4. Summarize (3–5 sentences) → call `dair_assess` with `tool_results_summary` (note any probe results)
 5. Receive next `priority_tools` or transition → step 2
 
@@ -314,7 +344,7 @@ The adversarial reviewer runs on a local or Claude reasoning model. Calls below 
 For `misc.submit_finding`, the separate evaluate, confidence-score and cite-check calls are unnecessary: submission runs independent review and deterministic tier/citation checks itself. Use separate calls when you need a preview, then finish with `misc.record_finding` using the exact reviewed inputs.
 
 **Reviewer evidence access (push-then-pull).** Finding review receives an **EVIDENCE PACKET** of versioned cited outputs; other reviewer tools retain the **EVIDENCE INVENTORY**. Both supply rows matching the claim's terms in round 1 ("showing K of M matching; N scanned; source COMPLETE|PARTIAL" — a selection with its totals). The reviewer can request more via `EVIDENCE_REQUEST` (resolved from the cited call_ids only, ≤3 rounds, each logged as `reason_evidence_fetch`). Therefore:
-1. **Cite the calls whose OUTPUT FILES hold the discriminating rows** (`input_call_ids`) — rows are pushed/fetched only from what you cite; cite the extractor run, not a summary. Complete stdout is persisted (`analysis/.tool_output/<cid>.txt`, `stdout_path`) so additional rows remain fetchable beyond the initial selection; a legacy 600-char-excerpt entry is labelled **PARTIAL** and a miss over it is not absence (challenge stamped `verdict_basis="partial_source"`, does not stick — re-run the tool).
+1. **Cite the calls whose OUTPUT FILES hold the discriminating rows** (`input_call_ids`) — rows are pushed/fetched only from what you cite; cite the extractor run, not a summary. Complete stdout is persisted (`analysis/.tool_output/<cid>.txt`, `stdout_path`) so additional rows remain fetchable beyond the initial selection; a legacy 600-char-excerpt entry is labelled **PARTIAL** and a miss over it is not absence (a required fetch that cannot reach deciding evidence returns `access_failure`; repair access or use another retained source).
 2. **Declare `entities`/`principal` on the evaluate** — the finding's nouns are the push terms; round-1 coverage is stamped `evidence_pushed`.
 3. **LIKELY needs a SUPPORTED evaluate too** (gate `confirmed_requires_supported_evaluate`, covers CONFIRMED+LIKELY). Pass the SAME complete typed claim, description, evidence IDs and revision target you will record; new receipts bind those exact inputs.
 4. **CHALLENGED/UNCERTAIN is sticky** (gate `challenge_sticky`, keyed by claim — re-wording does not shed it): CONFIRMED/LIKELY refused until a NEW evidence tool call runs AND a later evaluate returns SUPPORTED. A lower tier cannot resolve a factual contradiction; the refusal lists the discriminators to collect.
@@ -323,7 +353,7 @@ For `misc.submit_finding`, the separate evaluate, confidence-score and cite-chec
 
 **Automatic CHALLENGED triggers** — flag without waiting: YARA match is the sole evidence for a CONFIRMED finding; an ATT&CK id can't be verified against the description; a mechanism claim has no cited raw artifact.
 
-**`reason.synthesize`** — Report phase only. Call `reason.readiness_status` beforehand to settle deterministic prerequisites without a model call. The server supplies complete active finding descriptions; superseded revisions remain in history. An unchanged semantic snapshot reuses the persisted successful synthesis. Structured factual issues remain open until an explicit, evidence-backed resolution or retirement of the referenced claim; another review omitting an issue does not close it. Only an evidence gap/unavailability with a reviewed narrower finding and typed disposition can become a report limitation. Round counts never waive blockers. Tier-only opinions remain advisory. After synthesis, call `reason.pre_report_check`; approval is bound to the current findings, evidence and policy snapshot. Changes invalidate it, while narration alone does not.
+**`reason.synthesize`** — Report phase only. Call `reason.readiness_status` beforehand to settle deterministic prerequisites without a model call. The server supplies complete active finding descriptions; superseded revisions remain in history. An unchanged snapshot resumes persisted review tasks; only complete coverage and consistency review approve synthesis. Structured factual issues remain open until an explicit, evidence-backed resolution or retirement of the referenced claim; another review omitting an issue does not close it. Only an evidence gap/unavailability with a reviewed narrower finding and typed disposition can become a report limitation. Round counts never waive blockers. Tier-only opinions remain advisory. After synthesis, call `reason.pre_report_check`; approval is bound to the current findings, evidence and policy snapshot. Changes invalidate it, while narration alone does not.
 
 
 **`reason.confidence_score`** — BEFORE `record_finding` for any tier above SUSPECTED. Deterministic tier + 0.0–1.0 score; if below intended, downgrade.
@@ -341,7 +371,7 @@ For `misc.submit_finding`, the separate evaluate, confidence-score and cite-chec
 | `reason.evaluate_finding` | `finding`, `supporting_evidence` | `case_context`, `claim_kind`, `category`, `act`, `entities`, `principal`, `channel`, `actor_kind`, `actor` (the SAME claim you will record); verdict is a fact-check only — SUPPORTED / CONTRADICTED / UNVERIFIABLE |
 | `reason.confidence_score` | `finding`, `supporting_evidence`, `input_call_ids`, `act` (+ `channel`) | `intended_tier` (returns `downgrade_reasons` + `tier_path` when the cited classes fall short) — deterministic, no model call |
 | `reason.cite_check` | `finding`, `supporting_evidence` | claim kwargs as above |
-| `reason.synthesize` | `findings` | `investigation_summary` |
+| `reason.synthesize` | `findings` | `investigation_summary`, `review_session_id` |
 | `reason.pre_report_check` | *(none)* | — |
 
 **`reason.hypothesize` usage:** `observation` = single behaviour/artifact (one sentence); `evidence` = raw artifact list (tool excerpts, IDs, timestamps, verbatim); `context` = broader case context (OS, known TTPs, timeline). Capture the returned `hypothesis_id` (e.g. `H0007`) → pass as `tested_hypothesis_id` to any `record_finding` resolving it (builds hypothesis→finding lineage in `trace.md`).
@@ -514,10 +544,10 @@ After every `reason.*` call, extract `directives` from the response before proce
 - **`curiosity_budget`** — after the work order is complete, the number of read-only exploratory probes you may run of your own choosing (see the execution loop, step 3). Each is logged via `misc.record_curiosity_probe`; 0 ⇒ none.
 - **`next_hypothesis_triggers`** — after each tool result, if any trigger condition is met, call `reason.hypothesize` before continuing.
 
-Directives are binding. `dair_assess` is the primary source of `priority_tools` — run nothing outside that list *except* the read-only curiosity probes its `curiosity_budget` authorizes (execution loop, step 3). After each `reason.*`, merge its directives into the active DAIR work order: append `priority_tools` not already listed; union `skip_tools`, `focus_pids`, `focus_paths`. DAIR directives take precedence on conflicts.
+Directives are binding. `dair_assess` is the primary source of `priority_tools` — run nothing outside that list *except* the read-only curiosity probes its `curiosity_budget` authorizes (execution loop, step 3). After each `reason.*` except absence-mode optional suggestions, merge its required directives into the active DAIR work order: append `priority_tools` not already listed; union `skip_tools`, `focus_pids`, `focus_paths`. DAIR directives take precedence on conflicts.
 
 ### Hypothesis conclusion extraction (mandatory)
-When `reason.hypothesize` returns a conclusion that names specific search patterns, artifact types, file paths, or operations in body text — extract those as concrete tool calls and add them to the DAIR work order, **even if `directives.priority_tools` is empty**. Empty `priority_tools` from hypothesize ≠ "no follow-up needed". Parse for:
+When presence-mode `reason.hypothesize` returns a conclusion that names specific search patterns, artifact types, file paths, or operations in body text — extract those as concrete tool calls and add them to the DAIR work order, **even if `directives.priority_tools` is empty**. Empty `priority_tools` from hypothesize ≠ "no follow-up needed". Parse for:
 - Named patterns ("search for X in PCAP", "grep for Y", "look for Z cookie")
 - Named artifact categories ("webmail cookies", "compose/send traffic", "recipient address")
 - Named tools/operations ("run ngrep", "filter port 80", "follow TCP stream")
@@ -529,3 +559,60 @@ When any tool result has `truncated: true`, treat as **INCOMPLETE**. Before adva
 1. Re-run with a narrower, more specific pattern
 2. If the original pattern was broad (e.g. a bare `sid=`), split into targeted sub-queries (e.g. `Cookie: sid=`, `<provider>\.com.*Cookie`, a specific host/domain)
 3. Only record a negative finding after a targeted retry returns empty — never after a broad truncated scan alone
+
+## Report follow-up routing
+
+Required forensic work discovered in Report uses a durable DAIR transition before
+execution: new acquisition/extraction goes to Collect, new analysis to Analyze,
+and discovery scans to Scan. A validated, already-authorized tool request continues
+in the same call after that transition; do not repeat it just to change phase.
+This does not authorize new work beyond the analyst's instructions in pilot mode.
+
+Reads of traced, produced outputs and finding corrections remain in Report.
+Synthesis may return `follow_up_required` with typed work and a `request_id`;
+execute that work through normal MCP tools. Optional suggestions are not duties.
+`repair_required` means an output-access/software problem, not a reason to collect
+more evidence. Missing synthesis alone also stays in Report.
+
+Pending/running/failed work appears in `reason.readiness_status().follow_up` and
+blocks return to Report. A DAIR call or unrelated tool success does not settle it.
+Completed duplicate requests reuse their result. For a deliberate repeat of a
+completed/failed request, or after reconciling an unknown outcome, pass `_refresh=true`;
+never refresh an operation merely because its response was delayed. Poll background
+jobs with `misc.job_status`; do not restart them. A justified unavailable/inapplicable
+request can be dispositioned with `target_kind="follow_up"`, its exact request ID,
+a reasoned note and its result/trigger evidence call IDs. This settles the task,
+not the underlying finding or independent review issue.
+
+Return through DAIR after required work is settled, then rerun synthesis against
+the updated evidence. Report publication still requires a current pre-report approval.
+
+## Resumable review and accountable jobs
+
+`reason.synthesize` returns `status: in_progress | complete | blocked` and a
+`review_session_id`. For `in_progress`, call it again with `next_arguments` and
+normal lineage; the server resumes unfinished requests and reuses current review
+receipts. Stay in Report unless a typed follow-up routes actual evidence work.
+A successful call or `issues: []` does not approve a report. Wait for `complete`
+and `approved: true`, then run `reason.pre_report_check`. A budget blocker retains
+the checkpoint; unchanged retries do not replenish its allowance.
+
+Long tools wait up to 15 seconds for the complete operation, including fallback
+parsing and validation. Otherwise they return a durable `job_id`. There are two
+concurrent slots and no queue. `misc.job_list` supplies the current adapter
+policies and active jobs. Poll `misc.job_status` between useful work; do not
+restart a running operation. Jobs belong to a run, not merely a case/path.
+
+Execution success, `result_status`, and `scope_complete` are separate. Cite only
+validated outputs from a partial/cancelled job. Its original scope remains open,
+and a partial search cannot prove absence. Traced reads preserve that incomplete
+scope. Unsupported interrupted containers require subsequent validation.
+
+To abandon work, call `misc.job_cancel(job_id, reason)` and collect the stopped
+job. Then use `misc.record_disposition(target_kind="job", target_id=job_id,
+reason="out_of_scope"|"inapplicable"|"evidence_unavailable", note=...,
+evidence_call_ids=[<this job's collected call_id>])` when justified. This settles
+only that job's obligation; a generic tool disposition cannot settle jobs.
+Cancellation alone never settles scope. An orphan's explicit cancellation can
+finalize retained partial output without re-running extraction. Both reset
+entrypoints refuse while workers can write, including with `--force`.

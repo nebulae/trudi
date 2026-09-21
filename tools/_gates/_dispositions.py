@@ -14,15 +14,17 @@ from __future__ import annotations
 from ._entities import norm_entity
 
 TARGET_KINDS = ("source", "tool", "challenge", "principal", "correspondent",
-                "device", "hypothesis", "host", "destruction_scope")
+                "device", "hypothesis", "host", "destruction_scope", "follow_up", "job")
 
 REASONS = ("absent_from_evidence", "inapplicable", "out_of_scope", "noise",
            "excluded", "not_a_principal", "controller_unknown",
            "evidence_unavailable", "ruled_out", "refuted", "undetermined",
-           "same_as")
+           "same_as", "execution_failed", "dependency_unavailable", "incompatible", "parse_failed")
 
 # Which reasons make sense for which target.
 ALLOWED: dict[str, frozenset] = {
+    "job":               frozenset({'inapplicable', 'out_of_scope', 'evidence_unavailable'}),
+    "follow_up":         frozenset({'inapplicable', 'absent_from_evidence', 'evidence_unavailable', 'out_of_scope', 'execution_failed', 'dependency_unavailable', 'incompatible', 'parse_failed'}),
     "source":            frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),
     "tool":              frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),
     "challenge":         frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),

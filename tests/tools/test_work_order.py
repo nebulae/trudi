@@ -56,7 +56,7 @@ class TestBinarySig:
         entries = [{"type": "tool_call", "success": True,
                     "cmd": "sudo fls -o 1411072 /x/surface.E01"}]
         assert wo.unrun_from_list(
-            entries, ['tsk.fls(input_path="/x", depth=2)']) == []
+            entries, ['tsk.fls(input_path="/x", depth=2)'])  # no verified exact scope
 
     def test_bare_disposition_waives_arg_laden_work_order_tool(self):
         # A plain tsk.fls disposition must waive the arg-laden work-order token
@@ -65,7 +65,7 @@ class TestBinarySig:
                  "target_id": "tsk.fls", "target_norm": "tsk.fls",
                  "reason": "inapplicable"}]
         assert wo.unrun_from_list(
-            disp, ['tsk.fls(input_path="/x", depth=2)']) == []
+            disp, ['tsk.fls(input_path="/x", depth=2)'])  # global waiver cannot settle a target
 
     def test_aliased_tool_run_is_recognized(self):
         # The regression: a regripper run (as rip.pl) must satisfy the
@@ -255,7 +255,7 @@ class TestUnrunPriorityTools:
     def test_old_unstamped_strings_run_is_recognized_by_alias(self):
         entries = [_dair(["strings.grep(pattern='Tundra', path='/x')"]),
                    _call("strings -a -n 4 /cases/k/evidence/transcripts/02_day-02.md")]
-        assert wo.unrun_priority_tools(entries) == []
+        assert wo.unrun_priority_tools(entries)  # /x was not examined
 
     def test_failed_stamped_run_does_not_count(self):
         entries = [_dair(["strings.grep"]),

@@ -41,7 +41,8 @@ class TestLiveServerNames:
             "coverage_report", "ewf_info", "ewf_mount_full_image",
             "hash_file", "hash_verify_evidence_hash",
             "strings_extract", "strings_hexdump",
-            "misc_record_finding", "misc_submit_finding", "reason_readiness_status", "net_tcpdump_read",
+            "misc_record_finding", "misc_submit_finding", "reason_readiness_status", "reason_review_details", "net_tcpdump_read",
+            "misc_job_list", "misc_job_cancel", "misc_job_status",
         ):
             assert expected in names, f"expected wire name missing: {expected}"
 

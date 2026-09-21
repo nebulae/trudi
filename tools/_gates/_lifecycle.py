@@ -192,6 +192,9 @@ def prescribe_for_gaps(entries) -> list:
     filtered to those not already run (by binary signature). Empty when every
     phase is at least examined — the signal that the phase's work is done and the
     investigation can advance rather than backfill."""
+    from core.planning_state import platforms
+    if 'windows' not in platforms(entries):
+        return []  # Unknown/non-Windows inventories need discovery, not Windows work.
     cov = coverage(entries)
     from tools._gates.work_order import _binary_sig
     succ = [(e.get("cmd") or "").lower() for e in (entries or [])

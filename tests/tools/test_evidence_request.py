@@ -189,9 +189,9 @@ class TestRoundTrip:
         log = pull_env["log"]
         evals = [e for e in log._entries if e.get("type") == "reason_call"
                  and e.get("tool") == "reason_evaluate_finding"]
-        assert len(evals) == 1                        # one reason_call per review
-        assert evals[0]["evidence_rounds"] == 1 and evals[0]["verdict"] == "SUPPORTED"
-        assert evals[0]["input_tokens"] == 200        # summed across rounds
+        assert len(evals) == 2                        # durable provider slice records
+        assert evals[0]['review_pending'] is True and evals[1]['verdict'] == 'SUPPORTED'
+        assert sum(e['input_tokens'] for e in evals) == 200
         fetches = [e for e in log._entries if e.get("type") == "reason_evidence_fetch"]
         assert fetches and fetches[0]["requests"][0]["rows_returned"] == 1
         assert fetches[0]["reason_call_id"] == evals[0]["call_id"]
@@ -309,7 +309,8 @@ class TestRoundTrip:
         with patch("httpx.post", http):
             r = R.reason_evaluate_finding("f", "x", input_call_ids=[cid])
         assert http.call_count == 3                   # round 1 + 2 bounded re-asks
-        assert "No further EVIDENCE_REQUEST will be honored" in _payload(http, 2)
+        assert 'No further EVIDENCE_REQUEST will be honored' not in _payload(http, 2)
+        assert r['status'] == 'in_progress' and r['review_pending']
         assert not r.get("verdict")
 
     def test_push_mode_keeps_legacy_excerpt(self, pull_env, monkeypatch):
@@ -336,7 +337,8 @@ class TestPartialSources:
     def test_sources_of_legacy_capped_entry_are_partial(self, pull_env):
         cid = self._legacy_partial(pull_env["log"])
         e = pull_env["log"].index().by_call_id[cid]
-        e.pop("stdout_chars", None); e.pop("stdout_path", None)   # simulate legacy
+        e.pop("stdout_chars", None); e.pop("stdout_path", None)
+        pull_env['log']._flush()  # persist the legacy fixture before transactional checkpoints   # simulate legacy
         srcs = OR.entry_text_sources(e)
         assert [s.kind for s in srcs] == ["stdout_excerpt"]
         assert srcs[0].complete is False
@@ -345,6 +347,7 @@ class TestPartialSources:
         cid = self._legacy_partial(pull_env["log"])
         e = pull_env["log"].index().by_call_id[cid]
         e.pop("stdout_chars", None); e.pop("stdout_path", None)
+        pull_env['log']._flush()  # persist the legacy fixture before transactional checkpoints
         user, meta = R._with_citations_meta("F", "reason_evaluate_finding", [cid])
         assert "PARTIAL" in user and "NOT absent" in user
         assert meta["pushed_rows"] == 0                  # nothing is pushed from an excerpt
@@ -353,6 +356,7 @@ class TestPartialSources:
         cid = self._legacy_partial(pull_env["log"])
         e = pull_env["log"].index().by_call_id[cid]
         e.pop("stdout_chars", None); e.pop("stdout_path", None)
+        pull_env['log']._flush()  # persist the legacy fixture before transactional checkpoints
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "FOUND snitch.exe", "columns": []}], [cid], 4000)
         assert "absence NOT established" in block
@@ -403,14 +407,16 @@ class TestPartialSources:
         cid = self._legacy_partial(pull_env["log"])
         e = pull_env["log"].index().by_call_id[cid]
         e.pop("stdout_chars", None); e.pop("stdout_path", None)
+        pull_env['log']._flush()  # persist the legacy fixture before transactional checkpoints
         req = ('EVIDENCE_REQUEST:\n[{"call_id": %d, "query": "FOUND snitch"}]\n' % cid)
         chall = "1. EVIDENCE — nothing.\nVERDICT: CHALLENGED — no FOUND rows."
         http = MagicMock(side_effect=[_http(req), _http(chall)])
         with patch("httpx.post", http):
             r = R.reason_evaluate_finding("clamscan flagged snitch.exe", "x", input_call_ids=[cid])
-        assert r["verdict"] == "CHALLENGED" and r["verdict_basis"] == "partial_source"
+        assert not r['success'] and r['status'] == 'access_failure'
+        assert r.get('verdict') is None and not r.get('review_receipt')
         ent = [x for x in pull_env["log"]._entries if x.get("call_id") == r["_trudi_call_id"]][0]
-        assert ent["verdict_basis"] == "partial_source"
+        assert not ent['success'] and ent['access_failures']
         from tools._gates import challenge_sticky as cs
         from tools._gates._match import normalize_desc
         from types import SimpleNamespace
@@ -541,13 +547,18 @@ class TestResultBlockFirst:
         assert e["cite_verdict"] == "UNCITED_CLAIMS_PRESENT"
 
     def test_synthesize_blockers_from_result(self, pull_env):
+        pull_env['log'].record_reason_call('reason_plan', True, 'plan', {})
+        pull_env['log'].record_dair_call('Triage', '', True, 'Collect', '', 'push', '')
+        pull_env['log'].record_dair_call('Collect', '', True, 'Analyze', '', 'push', '')
+        pull_env['log'].record_finding('account observed', 'LIKELY', input_call_ids=[pull_env['cid']])
         pull_env["log"].record_dair_call("Report", "", False, "", "", "stay", "")
         ans = ('LOGICAL GAPS — none.\nRESULT:\n{"blockers": ["AV finding uncorroborated"], '
                '"under_tiered": ["F2 deserves CONFIRMED"], "advisories": ["note"]}')
-        with patch("httpx.post", MagicMock(side_effect=[_http(ans)])):
+        with patch("httpx.post", MagicMock(return_value=_http(ans))):
             r = R.reason_synthesize("F1\nF2")
-        assert r["blockers"] == ["AV finding uncorroborated"]
-        assert r["under_tiered"] == ["F2 deserves CONFIRMED"] and r["advisories"] == ["note"]
+        assert r['blockers'] == []  # unfinished opinions never become actionable blockers
+        assert r['status'] == 'blocked' and not r['approved']
+        assert r['errors']  # explicit coverage failure, not an invented evidence gap
         e = [x for x in pull_env["log"]._entries if x.get("call_id") == r["_trudi_call_id"]][0]
         assert e["blockers"] == ["AV finding uncorroborated"] and e["under_tiered"]
 
@@ -653,7 +664,11 @@ class TestSchardtFollowUps:
             R.reason_evaluate_finding("Schardt is Mr. Evil", "ev", **kw)
             R.reason_evaluate_finding("The laptop's owner operates the Mr. Evil account", "ev", **kw)
             r = R.reason_evaluate_finding("Documentary linkage ties the owner to the account", "ev", **kw)
-        assert r["success"] is False and r["gate"] == "reformulation_depth_limit"
+        assert r['verdict'] == 'CHALLENGED'  # each changed proposition gets independent review
+        # Exact retries reuse this review; wording alone cannot force new collection.
+        with patch('httpx.post') as again:
+            cached = R.reason_evaluate_finding("Documentary linkage ties the owner to the account", "ev", **kw)
+        assert cached['cached'] and not again.called
 
 
 class TestVankoFollowUps:
@@ -676,7 +691,8 @@ class TestVankoFollowUps:
                                    stdout_excerpt="x")
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "SanDisk Cruzer", "columns": ["KeyPath", "ValueData"]}], [cid], 4000)
-        assert recs[0]["rows_returned"] == 1 and "COMPLETE" not in block
+        assert recs[0]["rows_returned"] == 1 and "no rows match" not in block
+        assert recs[0]['scan_complete']
 
     def test_projected_scan_error_is_never_reported_complete(self, pull_env, monkeypatch):
         # Any projected-scan abort must surface as partial_scan, not COMPLETE.
@@ -816,3 +832,65 @@ class TestVankoFollowUps:
                                                stdout_excerpt="", stdout_full="")
         e = pull_env["log"].index().by_call_id[cid]
         assert e["stdout_chars"] == 0 and e["stdout_lines"] == 0
+
+
+class TestScopeFieldsOnlyWhereSupported:
+    """Regression (VANKO run 3, 2026-09-20): finding-review packets carry no
+    `finding_sources`, so every request the reviewer sent with finding_call_id
+    was refused — one review issued 12 requests, received 0 rows and returned
+    UNVERIFIABLE. The scope check now applies only where its index exists."""
+
+    def _case(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        log = ExecutionLog()
+        log.configure('SCOPE', str(tmp_path / 'trace.json'), save_session=False)
+        out = tmp_path / 'rows.csv'
+        out.write_text('Name,Detail\ntarget,observed here\nother,noise\n')
+        cid = log.record_tool_call(f'read.output --output {out}', True, False, 0, 0,
+                                   stdout_full=out.read_text(), stdout_excerpt=out.read_text())
+        return log, cid
+
+    def test_finding_call_id_ignored_when_packet_has_no_finding_sources(self, tmp_path):
+        from unittest.mock import patch
+        from tools.reasoning import _resolve_evidence_requests
+        log, cid = self._case(tmp_path)
+        from core.evidence_packets import build_packet
+        with patch('core.execution_log.log', log):
+            # a real finding-review packet: sources indexed by call_id, no
+            # `finding_sources` index (that exists only for synthesis)
+            packet = build_packet(log, {'description': 'target observed', 'claim': {},
+                                        'input_call_ids': [cid], 'linked_call_id': cid})
+            assert 'finding_sources' not in packet
+            text, recs = _resolve_evidence_requests(
+                [{'call_id': cid, 'query': 'target', 'columns': [], 'finding_call_id': 999}],
+                [cid], 2000, evidence_packet=packet)
+        assert recs[0]['status'] == 'ok' and recs[0]['rows_returned'] >= 1
+        assert 'target' in text
+
+    def test_null_path_is_not_a_filter(self, tmp_path):
+        from unittest.mock import patch
+        from tools.reasoning import _resolve_evidence_requests
+        log, cid = self._case(tmp_path)
+        with patch('core.execution_log.log', log):
+            _, recs = _resolve_evidence_requests(
+                [{'call_id': cid, 'query': 'target', 'columns': [], 'path': None}], [cid], 2000)
+        assert recs[0]['status'] == 'ok' and recs[0]['rows_returned'] >= 1
+
+    def test_wrong_non_empty_path_still_refused_and_lists_retained_sources(self, tmp_path):
+        from unittest.mock import patch
+        from tools.reasoning import _resolve_evidence_requests
+        log, cid = self._case(tmp_path)
+        with patch('core.execution_log.log', log):
+            text, recs = _resolve_evidence_requests(
+                [{'call_id': cid, 'query': 'target', 'columns': [], 'path': '/nope/other.csv'}],
+                [cid], 2000)
+        assert recs[0]['status'] == 'scope_mismatch'
+        assert 'Retained sources for this call' in text
+        assert 'No absence inference is valid' in text
+
+    def test_instruction_asks_for_scope_fields_only_in_cross_finding_review(self):
+        from tools.reasoning import _evidence_request_instruction
+        review = _evidence_request_instruction('a VERDICT')
+        synth = _evidence_request_instruction('the BLOCKERS block', finding_scoped=True)
+        assert 'Do not send finding_call_id' in review
+        assert 'include finding_call_id' in synth

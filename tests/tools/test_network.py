@@ -213,12 +213,14 @@ class TestTcpxtractStreams:
         from tools.network import tcpxtract_streams
         from unittest.mock import patch
         out = str(tmp_path / "streams")
-        with patch("core.jobs.subprocess.Popen") as popen:
+        with patch("core.jobs.subprocess.Popen") as popen, patch('core.jobs.INLINE_WAIT', 0):
             popen.return_value.pid = 4242
             r = tcpxtract_streams(PCAP, out)
         assert r["status"] == "running" and r["job_id"]
-        script = popen.call_args[0][0][2]
-        assert "tcpxtract" in script and "-o" in script
+        from core.jobs import read_state
+        state = read_state(r['job_id'])
+        assert 'tcpxtract' in state['cmd'] and '-o' in state['cmd']
+        assert popen.call_args[0][0][2] == 'core.job_worker'
 
     def test_evidence_output_blocked(self):
         from tools.network import tcpxtract_streams

@@ -249,7 +249,7 @@ class TestScheduledTasks:
         l = ExecutionLog(); l.configure("PST", os.path.join(tempfile.mkdtemp(), "t.json"), save_session=False)
         with patch("core.execution_log.log", l):
             r = fn("/nonexistent/Tasks")
-        assert r["success"] is False and "not a directory" in r["error"]
+        assert r["success"] is False and "not a file or directory" in r["error"]
 
 
 class TestUsnParser:

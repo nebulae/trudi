@@ -87,6 +87,15 @@ def isolate_session_file(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolate_background_jobs(tmp_path, monkeypatch):
+    from core import jobs
+    monkeypatch.setattr(jobs, 'JOBS_DIR', str(tmp_path / '.pytest-trudi' / 'jobs'))
+    # Existing wrapper tests exercise command construction synchronously. Job
+    # lifecycle/adapter tests explicitly opt in and use this isolated registry.
+    monkeypatch.setenv('TRUDI_BACKGROUND_JOBS', '0')
+
+
+@pytest.fixture(autouse=True)
 def typed_claims_env_off(monkeypatch):
     """Typed-claim enforcement (typed_claims gate) defaults ON in production;
     the legacy test corpus predates claim declarations, so default it OFF for
@@ -108,3 +117,9 @@ def tmp_output(tmp_path):
     d = tmp_path / "exports"
     d.mkdir()
     return str(d)
+
+
+@pytest.fixture(autouse=True)
+def isolate_tool_schema_cache(monkeypatch):
+    from core import phase_routing
+    monkeypatch.setattr(phase_routing, '_TOOL_SCHEMAS', {})

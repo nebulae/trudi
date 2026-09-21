@@ -291,7 +291,8 @@ class TestDairRecommendedActions:
         # K-1: Report is only reachable after the investigative phases ran.
         for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
             log.record_dair_call(cur, "", True, nxt, "", "push", "")
-        r = _run(_claude_ctx, _ASSESSMENT_REPORT)
+        with patch('tools._readiness.assess_readiness', return_value={'ready_for_synthesis': True}):
+            r = _run(_claude_ctx, _ASSESSMENT_REPORT)
         assert len(r["recommended_actions"]) == 3
         assert r["next_phase"] == "Report"
 
@@ -690,7 +691,8 @@ class TestDairScanToTriageLoop:
         log.record_finding("a finding", "CONFIRMED", "x")
         for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
             log.record_dair_call(cur, "", True, nxt, "", "push", "")
-        r = _run(_claude_ctx, _ASSESSMENT_REPORT)
+        with patch('tools._readiness.assess_readiness', return_value={'ready_for_synthesis': True}):
+            r = _run(_claude_ctx, _ASSESSMENT_REPORT)
         assert r["next_phase"] == "Report"
         assert r["stack_action"] == "push"
         assert len(r["recommended_actions"]) > 0
@@ -1260,8 +1262,8 @@ class TestPriorRunAutoVerify:
                                    stdout_excerpt="Size: 45312")
         r = _run(_claude_ctx, _CHALLENGES_BLOCK + _ASSESSMENT_STAY)
         c = r["verification_challenges"][0]
-        assert c["verified"] is True and c["verified_basis"] == "prior_run"
-        assert c["verified_by_call_id"] == cid
+        assert c["verified"] is None and c["check_executed"] is True
+        assert c["execution_call_id"] == cid and c["evidential_outcome"] == "not_adjudicated"
 
     def test_failed_prior_run_does_not_verify(self):
         from core.execution_log import log
@@ -1352,7 +1354,8 @@ class TestPhaseCoverage:
         raw = ('RESULT:\n{"assessment": {"phase_rationale": "Review phase", "current_phase": "Analyze", '
                '"transition_recommended": true, "next_phase": "Report", '
                '"stack_action": "push", "directives": {"priority_tools": []}}}')
-        with patch("core.execution_log.log", l), \
+        with patch('tools._readiness.assess_readiness', return_value={'ready_for_synthesis': True}), \
+             patch("core.execution_log.log", l), \
              patch.object(D, "_ask", return_value={"success": True, "raw": raw,
                                                    "input_tokens": 1, "output_tokens": 1}):
             r = D.dair_assess("summary", "[]", "ctx")
@@ -1503,6 +1506,7 @@ class TestLayer3LifecycleBackfill:
         l = ExecutionLog(); l.configure("L3", str(tmp_path / "trace.json"), save_session=False)
         l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
         l.record_finding("x present", "SUSPECTED", "t")     # some finding, no lifecycle coverage
+        l.record_tool_call('identify platform', True, False, 0, 0, extra={'platform': 'windows'})
         with patch("core.execution_log.log", l), \
              patch.object(D, "_ask", return_value={"success": True, "raw": self._raw_stay(),
                                                    "input_tokens": 1, "output_tokens": 1}):

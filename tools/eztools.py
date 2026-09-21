@@ -1,13 +1,23 @@
 """EZ Tools (Eric Zimmerman) — Windows artifact parsers via .NET runtime."""
 import os
 from typing import Optional
+from core.job_adapters import job_backed
 from fastmcp import FastMCP
 from core import run_dotnet, run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
 
 mcp = FastMCP("eztools")
 
-EZ = "/opt/zimmermantools"
+EZ = os.environ.get('TRUDI_EZ_ROOT') or "/opt/zimmermantools"
+
+
+def _pecmd_path() -> str:
+    """Configured DLL wins; support flat and unpacked deployments, never CWD."""
+    configured = os.environ.get('TRUDI_PECMD_DLL')
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    candidates = (f'{EZ}/PECmd.dll', f'{EZ}/PECmd/PECmd.dll')
+    return next((p for p in candidates if os.path.isfile(p)), candidates[0])
 
 # When an EZ Tool .dll is absent from a deployment, dotnet fails with a cryptic
 # "The application '<dll>' does not exist" / exit 145. Surface that as a clear
@@ -47,6 +57,11 @@ def _ez(dll: str, args: list[str], output_dir: Optional[str] = None, timeout: in
         fb = _EZ_FALLBACKS.get(name)
         if fb:
             result["fallback"] = fb
+        if name == 'PECmd.dll':
+            result['installation_hint'] = (
+                'Set TRUDI_PECMD_DLL to the installed PECmd.dll, or deploy it at '
+                f'{EZ}/PECmd.dll or {EZ}/PECmd/PECmd.dll. '
+                'An unavailable parser does not establish absence of Prefetch evidence.')
     return result
 
 
@@ -128,6 +143,7 @@ def ez_mftecmd(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_mftecmd_dir(
     volume_dir: str,
     output_dir: str,
@@ -142,6 +158,7 @@ def ez_mftecmd_dir(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_evtxecmd(
     evtx_path: str,
     output_dir: str,
@@ -185,6 +202,7 @@ def ez_recmd_hive(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_recmd_dir(
     hives_dir: str,
     output_dir: str,
@@ -218,6 +236,7 @@ def _find_hives(hives_dir: str, names=_HIVE_NAMES, max_hives: int = 64) -> list[
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_recmd_batch(
     hives_dir: str,
     batch_file: str,
@@ -302,8 +321,122 @@ def ez_appcompatcacheparser(
 
 # ── Prefetch ──────────────────────────────────────────────────────────────────
 
+_PECMD_PLATFORM_REFUSAL = "non-windows platforms not supported"
+
+
+def _pecmd_platform_refusal(result: dict) -> bool:
+    """PECmd exits cleanly with this message off Windows — a platform limit,
+    not an absence of Prefetch evidence."""
+    blob = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".lower()
+    return _PECMD_PLATFORM_REFUSAL in blob
+
+
+def _prefetch_libscca(prefetch_path: str, output_dir: str, output_file: str,
+                      pecmd_result: dict) -> dict:
+    """Parse Prefetch with libscca (pyscca) and write PECmd-shaped CSV rows.
+
+    Same artifact, same tiering class: the call is still ez.pecmd and its cmd
+    names prefetch. Every .pf that fails to parse is reported per file, so a
+    partial parse is never mistaken for complete coverage.
+    """
+    from core.executor import _log_tool
+    import csv
+    import datetime
+
+    try:
+        import pyscca
+    except ImportError:
+        pecmd_result["error"] = (
+            "PECmd cannot run on this platform and libscca (pyscca) is not installed — "
+            "no Prefetch parser is available. Install libscca-python, or recover "
+            "execution evidence from UserAssist / Amcache / AppCompatCache. "
+            "An unavailable parser does not establish absence of Prefetch evidence.")
+        pecmd_result["tool_unavailable"] = True
+        return pecmd_result
+
+    if os.path.isdir(prefetch_path):
+        files = sorted(os.path.join(prefetch_path, n) for n in os.listdir(prefetch_path)
+                       if n.lower().endswith(".pf"))
+    else:
+        files = [prefetch_path]
+    out_path = os.path.join(output_dir, output_file)
+    os.makedirs(output_dir, exist_ok=True)
+
+    def _iso(value) -> str:
+        """A zero FILETIME (1601-01-01) means 'not set', never a timestamp."""
+        if isinstance(value, datetime.datetime):
+            if value.year <= 1601:
+                return ""
+            return value.replace(tzinfo=value.tzinfo or datetime.timezone.utc).isoformat()
+        return "" if value is None else str(value)
+
+    rows, failures = 0, []
+    with open(out_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["SourceFilename", "ExecutableName", "Hash", "Version", "RunCount",
+                         "LastRun", "PreviousRunTimes", "Volumes", "FileCount", "FilesLoaded"])
+        for path in files:
+            scca = pyscca.file()
+            try:
+                scca.open(path)
+                runs = []
+                for i in range(8):
+                    try:
+                        value = scca.get_last_run_time(i)
+                    except (IOError, OSError, ValueError):
+                        break
+                    # An unused slot is a zero FILETIME (1601-01-01), not a run.
+                    if value is not None and getattr(value, "year", 0) > 1601:
+                        runs.append(_iso(value))
+                volumes = []
+                for i in range(scca.number_of_volumes):
+                    vol = scca.get_volume_information(i)
+                    volumes.append(f"{vol.device_path}|{_iso(vol.get_creation_time())}|"
+                                   f"{vol.serial_number:08X}")
+                loaded = [scca.get_filename(i) for i in range(scca.number_of_filenames)]
+                writer.writerow([
+                    os.path.basename(path), scca.executable_filename,
+                    f"{scca.prefetch_hash:08X}" if scca.prefetch_hash is not None else "",
+                    scca.format_version, scca.run_count,
+                    runs[0] if runs else "", "; ".join(runs[1:]),
+                    "; ".join(volumes), len(loaded), "; ".join(loaded)])
+                rows += 1
+            except (IOError, OSError, ValueError) as exc:
+                failures.append(f"{os.path.basename(path)}: {exc}")
+            finally:
+                try:
+                    scca.close()
+                except (IOError, OSError, ValueError):
+                    pass
+
+    summary = (f"libscca parsed {rows} of {len(files)} prefetch file(s) -> {out_path}"
+               + (f"; {len(failures)} failed: " + "; ".join(failures[:5]) if failures else ""))
+    result = {"success": rows > 0, "stdout": summary,
+              "stderr": "" if rows else "no prefetch file could be parsed",
+              "exit_code": 0 if rows else 1, "truncated": False, "retries": 0,
+              "elapsed_seconds": 0.0,
+              "cmd": f"pyscca prefetch parse {prefetch_path} --csv {out_path}"}
+    _log_tool(result)
+    return {**result, "parser": "libscca",
+            "parser_note": ("PECmd did not run here; libscca parsed the same Prefetch "
+                            "artifacts into the same CSV."),
+            # Keep PECmd's own diagnosis visible — the substitution is recorded,
+            # never silent.
+            "pecmd_unavailable": True,
+            "pecmd_reason": (pecmd_result.get("error")
+                             or ("PECmd does not run on non-Windows platforms"
+                                 if _pecmd_platform_refusal(pecmd_result) else "")),
+            # Carry PECmd's own diagnosis (missing DLL, named alternatives) so a
+            # substitution never hides that the primary parser was unavailable.
+            **{k: pecmd_result[k] for k in ("tool_unavailable", "fallback", "installation_hint")
+               if pecmd_result.get(k)},
+            "output_path": out_path, "files_seen": len(files), "files_parsed": rows,
+            "parse_failures": failures}
+
+
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_pecmd(
     prefetch_path: str,
     output_dir: str,
@@ -312,16 +445,25 @@ def ez_pecmd(
     """
     Parse Windows Prefetch files — execution timestamps (up to 8 last run times), file references.
     prefetch_path: path to a single .pf file or the Prefetch directory.
+
+    PECmd refuses to run off Windows (it loads Windows decompression libraries),
+    so on this platform the same artifact is parsed with libscca (pyscca) and
+    written to the same CSV. The `parser` field names which one produced it.
     """
     flag = "-f" if prefetch_path.endswith(".pf") else "-d"
     args = [flag, prefetch_path, "--csv", output_dir, "--csvf", output_file]
-    return _ez(f"{EZ}/PECmd.dll", args, output_dir=output_dir)
+    result = _ez(_pecmd_path(), args, output_dir=output_dir)
+    if _pecmd_platform_refusal(result) or result.get("tool_unavailable"):
+        return _prefetch_libscca(prefetch_path, output_dir, output_file, result)
+    result.setdefault("parser", "PECmd")
+    return result
 
 
 # ── Jump Lists & LNK ──────────────────────────────────────────────────────────
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_jlecmd(
     jump_list_path: str,
     output_dir: str,
@@ -338,6 +480,7 @@ def ez_jlecmd(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_lecmd(
     lnk_path: str,
     output_dir: str,
@@ -408,6 +551,7 @@ def ez_wxtcmd(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def ez_sqlecmd(
     db_path: str,
     output_dir: str,

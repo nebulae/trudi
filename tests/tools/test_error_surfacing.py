@@ -25,6 +25,9 @@ def _build_context(tool_name: str, args: dict | None = None):
     msg.model_copy = MagicMock(return_value=msg)
     ctx = MagicMock()
     ctx.message = msg
+    from types import SimpleNamespace
+    ctx.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=SimpleNamespace(
+        parameters={'type': 'object', 'properties': {k: {} for k in (args or {})}, 'additionalProperties': True}))
     ctx.copy = MagicMock(return_value=ctx)
     return ctx
 
@@ -85,16 +88,20 @@ class TestToolBodyExceptionCapture:
         async def _ok(_ctx):
             return {"success": True}
 
-        with patch("core.execution_log.log", l):
-            with pytest.raises(ToolError, match="blocked"):
-                _run_async(mw.on_call_tool(_build_context("misc_record_finding",
+        from unittest.mock import AsyncMock
+        with patch("core.execution_log.log", l), patch('core.phase_routing.validate_request',
+                AsyncMock(side_effect=lambda ctx, name, args: args)):
+            created = _run_async(mw.on_call_tool(_build_context("misc_record_finding",
                                                           {"description": "new", "confidence": "LIKELY"}), _ok))
+            assert created['phase_transition']['to'] == 'Analyze'
+            l.record_dair_call('Analyze', '', True, 'Report', '', 'push', '')
             r = _run_async(mw.on_call_tool(_build_context("misc_record_finding",
                                                           {"description": "fix", "confidence": "SUSPECTED",
                                                            "supersedes": 12}), _ok))
         assert isinstance(r, dict) and r.get("success") is True
         blocked = [e for e in l._entries if e.get("type") == "tool_blocked"]
-        assert len(blocked) == 1
+        assert len(blocked) == 0
+        assert l._current_phase == 'Report'
 
     def test_input_validation_error_is_a_typed_refusal_with_arg_shapes(self, tmp_path):
         # A fastmcp/pydantic ValidationError must name

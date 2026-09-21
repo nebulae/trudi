@@ -15,6 +15,7 @@ from mcp import types as mt
 _SKIP_TOOLS = frozenset({"misc_record_agent_message", "misc_start_execution_log"})
 
 DAIR_GATE_ALLOWLIST = frozenset({
+    'misc_job_status', 'misc_job_list', 'misc_job_cancel', 'misc_operation_status', 'misc_declare_questions', 'misc_review_correspondent_scope', 'misc_record_question_outcome', 'misc_job_recover',
     # Trace lifecycle
     "misc_start_execution_log",
     "misc_export_execution_log",
@@ -46,6 +47,7 @@ DAIR_GATE_ALLOWLIST = frozenset({
     "reason_synthesize",
     "reason_pre_report_check",
     "reason_readiness_status",
+    "reason_review_details",
     "misc_retract_finding",
     "accuracy_compare",
     "accuracy_export_report",
@@ -243,9 +245,13 @@ _REPEAT_VOLATILE = ("elapsed_seconds", "retries", "stdout_path")
 def _repeat_key(tool_name: str, args: dict) -> str:
     import hashlib
     import json as _json
-    payload = _json.dumps({k: v for k, v in (args or {}).items() if k != "_note"},
-                          sort_keys=True, default=str)
+    from core.execution_log import log
+    from core.phase_routing import source_versions
+    arguments = {k: v for k, v in (args or {}).items() if k != "_note"}
+    payload = _json.dumps([getattr(log, '_run_id', None), arguments,
+                           source_versions(arguments)], sort_keys=True, default=str)
     return hashlib.sha256(f"{tool_name}|{payload}".encode()).hexdigest()
+
 
 
 def _result_hash(payload: dict) -> str:
@@ -266,14 +272,12 @@ def _repeat_precheck(key: str, tool_name: str) -> str:
     if st and st["identical"] >= REPEAT_BLOCK_AFTER:
         n = st["identical"] + 1
         return (
-            f"repeat_call_gate: this exact {tool_name} call has run {n - 1} "
-            f"times with an IDENTICAL result. A repeated negative is evidence "
-            f"of absence — record it once via misc.record_finding("
-            f"description=\"No matches for <what was searched>\", "
-            f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", "
-            f"category=..., act=..., scope=[...], linked_call_id=<the prior "
-            f"call's cid>, input_call_ids=[...]) and run a DIFFERENT query, or "
-            f"call dair.assess for the next work order."
+            f"repeat_call_gate: this exact {tool_name} call returned an identical "
+            f"result {n - 1} times. No new observation was obtained. Reuse the "
+            "existing result or repair the failed access/scope before retrying. "
+            "Repetition establishes neither absence nor scan completeness. A "
+            "negative claim still requires a complete, appropriately scoped search. "
+            "Call dair.assess for unresolved work."
         )
     return ""
 
@@ -294,12 +298,10 @@ def _repeat_update(key: str, tool_name: str, payload: dict) -> str:
         st["identical"] += 1
         n = st["identical"] + 1
         return (
-            f"REPEAT CALL: this exact call has now run {n}x with an identical "
-            f"result — re-running it cannot produce new evidence. If it is a "
-            f"negative, record it once (misc.record_finding, "
-            f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", with "
-            f"scope) and move to a DIFFERENT query, or call dair.assess "
-            f"for the next work order."
+            f"REPEAT CALL: this exact call returned an identical result {n}x. "
+            "No new observation was obtained. Reuse its receipts, repair access "
+            "or choose a discriminating check. Repetition does not prove absence; "
+            "negative claims require complete coverage of their stated scope. Call dair.assess for remaining work."
         )
     except Exception:
         return ""
@@ -526,7 +528,17 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
                 body = _json.dumps(payload, default=str) if ok and payload else ""
             except Exception:
                 body = ""
-            return log.record_tool_call(
+            # Link the wrapper to the reason result it wrapped, when the tool
+            # produced one. Resolution reads only this link: proximity is not
+            # identity, and an unlinked wrapper must resolve to nothing.
+            linked = payload.get("_trudi_call_id") if isinstance(payload, dict) else None
+            try:
+                linked = int(linked) if linked else 0
+            except (TypeError, ValueError):
+                linked = 0
+            if linked and (log.index().by_call_id.get(linked) or {}).get("type") != "reason_call":
+                linked = 0
+            cid = log.record_tool_call(
                 cmd=f"<py>:{tool_name}",
                 success=ok,
                 truncated=False,
@@ -537,7 +549,10 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
                 input_call_ids=_parent_cids(),
                 gate=str(payload.get("gate") or "") if not ok else "",
                 **({"stdout_full": body, "stdout_excerpt": body[:600]} if body else {}),
-            ) or 0
+            )
+            if cid and linked:
+                log.annotate_tool_call(cid, reason_call_id=linked)
+            return cid or 0
     except Exception as err:
         print(f"[TRUDI WARN] success-baseline log failed for {tool_name}: "
               f"{err!r}", file=sys.stderr)
@@ -576,6 +591,20 @@ class NarrationMiddleware(Middleware):
            ToolError → pass through (already structured, no extra entry)
     """
 
+    async def on_list_tools(self, context, call_next):
+        from copy import deepcopy
+        listed = await call_next(context)
+        result = []
+        for tool in listed:
+            from core.phase_routing import remember_schema
+            remember_schema(tool.name, tool.parameters)
+            schema = deepcopy(tool.parameters)
+            schema.setdefault('properties', {})['_refresh'] = {
+                'type': 'boolean', 'default': False,
+                'description': 'Deliberately repeat settled follow-up, or retry after reconciling an unknown outcome.'}
+            result.append(tool.model_copy(update={'parameters': schema}))
+        return result
+
     async def on_call_tool(
         self,
         context: MiddlewareContext[mt.CallToolRequestParams],
@@ -583,7 +612,23 @@ class NarrationMiddleware(Middleware):
     ):
         args = dict(context.message.arguments or {})
         note = args.pop("_note", None)
+        refresh = args.pop('_refresh', False)
+        if type(refresh) is not bool:
+            raise ToolError('_refresh must be a boolean')
         tool_name = context.message.name
+        from core.execution_log import log as routing_log
+        from core import phase_routing as routing
+        route_phase = routing.action_phase(tool_name, args, routing_log)
+        work = None
+        transition_notice = None
+        tracked = any(w['tool'] == routing.normalized(tool_name)
+                      for w in routing.work_state(routing_log).values())
+        needs_routing = bool(route_phase and getattr(routing_log, '_path', None))
+        if needs_routing:
+            try:
+                args = await routing.validate_request(context, tool_name, args)
+            except Exception as exc:
+                raise ToolError(f'Report follow-up needs_specification: {exc}') from exc
 
         # 1. Narration
         if note and tool_name not in _SKIP_TOOLS:
@@ -603,7 +648,7 @@ class NarrationMiddleware(Middleware):
             if (should_block and tool_name.endswith(("record_finding", "submit_finding"))
                     and args.get("supersedes")):
                 should_block, reason = False, "finding correction (supersedes) allowed in Report"
-            if should_block:
+            if should_block and routing_log._current_phase != 'Report':
                 # Record the block so a blocked-then-dropped tool is auditable.
                 try:
                     from core.execution_log import log
@@ -641,7 +686,25 @@ class NarrationMiddleware(Middleware):
             if fmsg:
                 notices.append(("finding_notice", fmsg))
 
-        if "_note" in (context.message.arguments or {}):
+        if needs_routing:
+            with routing_log.transaction():
+                work, transition_event, execute = routing.reserve(
+                    routing_log, tool_name, args, route_phase, refresh=refresh)
+            if not execute:
+                from fastmcp.tools import ToolResult
+                if work['status'] == 'completed':
+                    return ToolResult(structured_content={**work.get('result', {}), 'cached': True,
+                                                          'request_id': work['request_id']})
+                return ToolResult(structured_content={'success': False, 'status': work['status'], 'gate': 'report_follow_up',
+                        'request_id': work['request_id'],
+                        'error': 'Follow-up already reserved or needs reconciliation; inspect readiness before retrying.'})
+            if transition_event:
+                transition_notice = {'from': 'Report', 'to': route_phase,
+                                     'transition_call_id': transition_event['call_id'],
+                                     'request_id': work['request_id']}
+                notices.append(('phase_transition', transition_notice))
+
+        if args != (context.message.arguments or {}):
             new_message = context.message.model_copy(update={"arguments": args})
             context = context.copy(message=new_message)
 
@@ -656,8 +719,9 @@ class NarrationMiddleware(Middleware):
 
         # Tool identity for the trace: record_tool_call stamps it as mcp_tool.
         try:
-            from core.execution_log import current_mcp_tool as _cur_tool
+            from core.execution_log import current_mcp_tool as _cur_tool, current_mcp_arguments
             _tool_token = _cur_tool.set(tool_name)
+            _argument_token = current_mcp_arguments.set(args)
         except Exception:
             _cur_tool, _tool_token = None, None
 
@@ -665,11 +729,17 @@ class NarrationMiddleware(Middleware):
             try:
                 result = await call_next(context)
             except ToolError:
+                if work:
+                    routing.finish(routing_log, work, status='unknown', error='Tool refused; reconcile before retry')
                 raise
             except asyncio.CancelledError:
+                if work:
+                    routing.finish(routing_log, work, status='unknown', error='Execution cancelled; outcome unknown')
                 _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
                 raise
             except Exception as e:
+                if work:
+                    routing.finish(routing_log, work, status='unknown', error=str(e))
                 _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
                 if _is_input_validation(e):
                     # A typed refusal shape, like the gates: name the fields so the
@@ -682,10 +752,15 @@ class NarrationMiddleware(Middleware):
 
             result = _stamp_call_id(result, _trace_success_baseline(
                 tool_name, round(time.perf_counter() - start, 2), entries_before, result))
+            payload = _result_payload(result)
+            if work:
+                routing.finish(routing_log, work, payload)
+            routing.reconcile_job(routing_log, tool_name, args, payload)
         finally:
             if _cur_tool is not None and _tool_token is not None:
                 try:
                     _cur_tool.reset(_tool_token)
+                    current_mcp_arguments.reset(_argument_token)
                 except Exception:
                     pass
 
@@ -738,4 +813,20 @@ class NarrationMiddleware(Middleware):
         except Exception:
             pass
 
+        # Final client boundary: internal submission retains the full review.
+        from core.review_delivery import REVIEW_TOOLS, client_review
+        if tool_name in REVIEW_TOOLS:
+            body = _result_payload(result)
+            if isinstance(body, dict):
+                from core.execution_log import log
+                compact = client_review(log, body, tool_name)
+                if isinstance(result, dict):
+                    result = compact
+                else:
+                    import json
+                    from mcp.types import TextContent
+                    result = result.model_copy(update={
+                        'structured_content': compact,
+                        'content': [TextContent(type='text', text=json.dumps(compact, ensure_ascii=True,
+                                                                           separators=(',', ':')))]})
         return result

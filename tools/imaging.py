@@ -1,6 +1,7 @@
 """Image mounting tools — vshadowmount, xmount, bdemount, photorec."""
 import os
 from typing import Optional
+from core.job_adapters import job_backed
 from fastmcp import FastMCP
 from core import run, output_safe
 from core.paths import assert_output_safe
@@ -161,6 +162,7 @@ def xmount_umount(mount_point: str) -> dict:
 
 @mcp.tool()
 @output_safe
+@job_backed
 def photorec_carve(
     image_path: str,
     output_dir: str,

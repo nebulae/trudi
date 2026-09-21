@@ -278,3 +278,80 @@ class TestStructuralMailMarkers:
         assert e.get("transfer_artifact") is True
         assert e.get("receipt_artifact") is True         # the DSN itself is the receipt-side artifact
         assert any(m.get("has_attachment") for m in r["messages"])
+
+
+class TestCommandOutputPaths:
+    """Regression (VANKO-2016-DEEPSEEK41 run 2, 2026-09-20): `-o` is Sleuth
+    Kit's partition OFFSET and `-t` is mount's filesystem TYPE. Reading those
+    as promised output files made every tsk call look like an invocation log
+    whose output had vanished — refusing it as evidence and permanently
+    blocking synthesis for any finding that cited it."""
+
+    def test_tsk_offset_is_not_an_output_path(self):
+        from tools._output_reader import _cmd_output_paths
+        assert _cmd_output_paths('sudo fls -o 1411072 /ev/img.E01 85578') == []
+        assert _cmd_output_paths('sudo icat -o 1411072 /ev/img.E01 85578') == []
+
+    def test_mount_type_is_not_an_output_path(self):
+        from tools._output_reader import _cmd_output_paths
+        cmd = 'sudo mount -t ntfs-3g -o ro,loop,offset=722468864 /mnt/ewf/ewf1 /mnt/c'
+        assert _cmd_output_paths(cmd) == []
+
+    def test_real_output_paths_are_still_detected(self):
+        from tools._output_reader import _cmd_output_paths
+        assert _cmd_output_paths(
+            'dotnet MFTECmd.dll -f /mnt/c/$MFT --csv /case/exports --csvf mft.csv'
+        ) == ['/case/exports/mft.csv']
+        assert _cmd_output_paths('read.output --output /case/exports/rows.csv') == [
+            '/case/exports/rows.csv']
+
+
+class TestManifestedOutputStaleness:
+    """Regression (VANKO run 5, 2026-09-21): the agent re-ran an extractor into
+    the same path. The bytes were identical (same sha256) but the inode and
+    mtime changed, a stat-only check called the output "changed", and the first
+    live pull-mode synthesis was refused outright."""
+
+    def _item(self, path):
+        import hashlib
+        from core.evidence_packets import file_version
+        return {'path': str(path), 'version': file_version(str(path)),
+                'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
+
+    def test_identical_rewrite_is_not_stale(self, tmp_path):
+        import os
+        from tools._output_reader import _content_changed
+        out = tmp_path / 'evtx.csv'
+        out.write_text('TimeCreated,EventId\n2016-06-18,4624\n')
+        item = self._item(out)
+        body = out.read_bytes()
+        out.unlink()                       # new inode, new mtime, same bytes
+        out.write_bytes(body)
+        os.utime(out, ns=(1, 1))
+        assert _content_changed(str(out), item) is False
+
+    def test_modified_content_is_stale(self, tmp_path):
+        from tools._output_reader import _content_changed
+        out = tmp_path / 'evtx.csv'
+        out.write_text('TimeCreated,EventId\n2016-06-18,4624\n')
+        item = self._item(out)
+        out.write_text('TimeCreated,EventId\n2016-06-18,4625\n')
+        assert _content_changed(str(out), item) is True
+
+    def test_missing_file_is_stale(self, tmp_path):
+        from tools._output_reader import _content_changed
+        out = tmp_path / 'gone.csv'
+        out.write_text('a\n')
+        item = self._item(out)
+        out.unlink()
+        assert _content_changed(str(out), item) is True
+
+    def test_without_a_recorded_hash_metadata_still_decides(self, tmp_path):
+        import os
+        from tools._output_reader import _content_changed
+        from core.evidence_packets import file_version
+        out = tmp_path / 'legacy.csv'
+        out.write_text('a\n')
+        item = {'path': str(out), 'version': file_version(str(out))}   # no sha256
+        os.utime(out, ns=(1, 1))
+        assert _content_changed(str(out), item) is True

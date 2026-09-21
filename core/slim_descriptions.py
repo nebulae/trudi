@@ -20,11 +20,24 @@ from __future__ import annotations
 import re
 
 ENV_FLAG = "TRUDI_SLIM_TOOL_DESCRIPTIONS"
-CAP = 300  # chars, applied after first-paragraph extraction
+CAP = 280  # chars, applied after first-paragraph extraction
 
 # Curated summaries for the contract-critical tools whose one-line form would
 # lose load-bearing structure. Keys are the MOUNTED tool names.
 OVERRIDES: dict[str, str] = {
+    "reason_synthesize": (
+        "Resume Report review using next_arguments when status=in_progress. Optional review_session_id pins it. "
+        "Blocked names the repair. Only complete with approved=true permits pre_report_check; empty issues do not."
+    ),
+    "misc_job_status": (
+        "Poll or collect once. Inspect success, result_status and scope_complete separately. "
+        "Only validated_outputs are citable. Page details with section/state_version."
+    ),
+    "misc_job_list": "List jobs, owning runs, live writers and adapter policies.",
+    "misc_job_cancel": (
+        "Stop one job; scope stays open. After collection, justify settlement with "
+        "record_disposition(target_kind='job', target_id=job_id) and its result citation."
+    ),
     "misc_record_finding": (
         "Record a structured finding in the trace. Requires linked_call_id (the "
         "_trudi_call_id of the source tool call), input_call_ids lineage, and a "
@@ -61,7 +74,21 @@ OVERRIDES: dict[str, str] = {
         "case_question at Triage start, distinct_principal for any new "
         "account/identity, mechanism, coverage_gap). Capture each hypothesis_id "
         "and route resolving findings back via tested_hypothesis_id. Requires "
-        "input_call_ids."
+        "input_call_ids. mode='absence' reviews unexamined relevant sources "
+        "for unresolved questions; include benign alternatives and actual evidence capabilities."
+    ),
+    "reason_readiness_status": (
+        "Model-free readiness and curiosity allowance. For details pass section/state_version, "
+        "follow next_offset, join json_chunk and parse JSON. Suggestions are optional."
+    ),
+    "reason_review_details": (
+        "Read saved review by call_id, no model call. Discover sections, pin state_version, "
+        "follow next_offset, join json_chunk and parse JSON."
+    ),
+    "misc_record_curiosity_probe": (
+        "Log a completed optional read-only check outside the work order. Requires "
+        "DAIR curiosity_budget and rationale; link actual outputs via input_call_ids. "
+        "Probe metadata is not evidence. Unused allowance is fine."
     ),
 }
 

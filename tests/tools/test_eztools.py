@@ -60,6 +60,58 @@ class TestReCmd:
 
 
 class TestParserTools:
+    @pytest.mark.parametrize('layout', ['flat', 'nested', 'override'])
+    def test_pecmd_resolves_installed_path(self, mock_dotnet, tmp_path, monkeypatch, layout):
+        import tools.eztools as E
+        monkeypatch.setattr(E, 'EZ', str(tmp_path / 'tools'))
+        monkeypatch.delenv('TRUDI_PECMD_DLL', raising=False)
+        root = tmp_path / 'tools'
+        dll = root / 'PECmd.dll' if layout == 'flat' else root / 'PECmd' / 'PECmd.dll'
+        if layout == 'override':
+            dll = tmp_path / 'configured' / 'PECmd.dll'
+            monkeypatch.setenv('TRUDI_PECMD_DLL', str(dll))
+        dll.parent.mkdir(parents=True)
+        dll.write_text('test executable placeholder')
+        E.ez_pecmd('/evidence/Prefetch', str(tmp_path / 'output'))
+        assert mock_dotnet.call_args.args[0] == str(dll)
+
+    def test_missing_explicit_pecmd_path_does_not_silently_fall_back(self, tmp_path, monkeypatch):
+        import tools.eztools as E
+        root = tmp_path / 'tools'
+        root.mkdir()
+        (root / 'PECmd.dll').write_text('placeholder')
+        missing = tmp_path / 'missing' / 'PECmd.dll'
+        monkeypatch.setattr(E, 'EZ', str(root))
+        monkeypatch.setenv('TRUDI_PECMD_DLL', str(missing))
+        with patch.object(E, 'run_dotnet', return_value={'success': False, 'exit_code': 145}) as run, \
+             patch.object(E, '_prefetch_libscca', side_effect=lambda *a: a[3]) as fb:
+            result = E.ez_pecmd('/evidence/Prefetch', str(tmp_path / 'output'))
+        assert run.call_args.args[0] == str(missing)
+        assert fb.called  # the configured path is never swapped for another DLL
+        assert result['tool_unavailable'] and 'TRUDI_PECMD_DLL' in result['installation_hint']
+
+    def test_non_windows_refusal_parses_prefetch_with_libscca(self, tmp_path, monkeypatch):
+        """PECmd exits cleanly off Windows ('Non-Windows platforms not supported').
+        That is a platform limit, not absence of Prefetch evidence."""
+        import tools.eztools as E
+        pytest.importorskip('pyscca')
+        refusal = {'success': True, 'exit_code': 0, 'truncated': False, 'retries': 0,
+                   'stdout': 'Non-Windows platforms not supported due to the need to load '
+                             'decompression specific Windows libraries! Exiting...',
+                   'stderr': '', 'cmd': 'dotnet PECmd.dll'}
+        pf = tmp_path / 'Prefetch'
+        pf.mkdir()
+        (pf / 'NOTPREFETCH.EXE-1234ABCD.pf').write_bytes(b'not a real prefetch file')
+        out = tmp_path / 'out'
+        with patch.object(E, 'run_dotnet', return_value=refusal), \
+             patch.object(E, 'assert_output_safe', lambda *a, **k: None), \
+             patch('core.executor._log_tool', lambda result: None):
+            result = E.ez_pecmd(str(pf), str(out))
+        assert result['parser'] == 'libscca' and result['pecmd_unavailable']
+        assert result['files_seen'] == 1 and result['files_parsed'] == 0
+        assert result['parse_failures'] and result['success'] is False
+        assert 'prefetch' in result['cmd']  # keeps the prefetch tiering class
+
     def test_amcacheparser(self, mock_dotnet, tmp_path):
         from tools.eztools import ez_amcacheparser
         ez_amcacheparser("/mnt/wkstn01/Windows/AppCompat/Programs/Amcache.hve", str(tmp_path))
@@ -80,14 +132,17 @@ class TestParserTools:
     def test_pecmd_missing_dll_returns_fallback(self, tmp_path):
         # dotnet fails AND the .dll is absent → tool_unavailable + fallback that
         # names the execution-evidence alternatives (UserAssist / Amcache / …).
+        # libscca then parses the same artifact; PECmd's diagnosis rides along,
+        # so the substitution is recorded rather than silent.
         from tools.eztools import ez_pecmd
         fail = {"success": False, "stderr": "The application '…PECmd.dll' does not exist",
                 "exit_code": 145, "cmd": "dotnet …PECmd.dll"}
         with patch("tools.eztools.run_dotnet", return_value=dict(fail)), \
-             patch("tools.eztools.os.path.exists", return_value=False):
+             patch("tools.eztools.os.path.exists", return_value=False), \
+             patch("core.executor._log_tool", lambda result: None):
             r = ez_pecmd("/mnt/x/Windows/Prefetch/", str(tmp_path))
         assert r["tool_unavailable"] is True
-        assert "not installed" in r["error"] and "PECmd.dll" in r["error"]
+        assert "not installed" in r["pecmd_reason"] and "PECmd.dll" in r["pecmd_reason"]
         assert "UserAssist" in r["fallback"] and "amcache" in r["fallback"].lower()
 
     def test_present_dll_failure_is_not_marked_unavailable(self, tmp_path):

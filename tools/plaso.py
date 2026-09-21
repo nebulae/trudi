@@ -1,6 +1,7 @@
 """Plaso (log2timeline) — super-timeline generation and filtering."""
 import os
 from typing import Optional
+from core.job_adapters import job_backed
 from fastmcp import FastMCP
 from core import run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
@@ -10,6 +11,7 @@ mcp = FastMCP("plaso")
 
 @mcp.tool()
 @output_safe
+@job_backed
 def plaso_create_timeline(
     evidence_path: str,
     storage_file: str,
@@ -32,6 +34,7 @@ def plaso_create_timeline(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def plaso_create_targeted(
     evidence_path: str,
     storage_file: str,

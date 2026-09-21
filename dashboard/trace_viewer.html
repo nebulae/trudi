@@ -137,6 +137,15 @@
   .pill.blocked { background: rgba(255,168,107,.18); color: var(--finding-likely); }
   .pill.fetch { background: rgba(94,209,209,.12); color: var(--curiosity); }
   .pill.disposition { background: rgba(180,140,255,.12); color: var(--dair); }
+  .evidence-table { overflow-x: auto; margin: 8px 0; }
+  .evidence-table table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  .evidence-table th, .evidence-table td {
+    border: 1px solid var(--border); padding: 5px 8px; text-align: left;
+    vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere;
+    min-width: 90px; max-width: 360px;
+  }
+  .evidence-table th { color: var(--accent); background: var(--bg-3); }
+  .evidence-location { color: var(--fg-dim); font-size: 11px; margin-top: 8px; }
 
   /* Entries list */
   .entry {
@@ -269,6 +278,8 @@
     <div class="filter-group">
       <h3>Types</h3>
       <label><input type="checkbox" class="type-filter" value="dair_call" checked><span class="pill dair">DAIR</span><span class="count" data-count="dair_call">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="phase_transition" checked><span class="pill dair">PHASE RETURN</span><span class="count" data-count="phase_transition">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="phase_work" checked><span class="pill dair">FOLLOW-UP</span><span class="count" data-count="phase_work">0</span></label>
       <label><input type="checkbox" class="type-filter" value="reason_call" checked><span class="pill reason">REASON</span><span class="count" data-count="reason_call">0</span></label>
       <label><input type="checkbox" class="type-filter" value="tool_call" checked><span class="pill tool">TOOL</span><span class="count" data-count="tool_call">0</span></label>
       <label><input type="checkbox" class="type-filter" value="finding" checked><span class="pill finding-confirmed">FIND</span><span class="count" data-count="finding">0</span></label>
@@ -281,7 +292,7 @@
       <label><input type="checkbox" class="type-filter" value="finding_refused" checked><span class="pill refused">⛔ REFUSED</span><span class="count" data-count="finding_refused">0</span></label>
       <label><input type="checkbox" class="type-filter" value="tool_blocked" checked><span class="pill blocked">⛔ BLOCKED</span><span class="count" data-count="tool_blocked">0</span></label>
       <label><input type="checkbox" class="type-filter" value="disposition" checked><span class="pill disposition">📌 DISP</span><span class="count" data-count="disposition">0</span></label>
-      <label><input type="checkbox" class="type-filter" value="reason_evidence_fetch"><span class="pill fetch">🔎 FETCH</span><span class="count" data-count="reason_evidence_fetch">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="reason_evidence_fetch" checked><span class="pill fetch">🔎 FETCH</span><span class="count" data-count="reason_evidence_fetch">0</span></label>
     </div>
 
     <div class="filter-group">
@@ -524,6 +535,14 @@ function entrySummary(e) {
               (e.hypothesis_id ? ` ${e.hypothesis_id}` : '') + reverseChip,
       };
     }
+    case 'phase_transition':
+      return {pill: '<span class="pill dair">DAIR POLICY</span>',
+        line: `${escapeHtml(e.from_phase)} → ${escapeHtml(e.to_phase)}`,
+        meta: `${escapeHtml(e.request_id)} ${escapeHtml(e.reason)}`};
+    case 'phase_work':
+      return {pill: '<span class="pill dair">FOLLOW-UP</span>',
+        line: `${escapeHtml(e.tool)}: ${escapeHtml(e.status)}`,
+        meta: `${escapeHtml(e.request_id)} ${escapeHtml(e.required_phase)}`};
     case 'dair_call': {
       const transition = e.transition_recommended
         ? ` → ${escapeHtml(e.next_phase)}` : '';
@@ -792,6 +811,68 @@ function _findingsLinkedHere(cid) {
     `</ul>`;
 }
 
+// Parse quoted commas, doubled quotes, CRLF and multiline fields without
+// guessing column alignment when an excerpt ends inside a record.
+function parseEvidenceRows(text, delimiter) {
+  const rows = []; let row = [], value = '', quoted = false, closed = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { value += '"'; i++; }
+      else if (c === '"') { quoted = false; closed = true; }
+      else value += c;
+    } else if (c === '"') {
+      if (value || closed) return null;
+      quoted = true;
+    } else if (c === delimiter) {
+      row.push(value); value = ''; closed = false;
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(value); rows.push(row); row = []; value = ''; closed = false;
+    } else {
+      if (closed) return null;
+      value += c;
+    }
+  }
+  if (quoted) return null;
+  if (value || closed || row.length) { row.push(value); rows.push(row); }
+  return rows;
+}
+
+function renderEvidenceText(text, {columns = null, path = '', projection = null} = {}) {
+  const raw = String(text || '');
+  const fallback = () => `<pre>${escapeHtml(raw.slice(0, 20000))}${raw.length > 20000 ? '\n…[display limit]' : ''}</pre>`;
+  if (raw.length > 20000 || /^[\s]*[\[{]/.test(raw)) return fallback();
+  const firstLine = raw.split(/\r?\n/, 1)[0];
+  const delimiter = path.toLowerCase().endsWith('.tsv') || (!path.toLowerCase().endsWith('.csv') && firstLine.includes('\t')) ? '\t' : ',';
+  const rows = parseEvidenceRows(raw, delimiter);
+  if (!rows || !rows.length) return fallback();
+  const header = columns || rows.shift().map(x => x.replace(/^\ufeff/, '').trim());
+  if (header.length < 1 || (!columns && header.length < 2) || !rows.length ||
+      header.some(x => !x || /[\r\n]/.test(x)) || new Set(header.map(x => x.toLowerCase())).size !== header.length ||
+      rows.some(row => row.length !== header.length) || rows.length > 100) return fallback();
+  const indices = header.map((_, i) => i).filter(i =>
+    (!projection || projection.includes(header[i])) && rows.some(row => row[i] !== ''));
+  if (!indices.length) return fallback();
+  const cell = value => escapeHtml(value.length > 400 ? value.slice(0, 400) + ' …[field truncated]' : value);
+  return `<div class="evidence-table"><table><thead><tr>${indices.map(i => `<th>${escapeHtml(header[i])}</th>`).join('')}</tr></thead>` +
+    `<tbody>${rows.map(row => `<tr>${indices.map(i => `<td>${cell(row[i])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` +
+    `<details><summary>Raw text</summary>${fallback()}</details>`;
+}
+
+function renderEvidencePacket(packet) {
+  if (!packet || !Array.isArray(packet.evidence)) return '';
+  return '<h3>selected evidence</h3>' + packet.evidence.map(source =>
+    `<details><summary>${_linkChip(source.call_id, `#${source.call_id}`)} ${escapeHtml(source.path || 'retained stdout')}</summary>` +
+    (source.selections || []).map(selection => (selection.spans || []).map(span =>
+      `<div class="evidence-location">row ${escapeHtml(span.row_number)} · bytes ${escapeHtml(span.start_byte)}:${escapeHtml(span.end_byte)}</div>` +
+      renderEvidenceText(span.text, {columns: selection.columns && selection.columns.length ? selection.columns : null,
+                                    path: source.path || '', projection: span.display && span.display.columns.length ? span.display.columns : null}) +
+      (span.display ? `<details><summary>Reviewer display</summary><pre>${escapeHtml(span.display.displayed_text)}</pre></details>` : '')
+    ).join('') + ((selection.shared_spans || []).length ? `<p class="evidence-location">${selection.shared_spans.length} shared row(s); see linked source calls.</p>` : '')).join('') + '</details>'
+  ).join('');
+}
+
 function renderToolCall(e) {
   return `
     <div class="kv">
@@ -807,7 +888,7 @@ function renderToolCall(e) {
       ${e.stdout_chars !== undefined ? `<span class="k">stdout</span><span class="v">${e.stdout_chars} chars${e.stdout_path ? ` · sidecar <code>${escapeHtml(e.stdout_path)}</code>${e.stdout_partial ? ' (PARTIAL)' : ''}` : (e.stdout_excerpt && e.stdout_chars > e.stdout_excerpt.length ? ' · <span class="pill error">PARTIAL — only the excerpt is stored</span>' : ' · complete')}</span>` : ''}
       ${e.session_artifact ? `<span class="k">session artifact</span><span class="v">yes${Array.isArray(e.session_event_ids) ? ' (' + e.session_event_ids.join(', ') + ')' : ''}</span>` : ''}
     </div>
-    ${e.stdout_excerpt ? `<h3>stdout excerpt</h3><pre>${escapeHtml(e.stdout_excerpt)}</pre>` : ''}
+    ${e.stdout_excerpt ? `<h3>stdout excerpt</h3>${renderEvidenceText(e.stdout_excerpt)}` : ''}
     ${e.stderr ? `<h3>stderr</h3><pre>${escapeHtml(e.stderr)}</pre>` : ''}
     ${_findingsLinkedHere(e.call_id)}
   `;
@@ -856,7 +937,9 @@ function renderEvidenceFetch(e) {
     <div class="kv">
       <span class="k">for reason call</span><span class="v">${e.reason_call_id ? _linkChip(e.reason_call_id, `→ #${e.reason_call_id}`) : ''}</span>
     </div>
-    <h3>requests</h3><pre>${escapeHtml(JSON.stringify(reqs, null, 2))}</pre>
+    ${reqs.map(r => (r.source_selections || []).map(span => `<h3>${escapeHtml(span.path || 'retained stdout')}</h3>` +
+      (span.display ? `<pre>${escapeHtml(span.display.displayed_text)}</pre><details><summary>Raw text</summary><pre>${escapeHtml(span.text)}</pre></details>` : renderEvidenceText(span.text))).join('')).join('')}
+    <details><summary>Request details</summary><pre>${escapeHtml(JSON.stringify(reqs, null, 2))}</pre></details>
   `;
 }
 
@@ -959,6 +1042,7 @@ function renderReasonCall(e) {
     ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
     ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
     ${renderReviewFetches(e)}
+    ${renderEvidencePacket(e.synthesis_evidence_packet || e.evidence_packet)}
     ${e.error ? `<h3>error</h3><pre style="color:var(--error)">${escapeHtml(e.error)}</pre>` : ''}
     ${e.conclusion && !conclusionIsJson && e.conclusion !== e.error
       && !(rb && (rb.rationale || '').trim() === e.conclusion.trim()) ?`<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}

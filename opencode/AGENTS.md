@@ -11,6 +11,36 @@ When the **TRUDI Pilot profile** is active (the `trudi-pilot` agent), its
 conversational rules OVERRIDE the autonomy directives here; every other
 rule (evidence path, gates, typed claims, citability) applies unchanged.
 
+
+**Bounded guidance and exploration.** Large control results provide `details`;
+use `reason.readiness_status(section=..., state_version=...)` or
+`reason.review_details(call_id=..., section=..., state_version=...)`. Follow
+`next_offset`, concatenate `json_chunk`, then parse JSON. Do not rerun a model
+or read internal caches just to retrieve its result. Synthesis checks deterministic
+prerequisites before model work and shares finding-scoped evidence. A mistaken
+reviewer premise can be independently corrected with existing source quotes;
+do not retract supported observations merely to clear a gate.
+
+Review responses carry `review_call_id`, verdict or access status, and a
+versioned `details` route. Read the named blocker sections with
+`reason.review_details` before retrying; never guess IDs or rerun an evaluation
+to retrieve it. `access_failure` means required evidence was not reached: repair
+the request/source, rather than treating it as a factual challenge or collecting
+new evidence automatically. Fetch repairs use `replaces_request_id` and retain
+successful reads. `uncited_sources` are optional leads from retained outputs,
+including inline stdout: inspect them before citing, and obtain a new independent
+review after changing citations. Empty/capped suggestions do not require new
+collection. Narrowing the claim remains available.
+
+`reason.hypothesize(mode="absence")` returns optional `exploratory_suggestions`;
+do not merge them into mandatory `priority_tools` or extract binding work from
+its prose. Choose a useful check within DAIR's allowance after the required batch,
+or record that no useful candidate remains in the next normal summary. Link the
+actual tool output when recording a curiosity probe. Budget is permission, not a
+quota; probe metadata alone never supports a finding. Follow the actual question
+and available evidence, including benign alternatives, rather than a fixed
+platform or attack checklist.
+
 ## Ground rules
 
 - **Run fully autonomously.** Never ask questions, never check in, never end a turn
@@ -40,10 +70,7 @@ rule (evidence path, gates, typed claims, citability) applies unchanged.
   `dair_notice` or `finding_notice` field is the control plane telling you the
   next required call — act on it (call the named tool with the given shape)
   BEFORE any further forensic tool calls.
-- **Background jobs:** carve-class tools (e.g. `net.tcpxtract_streams`)
-  return a `job_id` immediately — poll `misc.job_status(job_id)` between other
-  work; never sit idle waiting on a running job. The finished job_status
-  result is the citable record.
+- **Background jobs** — long operations wait up to 15 seconds, then return a `job_id` if still running. Poll `misc.job_status` between useful work. Only validated partial outputs are citable; incomplete scope remains open. See the resumable review and jobs contract below.
 - Never manually edit `~/.cache/trudi/*` files; reset with
   `python -m tools.trudi_reset --case-dir <case>`.
 
@@ -87,7 +114,7 @@ unseen principal is a FORCED candidate: bind it with a session artifact, exclude
 with evidence, or park it via disposition — before Report.
 
 Directives are binding: `priority_tools` next in order; respect `skip_tools`,
-`focus_pids`, `focus_paths`. When `reason.hypothesize` output names concrete
+`focus_pids`, `focus_paths`. When presence-mode `reason.hypothesize` output names concrete
 searches/artifacts in its text, convert them to tool calls and queue them even if
 its `priority_tools` is empty. Triage max-pass cap: after 3 consecutive
 `stay` responses with no open verification challenge, log
@@ -233,3 +260,60 @@ Velociraptor-backed live cases (`monitor.*`/`respond.*`) use per-investigation
 traces and operator-gated containment — full detail in
 `~/trudi/docs/live-monitoring.md`. Static forensic investigations never execute
 response actions; Improve & Response are recommendations in the final report only.
+
+## Report follow-up routing
+
+Required forensic work discovered in Report uses a durable DAIR transition before
+execution: new acquisition/extraction goes to Collect, new analysis to Analyze,
+and discovery scans to Scan. A validated, already-authorized tool request continues
+in the same call after that transition; do not repeat it just to change phase.
+This does not authorize new work beyond the analyst's instructions in pilot mode.
+
+Reads of traced, produced outputs and finding corrections remain in Report.
+Synthesis may return `follow_up_required` with typed work and a `request_id`;
+execute that work through normal MCP tools. Optional suggestions are not duties.
+`repair_required` means an output-access/software problem, not a reason to collect
+more evidence. Missing synthesis alone also stays in Report.
+
+Pending/running/failed work appears in `reason.readiness_status().follow_up` and
+blocks return to Report. A DAIR call or unrelated tool success does not settle it.
+Completed duplicate requests reuse their result. For a deliberate repeat of a
+completed/failed request, or after reconciling an unknown outcome, pass `_refresh=true`;
+never refresh an operation merely because its response was delayed. Poll background
+jobs with `misc.job_status`; do not restart them. A justified unavailable/inapplicable
+request can be dispositioned with `target_kind="follow_up"`, its exact request ID,
+a reasoned note and its result/trigger evidence call IDs. This settles the task,
+not the underlying finding or independent review issue.
+
+Return through DAIR after required work is settled, then rerun synthesis against
+the updated evidence. Report publication still requires a current pre-report approval.
+
+## Resumable review and accountable jobs
+
+`reason.synthesize` returns `status: in_progress | complete | blocked` and a
+`review_session_id`. For `in_progress`, call it again with `next_arguments` and
+normal lineage; the server resumes unfinished requests and reuses current review
+receipts. Stay in Report unless a typed follow-up routes actual evidence work.
+A successful call or `issues: []` does not approve a report. Wait for `complete`
+and `approved: true`, then run `reason.pre_report_check`. A budget blocker retains
+the checkpoint; unchanged retries do not replenish its allowance.
+
+Long tools wait up to 15 seconds for the complete operation, including fallback
+parsing and validation. Otherwise they return a durable `job_id`. There are two
+concurrent slots and no queue. `misc.job_list` supplies the current adapter
+policies and active jobs. Poll `misc.job_status` between useful work; do not
+restart a running operation. Jobs belong to a run, not merely a case/path.
+
+Execution success, `result_status`, and `scope_complete` are separate. Cite only
+validated outputs from a partial/cancelled job. Its original scope remains open,
+and a partial search cannot prove absence. Traced reads preserve that incomplete
+scope. Unsupported interrupted containers require subsequent validation.
+
+To abandon work, call `misc.job_cancel(job_id, reason)` and collect the stopped
+job. Then use `misc.record_disposition(target_kind="job", target_id=job_id,
+reason="out_of_scope"|"inapplicable"|"evidence_unavailable", note=...,
+evidence_call_ids=[<this job's collected call_id>])` when justified. This settles
+only that job's obligation; a generic tool disposition cannot settle jobs.
+Cancellation alone never settles scope. An orphan's explicit cancellation can
+finalize retained partial output without re-running extraction. Both reset
+entrypoints refuse while workers can write, including with `--force`.

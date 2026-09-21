@@ -21,7 +21,8 @@ from ._manifests import MANIFESTS, SOURCE_WAIVER_REASONS, manifest_for_claim
 
 def _tool_cmds(ctx) -> list:
     by_type = getattr(ctx.idx, "by_type", {}) or {}
-    return [e for e in by_type.get("tool_call", []) if isinstance(e.get("cmd"), str)]
+    return [e for e in by_type.get("tool_call", []) if isinstance(e.get("cmd"), str)
+            and e.get('scope_complete') is not False]
 
 
 def _claim_window_days(claim: dict) -> list:

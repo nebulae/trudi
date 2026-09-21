@@ -86,7 +86,8 @@ def authored_source_of(entry: dict, authored: set) -> str:
 def is_evidence_tool_call(entry: dict) -> bool:
     if not isinstance(entry, dict) or entry.get("type") != "tool_call":
         return False
-    if not entry.get("success"):
+    from core.evidence_admission import evidence_usable
+    if not evidence_usable(entry):
         return False
     cmd = entry.get("cmd")
     if not isinstance(cmd, str) or not cmd.strip():

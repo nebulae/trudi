@@ -115,7 +115,12 @@ def _failed_tool_items(entries) -> list:
     replaced, or typed-dispositioned, never silently dropped. Agent-side bash
     (source claude_code_*) and control-plane calls are out of scope."""
     out = []
+    scoped_results = {e.get('result_call_id') for e in entries or [] if e.get('type') == 'phase_work' and e.get('result_call_id')}
     for i, e in enumerate(entries or []):
+        if e.get('job_id') or e.get('call_id') in scoped_results:
+            # The exact job scope is settled through phase_work, not a second
+            # global waiver for every invocation of this tool.
+            continue
         if e.get("type") != "tool_call" or e.get("success") is not False:
             continue
         cmd = str(e.get("cmd") or "")
@@ -141,6 +146,15 @@ def _succ_tool_ids(entries) -> list:
     with the tool name, so matching on cmd alone reads a tool that DID run as
     never-run and stalls the phase on it forever."""
     out = []
+    work = {}
+    for entry in entries or []:
+        if entry.get('type') == 'phase_work' and entry.get('job_id'):
+            work[entry['request_id']] = entry
+    # Running work suppresses re-prescription, while the exact outstanding
+    # phase_work obligation separately blocks Report. Disposition is scoped to
+    # the job and never creates a global tool waiver.
+    out.extend(_fk.normalize_tool_name(str(e['tool']).lower().replace('.', '_'))
+               for e in work.values() if e.get('status') in ('running', 'completed', 'dispositioned'))
     for e in entries or []:
         if e.get("type") not in ("reason_call", "tool_call") or e.get("success") is False:
             continue
@@ -165,7 +179,12 @@ def unrun_from_list(entries, tools) -> list:
     didx = index_from_entries(entries)
     out: list = []
     seen: set = set()
+    from core.work_obligations import parse_work, completed
     for t in tools:
+        if isinstance(t, dict) or '(' in str(t):
+            if not completed(entries, t):
+                out.append(str(t))
+            continue
         t = str(t)
         if _control_plane_tool(t):
             continue
@@ -192,30 +211,15 @@ def unrun_priority_tools(entries) -> list:
     matches by binary signature anywhere in the trace, a legitimate front-load
     (the tool ran in an earlier phase) passes — only genuinely-skipped work is
     flagged."""
-    prescribed: dict = {}          # binary sig -> display name (first seen)
+    prescribed = []
     for e in entries or []:
-        if e.get("type") != "dair_call":
+        if e.get('type') != 'dair_call':
             continue
-        pt = ((e.get("directives") or {}).get("priority_tools")) or e.get("priority_tools") or []
-        if not isinstance(pt, list):
-            continue
-        for t in pt:
-            t = str(t)
-            if _control_plane_tool(t):
-                continue
-            sig = _binary_sig(t)
-            if len(sig) < 3:
-                continue
-            prescribed.setdefault(sig, _display(t))
-    if not prescribed:
-        return []
-    succ_cmds = [(e.get("cmd") or "").lower() for e in entries
-                 if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
-    succ_tools = _succ_tool_ids(entries)
-    didx = index_from_entries(entries)
-    missing =[disp for sig, disp in sorted(prescribed.items())
-               if not (any(sig in c for c in succ_cmds) or any(sig in t for t in succ_tools)
-                       or tool_waived(didx, disp))]
+        directives = e.get('directives') or {}
+        for item in (directives.get('required_work') or directives.get('priority_tools') or e.get('priority_tools') or []):
+            if item not in prescribed:
+                prescribed.append(item)
+    missing = unrun_from_list(entries, prescribed)
     if not missing:
         return []
     shown = ", ".join(missing[:12])

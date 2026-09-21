@@ -166,6 +166,31 @@ def test_confirmed_submission_uses_actual_exact_receipt(case):
     assert log.index().by_call_id[finding['gated_by_evaluate_call_id']]['review_receipt']
 
 
+def test_large_internal_review_remains_complete_through_transactional_submission(case):
+    from core.review_delivery import client_review, wire_size, MAX_WIRE_BYTES
+    log, cid = case
+    base = fake_review(log)
+    def large(*args, **kwargs):
+        result = base(*args, **kwargs)
+        result['inputs'] = {'user_message': 'observed data ' * 20000}
+        result['conclusion'] += '\n' + 'detailed reasoning ' * 10000
+        return result
+    captured = []
+    from core import finding_submission as S
+    matches = S.receipt_matches
+    def check(ctx, review):
+        captured.append(review)
+        return matches(ctx, review)
+    with patch('tools.reasoning._ask', side_effect=large), patch.object(S, 'receipt_matches', side_effect=check):
+        result = submit(cid)
+    assert result['success'] and captured
+    saved = captured[0]
+    assert len(saved['conclusion']) > 100000 and saved['review_receipt']['binding']
+    envelope = client_review(log, {**saved, '_trudi_call_id': saved['call_id']})
+    assert envelope['review_receipt'] == saved['review_receipt']
+    assert wire_size(envelope) <= MAX_WIRE_BYTES
+
+
 def test_legacy_record_cannot_borrow_nearby_receipt_for_different_description(case):
     from tools.misc import record_finding
     import tools.reasoning as R
@@ -270,14 +295,14 @@ def test_backend_failure_releases_key_for_retry(case):
         assert submit(cid)['success']
 
 
-def test_receipt_is_not_reused_for_another_submission_key(case):
+def test_identical_submission_new_transport_key_reuses_committed_finding(case):
     log, cid = case
     with patch('tools.reasoning._ask', side_effect=fake_review(log)) as ask:
         assert submit(cid)['success']
         assert submit(cid, key='different-key')['success']
-    assert ask.call_count == 2
+    assert ask.call_count == 1
     findings = log.index().by_type['finding']
-    assert len({f['gated_by_evaluate_call_id'] for f in findings}) == 2
+    assert len(findings) == 1
 
 
 def test_legacy_receipt_binds_window_even_when_description_unchanged(case):

@@ -181,11 +181,11 @@ class TestCitationInjection:
              patch.object(R, "REASON_MODEL", "m"), \
              patch.object(R, "COMPAT_NO_THINK_TOOLS", frozenset()), \
              patch("httpx.post", http):
-            R.reason_evaluate_finding("finding text", "evidence text", input_call_ids=[cid])
+            R.reason_evaluate_finding("Observed record present", "evidence text", input_call_ids=[cid])
         sent = http.call_args[1]["json"]["messages"][1]["content"]
         assert "EVIDENCE COLLECTED THIS INVESTIGATION" in sent   # (a)
         assert "EVIDENCE PACKET" in sent and "Observed record" in sent  # (b)
-        assert sent.index("finding text") < sent.index("EVIDENCE PACKET")
+        assert sent.index("Observed record present") < sent.index("EVIDENCE PACKET")
 
 
 # ── reading the tool's output file when stdout is a banner (relevance-aware) ──

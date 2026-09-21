@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 from typing import Optional
+from core.job_adapters import job_backed
+from core.jobs import reset_guard
 from fastmcp import FastMCP
 from core import run, run_with_output_file, output_safe
 from core.paths import assert_output_safe
@@ -345,8 +347,17 @@ def hindsight_chrome(
     if fmt not in _VALID:
         fmt = "jsonl"
     output_file = os.path.join(output_dir, "hindsight_chrome")
-    cmd = [
-        "/usr/local/bin/hindsight.py",
+    import shlex
+    import sys
+    from pathlib import Path
+    script = "/usr/local/bin/hindsight.py"
+    try:
+        first = Path(script).read_text().splitlines()[0]
+        interpreter = shlex.split(first[2:]) if first.startswith('#!') else [sys.executable]
+    except OSError:
+        interpreter = [sys.executable]
+    launcher = str(Path(__file__).resolve().parents[1] / 'core/hindsight_launcher.py')
+    cmd = [*interpreter, launcher, script,
         "-i", profile_path,
         "-o", output_file,
         "-f", fmt,
@@ -354,6 +365,7 @@ def hindsight_chrome(
         # the tool itself and landed somewhere unwritable in two runs
         # (logging.basicConfig FileHandler crash before any parsing).
         "-l", os.path.join(output_dir, "hindsight.log"),
+        "--temp_dir", os.path.join(output_dir, ".hindsight-temp"),
     ]
     # cwd=output_dir: hindsight opens its log relative to the working
     # directory and crashes in FileHandler otherwise; the directory must
@@ -362,9 +374,32 @@ def hindsight_chrome(
         os.makedirs(output_dir, exist_ok=True)
     except OSError:
         pass
-    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir)
+    extension = {'jsonl': '.jsonl', 'sqlite': '.sqlite', 'xlsx': '.xlsx'}[fmt]
+    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir,
+            produced_paths=[output_file + extension])
     if isinstance(r, dict):
         r["output_format"] = fmt
+        import re
+        parser_failures = re.findall(r'([^\n]+?)\[\s*Failed\s*\]', r.get('_stdout_full') or r.get('stdout') or '')
+        if parser_failures:
+            r.update(success=False, scope_complete=False, result_status='partial',
+                     parser_failures=[v.strip() for v in parser_failures],
+                     error='Hindsight did not parse every source; see parser_failures and retained output')
+            from core.execution_log import log
+            cid = r.get('_trudi_call_id')
+            if cid:
+                manifest = log.index().by_call_id[cid].get('output_manifest') or {}
+                for file in manifest.get('files', []):
+                    if file.get('path', '').endswith('.jsonl'):
+                        try:
+                            import json
+                            with open(file['path']) as stream:
+                                rows = [json.loads(line) for line in stream if line.strip()]
+                            file.update(validated=bool(rows), complete=False)
+                        except (OSError, ValueError):
+                            file.update(validated=False, complete=False)
+                log.annotate_tool_call(cid, success=False, scope_complete=False, result_status='partial',
+                                       parser_failures=r['parser_failures'], output_manifest=manifest)
     return r
 
 
@@ -627,7 +662,7 @@ def parse_scheduled_tasks(tasks_dir: str) -> dict:
     """
     List and read Windows Scheduled Task XML files from disk — the persistence
     look an injected task lives in (no 4698 event when task-auditing is off).
-    tasks_dir: path to Windows/System32/Tasks/ on a mounted volume.
+    tasks_dir: path to one task XML file or Windows/System32/Tasks/ on a mounted volume.
 
     Windows task XML is UTF-16; it is decoded here. Each task is scanned for
     keystroke-injector PAYLOAD signatures (%duck%/%bunny%/hak5, hidden/encoded
@@ -635,57 +670,71 @@ def parse_scheduled_tasks(tasks_dir: str) -> dict:
     the benign reading). Self-logged as a citable tool_call.
     """
     import os
+    import json
+    import xml.etree.ElementTree as ET
+    from core.evidence_packets import file_version
     from tools._gates._scheduled_tasks import INJECTOR_PAYLOAD_RE
     from core.executor import _log_tool
-    results, errors, injector_tasks = [], [], []
-
-    def _decode(fpath):
-        with open(fpath, "rb") as f:
-            raw = f.read(16384)
-        for enc in ("utf-16", "utf-8", "latin-1"):
-            try:
-                return raw.decode(enc)
-            except (UnicodeDecodeError, UnicodeError):
+    limit = 1024 * 1024
+    results, errors, injector_tasks, files = [], [], [], []
+    single = os.path.isfile(tasks_dir)
+    exists = single or os.path.isdir(tasks_dir)
+    paths = [tasks_dir] if single else (os.path.join(root, name)
+        for root, dirs, names in os.walk(tasks_dir) for name in sorted(names))
+    limited = False
+    for number, fpath in enumerate(paths):
+        if number >= 2048:
+            errors.append({'task': tasks_dir, 'error': 'Task enumeration bound reached'})
+            limited = True
+            break
+        try:
+            before = file_version(fpath)
+            with open(fpath, 'rb') as stream:
+                raw = stream.read(limit + 1)
+            if len(raw) > limit:
+                limited = True
+                errors.append({'task': fpath, 'error': 'Task exceeds 1 MiB bound; no complete parse',
+                               'bytes_read': limit})
                 continue
-        return raw.decode("latin-1", "replace")
-
-    ok = os.path.isdir(tasks_dir)
-    if ok:
-        for root, _dirs, files in os.walk(tasks_dir):
-            for fname in files:
-                fpath = os.path.join(root, fname)
-                try:
-                    content = _decode(fpath)
-                    rel = fpath.replace(tasks_dir, "")
-                    entry = {"task": rel, "content": content[:8192]}
-                    if INJECTOR_PAYLOAD_RE.search(content):
-                        entry["injector_payload"] = True
-                        injector_tasks.append(rel)
-                    results.append(entry)
-                except Exception as e:
-                    errors.append({"task": fpath, "error": str(e)})
-
-    summary = (f"{len(results)} scheduled tasks; "
-               f"{len(injector_tasks)} with injector-payload signatures"
-               + (f": {injector_tasks[:5]}" if injector_tasks else ""))
-    tc = {"success": ok, "stdout": summary, "stderr": "" if ok else f"not a directory: {tasks_dir}",
-          "exit_code": 0 if ok else 1, "truncated": False, "retries": 0,
-          "elapsed_seconds": 0.0, "cmd": f"misc.parse_scheduled_tasks {tasks_dir}",
-          "_stdout_full": summary + "\n" + "\n".join(r["task"] for r in results),
-          "_stdout_chars": None}
-    try:
-        _log_tool(tc)
-        cid = tc.get("_trudi_call_id")
-        if cid and injector_tasks:
-            from core.execution_log import log as _elog
-            _elog.annotate_tool_call(cid, injector_payload_tasks=injector_tasks[:50])
-    except Exception:
-        cid = None
-    if not ok:
-        return {"success": False, "error": f"not a directory: {tasks_dir}",
-                "_trudi_call_id": cid}
-    return {"success": True, "_trudi_call_id": cid, "task_count": len(results),
-            "injector_payload_tasks": injector_tasks, "tasks": results, "errors": errors}
+            # XML parser honors BOM and XML encoding declarations.
+            tree = ET.fromstring(raw)
+            if file_version(fpath) != before:
+                raise ValueError('Task changed while being read')
+            content = ET.tostring(tree, encoding='unicode')
+            rel = os.path.basename(fpath) if single else '/' + os.path.relpath(fpath, tasks_dir)
+            entry = {'task': rel, 'path': os.path.abspath(fpath), 'content': content,
+                     'source_version': before, 'complete': True}
+            if INJECTOR_PAYLOAD_RE.search(content):
+                entry['injector_payload'] = True
+                injector_tasks.append(rel)
+            results.append(entry)
+            files.append({'path': os.path.abspath(fpath), 'version': before,
+                          'role': 'read_source', 'complete': True, 'validated': True})
+        except Exception as exc:
+            errors.append({'task': fpath, 'error': str(exc)})
+    complete = exists and not errors and not limited
+    summary = f"{len(results)} parsed scheduled tasks; {len(errors)} unreadable/invalid; scope {'complete' if complete else 'incomplete'}"
+    retained = '\n'.join(json.dumps(r, ensure_ascii=False) for r in results)
+    tc = {'success': complete, 'stdout': summary, 'stderr': '' if complete else str(errors or 'Path unavailable'),
+          'exit_code': 0 if complete else 1, 'truncated': limited, 'retries': 0, 'elapsed_seconds': 0.0,
+          'cmd': f'misc.parse_scheduled_tasks {tasks_dir}', '_stdout_full': retained,
+          'output_manifest': {'schema_version': 1, 'attribution': 'observed_read',
+                              'discovery_complete': complete, 'files': files}}
+    _log_tool(tc)
+    cid = tc.get('_trudi_call_id')
+    from core.execution_log import log as _elog
+    if cid:
+        _elog.annotate_tool_call(cid, injector_payload_tasks=injector_tasks,
+            scope_complete=complete, result_status='complete' if complete else 'partial' if results else 'failed',
+            output_manifest=tc['output_manifest'])
+    # Full citable records remain retained; client excerpts say exactly what is clipped.
+    shown = [{**r, 'content': r['content'][:8192], 'content_truncated': len(r['content']) > 8192}
+             for r in results[:100]]
+    return {'success': complete, '_trudi_call_id': cid, 'task_count': len(results),
+            'scope_complete': complete, 'result_status': 'complete' if complete else 'partial' if results else 'failed',
+            'truncated': limited or len(results) > len(shown) or any(r['content_truncated'] for r in shown),
+            'injector_payload_tasks': injector_tasks, 'tasks': shown, 'errors': errors,
+            **({'error': 'not a file or directory: ' + tasks_dir} if not exists else {})}
 
 
 # ── PDF analysis ──────────────────────────────────────────────────────────────
@@ -837,6 +886,12 @@ def start_execution_log(case_id: str, output_path: str,
     # surfaces as a clean error return rather than an unhandled exception.
     try:
         recovered = log.configure(case_id, output_path)
+        from core.phase_routing import profile_fingerprints, append_event
+        with log.transaction():
+            fingerprints = profile_fingerprints()
+            previous = next((e for e in reversed(log._entries) if e.get('type') == 'run_profile'), {})
+            if previous.get('profile_fingerprints') != fingerprints:
+                append_event(log, 'run_profile', profile_fingerprints=fingerprints)
         log.record_system_error("trace_initialized",
                                 f"trace path {output_path}")
     except Exception as e:
@@ -977,6 +1032,11 @@ def record_curiosity_probe(
     rationale: str,
     seeded_by: str = "",
     input_call_ids: list[int] | None = None,
+    question_id: str = "",
+    competing_explanation: str = "",
+    expected_observation: str = "",
+    result_call_ids: list[int] | None = None,
+    probe_id: str = "",
 ) -> dict:
     """
     Log an exploratory probe — a read-only artifact you chose to look at on a
@@ -992,23 +1052,36 @@ def record_curiosity_probe(
     each call. The probe is refused if the budget is exhausted or no rationale is
     given (gate: curiosity_budget).
 
-    A probe is NOT a finding and carries no weight on its own. To turn a probe
-    that paid off into evidence, feed its returned call_id into
-    reason.hypothesize / record_finding via input_call_ids — the normal finding
-    gates then apply. So probing widens coverage without ever loosening a gate.
+    A probe is NOT a finding and carries no weight on its own. Cite the actual
+    forensic output call_ids in any resulting finding; the probe call_id only
+    records investigative intent. The normal finding gates still apply.
 
     rationale:  the hunch + what result would confirm or kill it (required).
     seeded_by:  hypothesis_id of a reason.hypothesize(mode="absence") that
                 pointed here, if any — builds the absence→probe→finding chain.
-    input_call_ids: _trudi_call_id values of the artifacts that prompted the hunch.
+    input_call_ids: _trudi_call_id values of the actual exploratory output and
+        the artifacts that prompted the hunch.
     """
     from core.execution_log import log
     from tools._gates import curiosity_budget
-    failure = curiosity_budget.check(log.last_n_window(30), rationale)
-    if failure is not None:
-        return failure
-    cid = log.record_curiosity_probe(rationale, seeded_by, input_call_ids)
-    return {"success": True, "call_id": cid}
+    # Check and spend under the shared writer lock. Trace chatter must not
+    # expire a grant, and two server processes must not spend its last unit.
+    with log.transaction():
+        failure = curiosity_budget.check(log._entries, rationale)
+        if failure is not None:
+            return failure
+        if result_call_ids:
+            from core.evidence_admission import evidence_usable
+            if any(log.index().by_call_id.get(c, {}).get('type') != 'tool_call' or not evidence_usable(log.index().by_call_id[c]) for c in result_call_ids):
+                return {'success': False, 'error': 'Probe results must reference actual usable forensic outputs'}
+        cid = log.record_curiosity_probe(rationale, seeded_by, input_call_ids)
+        entry = log.index().by_call_id[cid]
+        entry.update(question_id=question_id, competing_explanation=competing_explanation,
+                     expected_observation=expected_observation, result_call_ids=result_call_ids or [],
+                     probe_id=probe_id or ('P-' + str(cid)))
+        log._flush()
+        return {"success": True, "call_id": cid,
+                "curiosity": curiosity_budget.status(log._entries)}
 
 
 @mcp.tool()
@@ -1020,6 +1093,8 @@ def record_disposition(
     note: str = "",
     window: dict | None = None,
     input_call_ids: list[int] | None = None,
+    alternatives_exhausted: bool = False,
+    remaining_scope: str = "",
 ) -> dict:
     """
     Record a TYPED disposition — the only way to settle a lead, source, tool,
@@ -1029,12 +1104,16 @@ def record_disposition(
     "controller unknown" in a finding/narration is NOT read.
 
     target_kind: source | tool | challenge | principal | correspondent | device |
-                 hypothesis | host | destruction_scope
+                 hypothesis | host | destruction_scope | follow_up | job
     target_id:   source → manifest source id (from the refusal); tool → the MCP
                  tool name (e.g. "ez.pecmd"); challenge → "<dair_call_id>:<challenge
                  claim>"; principal / correspondent / host / device → the identity
                  (any spelling; normalized server-side); hypothesis → H-id;
-                 destruction_scope → the finding call_id.
+                 destruction_scope → the finding call_id; follow_up → the exact
+                 W-id of non-running Report follow-up work (requires a note and
+                 evidence_call_ids from that request's result/trigger).
+                 job → exact job_id, after cancellation/completion and collection;
+                 requires a note and that job's collected evidence call_id.
     reason:      absent_from_evidence | inapplicable | out_of_scope | noise |
                  excluded | not_a_principal | controller_unknown |
                  evidence_unavailable | ruled_out | refuted | undetermined
@@ -1051,6 +1130,9 @@ def record_disposition(
         return {"success": False, "error": msg, "gate": "typed_disposition",
                 "target_kinds": list(D.TARGET_KINDS), "reasons": list(D.REASONS)}
     idx = log.index()
+    if target_kind.strip().lower() == 'job':
+        from core.jobs import dispose_job
+        return dispose_job(target_id, reason, note, evidence_call_ids)
     if not (idx.by_type.get("dair_call") or []):
         return {"success": False, "gate": "dair_required",
                 "error": "Dispositions only exist inside an active DAIR investigation "
@@ -1058,6 +1140,44 @@ def record_disposition(
     rs = reason.strip().lower()
     tk = target_kind.strip().lower()
     cids = sorted({int(c) for c in (evidence_call_ids or []) if c})
+    if tk == 'follow_up':
+        from core.phase_routing import work_state, append_event
+        with log.transaction():
+            work = work_state(log).get(target_id)
+            if not work or work['status'] == 'running':
+                return {'success': False, 'gate': 'follow_up',
+                        'error': 'Name an existing, non-running request; running work cannot be waived.'}
+            if work.get('job_id'):
+                return {'success': False, 'gate': 'job_disposition', 'job_id': work['job_id'],
+                        'error': 'Use target_kind=job with this job_id after stopping and collecting its worker.'}
+            related = {work.get('result_call_id'), work.get('trigger_call_id')}
+            if not note or not cids or any(c not in related for c in cids):
+                return {'success': False, 'gate': 'follow_up',
+                        'error': 'Provide a reasoned note and the request result/trigger call IDs.'}
+            failure_reasons = {'execution_failed', 'dependency_unavailable', 'incompatible', 'parse_failed'}
+            if rs in failure_reasons:
+                result_entry = idx.by_call_id.get(work.get('result_call_id'), {})
+                if work['status'] not in ('failed', 'incomplete', 'unknown') or result_entry.get('success') is not False:
+                    return {'success': False, 'error': 'Failure disposition requires the exact failed execution result'}
+                cid = log.record_disposition(target_kind, target_id, reason,
+                                             evidence_call_ids=cids, note=note, window=window)
+                append_event(log, 'work_failure', request_id=target_id, disposition_call_id=cid,
+                             reason=rs, diagnostics=note, scope=work['arguments'])
+                return {'success': True, '_trudi_call_id': cid, 'request_id': target_id,
+                        'status': work['status'], 'obligation_open': True,
+                        'next_action': 'repair_or_run_equivalent_alternative'}
+            if work['status'] in ('failed', 'incomplete') and rs == 'inapplicable':
+                return {'success': False, 'error': 'Execution failure does not make this work inapplicable; record its failure or justify unavailable scope'}
+            if work['status'] in ('failed', 'incomplete', 'unknown') and rs == 'evidence_unavailable' and not (alternatives_exhausted and remaining_scope.strip()):
+                return {'success': False, 'error': 'Settlement needs alternatives_exhausted=true and the remaining_scope limitation'}
+            cid = log.record_disposition(target_kind, target_id, reason,
+                                         evidence_call_ids=cids, note=note + (' Remaining scope: ' + remaining_scope if remaining_scope else ''), window=window)
+            fields = {k: v for k, v in work.items() if k not in
+                      ('call_id', 'type', 'ts', 'dair_phase', 'dair_depth')}
+            fields.update(status='dispositioned', disposition_call_id=cid)
+            append_event(log, 'phase_work', **fields)
+        return {'success': True, '_trudi_call_id': cid, 'request_id': target_id,
+                'status': 'dispositioned'}
     if rs in D.EVIDENCE_REQUIRED:
         bad = [c for c in cids if not is_evidence_tool_call(idx.by_call_id.get(c) or {})]
         if not cids or bad:
@@ -1418,6 +1538,8 @@ def record_finding(
         ctx.review_call_id = submission['review_call_id']
     failure = run_gates(ctx)
     if failure is not None:
+        from core.citation_candidates import add_suggestions
+        add_suggestions(log, failure, description, ctx.input_call_ids, claim)
         # Refusal ledger — the single write site (record_agent_message delegates
         # here, so batched findings get exactly one entry each). The
         # refusal_rewording gate reads these to refuse a re-record that only
@@ -1490,12 +1612,11 @@ def record_finding(
         result["artifact_classes"] = ctx.artifact_classes
         if _TRANK.get(ctx.tier_achievable, 0) > _TRANK.get(ctx.tier, 0):
             result["tier_headroom"] = (
-                f"tier–evidence concordance: recorded {ctx.tier}; the cited artifact "
-                f"classes reach {ctx.tier_achievable} (rule {ctx.tier_rule}). The tier "
-                f"must match the evidence in both directions — re-examine and either "
-                f"re-record at {ctx.tier_achievable} (supersedes=<this call_id>) or "
-                f"leave a documented reason. This is arithmetic, not an instruction "
-                f"to strengthen a conclusion.")
+                f"Recorded {ctx.tier}; the cited artifact classes permit a ceiling "
+                f"of {ctx.tier_achievable} (rule {ctx.tier_rule}). This is advisory: "
+                "attribution, causality or other material uncertainty may justify "
+                "the recorded confidence. No upgrade or repeat review is required.")
+
     if supersedes:
         result["supersedes"] = int(supersedes)
     if ctx.validated_techniques:
@@ -1575,11 +1696,15 @@ def record_self_correction(
         refusal = max_pass_cap_gate(log)
         if refusal is not None:
             return refusal
+    from core.citation_candidates import add_suggestions
+    advice = add_suggestions(log, {}, prior_belief, input_call_ids)
+    candidates = sorted({s['call_id'] for s in advice.get('uncited_sources', [])})
     cid = log.record_self_correction(
         trigger, prior_belief, new_belief, evidence, linked_call_id,
-        input_call_ids=input_call_ids,
+        input_call_ids=input_call_ids, candidate_source_ids=candidates,
     )
-    return {"success": True, "trigger": trigger, "_trudi_call_id": cid}
+    return {"success": True, "trigger": trigger, "_trudi_call_id": cid,
+            'candidate_source_ids': candidates, 'candidate_sources_are_advisory': True}
 
 
 @mcp.tool()
@@ -1898,19 +2023,47 @@ def record_agent_message(
 
 
 @mcp.tool()
-def job_status(job_id: str) -> dict:
+def job_status(job_id: str, section: str = '', offset: int = 0, limit: int = 2048,
+               state_version: str = '') -> dict:
     """
-    Poll a background job (e.g. net.tcpxtract_streams). While running:
-    status + elapsed + files-so-far. When finished: the full tool result —
-    trace-logged with a citable _trudi_call_id on first collection. Poll
-    between other work; never wait idle on a running job.
+    Poll a background job without launching execution or fallback parsing.
+    Collect finalized results exactly once, with a citable _trudi_call_id.
+    Inspect result_status, validated_outputs and scope_complete separately
+    from execution success. Poll between useful work. Large results expose
+    versioned sections: follow next_offset and join json_chunk before parsing.
     """
-    from core.jobs import job_status as _job_status
-    return _job_status(job_id)
+    from core.jobs import job_status as _job_status, client_result
+    result = _job_status(job_id)
+    if section:
+        from core.control_response import detail_page
+        return detail_page({k: v for k, v in result.items() if k != 'cached'}, section, offset, limit, state_version)
+    return client_result(result)
+
+
+@mcp.tool()
+def job_list(section: str = '', offset: int = 0, limit: int = 2048,
+             state_version: str = '') -> dict:
+    """List durable jobs, owning runs, live writers and adapter policies.
+    Large lists expose versioned sections for bounded, lossless paging."""
+    from core.jobs import list_jobs
+    from core.control_response import control_response, detail_page
+    result = list_jobs()
+    if section:
+        return detail_page(result, section, offset, limit, state_version)
+    return control_response(result, 'misc.job_list')
+
+
+@mcp.tool()
+def job_cancel(job_id: str, reason: str) -> dict:
+    """Stop a specific job and retain its partial output. Cancellation does not
+    waive unfinished scope; collect and explicitly disposition that job."""
+    from core.jobs import job_cancel as cancel
+    return cancel(job_id, reason)
 
 
 @mcp.tool()
 @output_safe
+@reset_guard
 def clear_case_run(case_dir: str) -> dict:
     """
     Reset a case for a fresh investigation run. Deletes:
@@ -1967,6 +2120,7 @@ def clear_case_run(case_dir: str) -> dict:
 
 @mcp.tool()
 @output_safe
+@job_backed
 def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     """
     Extract PST/OST email containers using pffexport (libpff).
@@ -1996,6 +2150,7 @@ def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
 
 @mcp.tool()
 @output_safe
+@job_backed
 def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) -> dict:
     """
     Convert a PST file to mbox (default) or per-message MIME using readpst.
@@ -2474,3 +2629,73 @@ def knowns_pattern_generate(
             pass
 
     return result
+
+
+@mcp.tool()
+def operation_status(operation_id: str) -> dict:
+    """Reconnect to in-process work after its client wait expires; never starts work."""
+    from core.operations import status
+    from core.execution_log import log
+    return status(operation_id, log)
+
+
+@mcp.tool()
+def job_recover(job_id: str, reason: str) -> dict:
+    """Archive an inactive legacy job's metadata for recovery; keep all results and outputs."""
+    from core.jobs import recover_legacy
+    return recover_legacy(job_id, reason)
+
+
+@mcp.tool()
+def declare_questions(questions: list[dict]) -> dict:
+    """Declare multiple investigation questions with stable IDs and explicit scopes.
+
+    Each item has question_id, question and scope (sources, time window and/or
+    relationships). Declaration never settles work or establishes an answer.
+    """
+    from core.execution_log import log
+    from core.phase_routing import append_event
+    from core.question_outcomes import questions as current
+    known = current(log._entries)
+    if not questions or any(not isinstance(q, dict) or not isinstance(q.get('question_id'), str)
+            or not q['question_id'].strip() or not isinstance(q.get('question'), str)
+            or not q['question'].strip() or not isinstance(q.get('scope'), dict) for q in questions):
+        return {'success': False, 'error': 'Supply question_id, question and scope for each question'}
+    if any(q['question_id'] in known and known[q['question_id']] != {'question': q['question'], 'scope': q['scope']} for q in questions):
+        return {'success': False, 'error': 'Changed question/scope needs a new question_id'}
+    with log.transaction():
+        for q in questions:
+            if q['question_id'] not in known:
+                append_event(log, 'question_declared', question_id=q['question_id'], question=q['question'], scope=q['scope'])
+    return {'success': True, 'questions': current(log._entries)}
+
+
+@mcp.tool()
+def record_question_outcome(question_id: str, outcome: str, explanation: str,
+                            evidence_call_ids: list[int], obligation_ids: list[str],
+                            idempotency_key: str, remaining_uncertainty: str = '',
+                            unavailable_disposition_ids: list[int] | None = None) -> dict:
+    """Independently review supported/refuted/indeterminate closure of completed scope.
+
+    Review may return in_progress: repeat unchanged arguments to resume. This
+    creates an ordinary reviewed conclusion for synthesis and the report. It
+    never waives feasible work or clears a contradiction.
+    """
+    from core.execution_log import log
+    from core.question_outcomes import record
+    return record(log, question_id, outcome, explanation, evidence_call_ids, obligation_ids,
+                  remaining_uncertainty, unavailable_disposition_ids or [], idempotency_key)
+
+
+@mcp.tool()
+def review_correspondent_scope(question_id: str, members: list[str], scope: dict,
+                               rationale: str, evidence_call_ids: list[int]) -> dict:
+    """Review one explicitly enumerated group against question/source/time scope.
+
+    All members remain in inventory. Material and near-alias leads need their
+    own treatment. Group scope cannot establish global absence. Repeat identical
+    arguments to resume an in_progress independent review.
+    """
+    from core.execution_log import log
+    from core.correspondent_scope import review
+    return review(log, question_id, members, scope, rationale, evidence_call_ids)

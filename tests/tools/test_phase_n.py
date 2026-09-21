@@ -286,8 +286,7 @@ class TestA8CompetingRecipient:
 
 
 class TestA7SynthesizeStructuralPreview:
-    """A7: reason.synthesize previews cheap structural blockers as advisories so
-    the agent sees them a round before pre_report_check."""
+    """Known structural blockers now stop synthesis before model spending."""
 
     def test_synthesize_surfaces_unrun_priority_tools(self, tmp_path):
         from unittest.mock import MagicMock
@@ -305,19 +304,20 @@ class TestA7SynthesizeStructuralPreview:
         from tools.reasoning import reason_synthesize
         fn = getattr(reason_synthesize, "fn", reason_synthesize)
         with patch("core.execution_log.log", l), \
-             patch("httpx.post", return_value=resp), \
+             patch("httpx.post", return_value=resp) as backend, \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = fn("narrative of findings")
-        adv = " ".join(r.get("structural_advisories", []))
-        assert "usnparser" in adv
+        assert r['gate'] == 'synthesis_prerequisites'
+        assert 'usnparser' in ' '.join(r['blocking_issues'])
+        backend.assert_not_called()
 
 
 class TestFix3PreReportPhaseReturn:
-    """Fix 3: a failed pre_report_check boots DAIR out of Report back to Analyze
-    so the phase gate permits the remediation tools the blockers demand."""
+    """Legacy untyped blockers do not guess a remediation phase. Typed work and
+    actual forensic requests now route through the durable DAIR service."""
 
-    def test_failed_pre_report_returns_to_analyze(self, tmp_path):
+    def test_legacy_untyped_pre_report_does_not_guess_a_phase(self, tmp_path):
         l = ExecutionLog(); l.configure("F3", str(tmp_path / "t.json"), save_session=False)
         for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
@@ -331,9 +331,9 @@ class TestFix3PreReportPhaseReturn:
         with patch("core.execution_log.log", l):
             r = reason_pre_report_check()
         assert r["ready_to_report"] is False
-        assert l._current_phase == "Analyze"          # booted out of Report
+        assert l._current_phase == "Report"          # no guessed phase from prose
         ent = [e for e in l._entries if e.get("tool") == "reason_pre_report_check"][-1]
-        assert ent["phase_returned_to"] == "Analyze"
+        assert 'phase_returned_to' not in ent
         assert ent["dair_phase"] == "Report"          # the check itself ran in Report
 
     def test_passed_pre_report_leaves_phase(self, tmp_path):
@@ -344,9 +344,8 @@ class TestFix3PreReportPhaseReturn:
         l.record_reason_call("reason_synthesize", True, "ok", {})
         with patch("core.execution_log.log", l):
             r = reason_pre_report_check()
-        # zero findings -> not ready anyway, but assert the mechanism only fires from Report
-        # (here it will return to Analyze since not ready) — verify the field is set:
-        assert l._current_phase in ("Analyze", "Report")
+        # A report-local or unspecified failure does not guess a new phase.
+        assert l._current_phase == 'Report'
 
 
 class TestFix4BatchDispositions:

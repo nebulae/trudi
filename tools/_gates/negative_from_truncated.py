@@ -28,7 +28,7 @@ def check(ctx) -> Optional[dict]:
     entry = ctx.idx.by_call_id.get(ctx.linked_call_id)
     if entry is None:
         return None
-    if not entry.get("truncated"):
+    if not entry.get("truncated") and entry.get('scope_complete') is not False:
         return None
     cmd_excerpt = (entry.get("cmd") or entry.get("tool") or "<unknown>")[:120]
     return {

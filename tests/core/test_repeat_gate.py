@@ -35,7 +35,7 @@ class TestNotice:
         M._repeat_update(k, "net_ngrep_search", dict(RESULT))
         msg = M._repeat_update(k, "net_ngrep_search", dict(RESULT))
         assert "2x" in msg
-        assert "record_finding" in msg and "negative" in msg
+        assert "record_finding" not in msg and "does not prove absence" in msg
         assert "dair.assess" in msg
 
     def test_different_args_are_different_keys(self):
@@ -72,7 +72,7 @@ class TestBlock:
             M._repeat_update(k, "net_ngrep_search", dict(RESULT))
         msg = M._repeat_precheck(k, "net_ngrep_search")
         assert "repeat_call_gate" in msg
-        assert "record_finding" in msg
+        assert "record_finding" not in msg and "neither absence nor scan completeness" in msg
 
     def test_no_block_below_threshold(self):
         k = _key()

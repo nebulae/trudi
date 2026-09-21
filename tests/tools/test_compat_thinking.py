@@ -212,7 +212,7 @@ class TestThinkingBudget:
         with patch("httpx.post", http):
             r = reason_hypothesize("who sent the mail?")
         assert r["success"] is True
-        assert r["output_tokens"] == 6000
+        assert r["output_tokens"] == 8048  # includes the exhausted first attempt
         assert r["directives"]["priority_tools"] == ["net.http_session_inventory"]
         assert "DIRECTIVES" not in r["conclusion"]
         first = MAX_TOKENS_HYPOTHESIZE + 8192
@@ -240,7 +240,7 @@ class TestThinkingBudget:
         assert "TRUDI_COMPAT_THINKING_BUDGET" in r["error"]
         assert http.call_count == 2
         # token usage of the failed attempt is no longer reported as 0/0
-        assert r["output_tokens"] == 2048
+        assert r["output_tokens"] == 4096
         # the cause reaches the trace twice: call_abandoned + reason_call.error
         trace_log["abandoned"].assert_called_once()
         assert "finish_reason=length" in trace_log["abandoned"].call_args[0][1]
@@ -690,7 +690,7 @@ class TestDairCompat:
         logged = trace_log["reason_call"].call_args[1]
         assert "finish_reason=length" in logged["error"]
         assert logged["backend_meta"]["attempts"] == 2
-        assert logged["output_tokens"] == 2048
+        assert logged["output_tokens"] == 4096
 
 
 # ── Execution log persists the new fields ─────────────────────────────────────
@@ -798,3 +798,52 @@ class TestReasoningSalvage:
             r = reason_hypothesize("who sent the mail?")
         assert r["success"] is True
         assert "<|eot_id|>" not in r["conclusion"] and "<|eom_id|>" not in r["conclusion"]
+
+
+class TestEmptyToolCallsResponse:
+    """A `finish_reason=tool_calls` answer with no content is a transport fault:
+    the model selected a tool call although the request advertises none, so
+    there is nothing to repair. Observed four times in one run (2026-09-20),
+    killing two evaluations and two finding submissions."""
+
+    def test_tool_choice_none_is_sent(self, trace_log):
+        from tools.reasoning import reason_cite_check
+        http = MagicMock(return_value=_resp(content="ALL_CITED"))
+        with patch("httpx.post", http):
+            reason_cite_check("finding text", "evidence text")
+        assert http.call_args[1]["json"]["tool_choice"] == "none"
+
+    def test_server_rejection_disables_the_field_and_retries(self, trace_log):
+        import tools.reasoning as R
+        from tools.reasoning import reason_cite_check
+        bad = MagicMock(status_code=400, text='unknown field "tool_choice"')
+        ok = _resp(content="ALL_CITED")
+        http = MagicMock(side_effect=[bad, ok])
+        with patch.object(R, "_tool_choice_supported", True), patch("httpx.post", http):
+            reason_cite_check("finding text", "evidence text")
+        assert http.call_count == 2
+        assert "tool_choice" not in http.call_args_list[1][1]["json"]
+
+    def test_empty_tool_calls_answer_is_re_asked_once(self, trace_log):
+        from tools.reasoning import reason_cite_check
+        empty = _resp(content="", finish_reason="tool_calls")
+        http = MagicMock(side_effect=[empty, _resp(content="ALL_CITED")])
+        with patch("httpx.post", http):
+            r = reason_cite_check("finding text", "evidence text")
+        assert http.call_count == 2 and r["success"] is True
+
+    def test_two_empty_answers_fail_without_a_verdict(self, trace_log):
+        from tools.reasoning import reason_cite_check
+        empty = _resp(content="", finish_reason="tool_calls")
+        http = MagicMock(side_effect=[empty, empty])
+        with patch("httpx.post", http):
+            r = reason_cite_check("finding text", "evidence text")
+        assert r["success"] is False
+        assert "tool_calls" in r["error"] and "empty" in r["error"].lower()
+
+    def test_length_truncation_still_reports_budget_exhaustion(self, trace_log):
+        from tools.reasoning import reason_cite_check
+        http = MagicMock(return_value=_resp(content="", finish_reason="length"))
+        with patch("httpx.post", http):
+            r = reason_cite_check("finding text", "evidence text")
+        assert r["success"] is False and "budget" in r["error"]

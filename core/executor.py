@@ -5,6 +5,7 @@ import subprocess
 import shlex
 import time
 import asyncio
+from core.output_manifest import output_manifested, completed_manifest
 from typing import Any
 from .paths import (OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES, STDOUT_SIDECAR_CAP,
                     assert_output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT)
@@ -72,7 +73,7 @@ def _log_tool(result: dict) -> None:
     # the client (the agent-facing `stdout` keeps its caps). Pop the private
     # keys BEFORE the trace write so a logging failure cannot leak them.
     stdout_full = result.pop("_stdout_full", None)
-    result.pop("_stdout_chars", None)
+    stdout_chars_total = result.pop("_stdout_chars", None)
     if stdout_full is None:
         stdout_full = result.get("stdout", "")
     try:
@@ -90,8 +91,11 @@ def _log_tool(result: dict) -> None:
             timed_out=result.get("timed_out", False),
             input_call_ids=parent,
             stdout_full=stdout_full,
+            stdout_chars_total=stdout_chars_total,
             output_path=result.get("output_path"),
             exit_meaning=result.get("exit_meaning", ""),
+            output_manifest=result.get('output_manifest') or completed_manifest(result['success']),
+            extra={k: result[k] for k in ('scope_complete', 'result_status') if k in result},
         )
         result["_trudi_call_id"] = cid
     except Exception as e:
@@ -101,6 +105,7 @@ def _log_tool(result: dict) -> None:
         raise
 
 
+@output_manifested
 def run(
     cmd: list[str] | str,
     *,
@@ -112,6 +117,7 @@ def run(
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
     success_codes: frozenset[int] | None = None,
     exit_meanings: dict[int, str] | None = None,
+    produced_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Execute a forensic tool command safely.
@@ -153,14 +159,23 @@ def run(
     start = time.perf_counter()
 
     try:
+        worker_timeout = os.environ.get('TRUDI_JOB_WORKER') == '1'
+        execution_cmd = cmd
+        if worker_timeout:
+            # Enforce the timeout inside sudo too, so root-owned descendants
+            # cannot survive a timed-out unprivileged wrapper.
+            prefix = ['timeout', '--kill-after=5', str(timeout)]
+            execution_cmd = (['sudo', '-n'] + prefix + cmd[1:]) if cmd[0] == 'sudo' else prefix + cmd
         proc = subprocess.run(
-            cmd,
+            execution_cmd,
             capture_output=True,
-            timeout=timeout,
+            timeout=timeout + 10 if worker_timeout else timeout,
             env=env,
             cwd=cwd,
         )
         _apply_exit_policy(result, proc.returncode, success_codes, exit_meanings)
+        if worker_timeout and proc.returncode == 124:
+            result['timed_out'] = True
 
         stdout = proc.stdout.decode("utf-8", errors="replace")
         stderr_raw = proc.stderr.decode("utf-8", errors="replace")
@@ -196,6 +211,7 @@ def run(
     return result
 
 
+@output_manifested
 async def run_with_progress(
     cmd: list[str],
     ctx: Any,  # fastmcp.Context — typed as Any to avoid importing fastmcp in core
@@ -205,6 +221,7 @@ async def run_with_progress(
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
     success_codes: frozenset[int] | None = None,
     exit_meanings: dict[int, str] | None = None,
+    produced_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Async variant of run() that streams stderr progress lines to ctx.report_progress().
@@ -344,6 +361,7 @@ def run_dotnet(
     return run(cmd, timeout=timeout, output_dir=output_dir)
 
 
+@output_manifested
 def run_with_output_file(
     cmd: list[str] | str,
     *,

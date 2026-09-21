@@ -16,6 +16,9 @@ def _build_context(tool_name: str, args: dict | None = None):
     msg.model_copy = MagicMock(return_value=msg)
     ctx = MagicMock()
     ctx.message = msg
+    from types import SimpleNamespace
+    ctx.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=SimpleNamespace(
+        parameters={'type': 'object', 'properties': {k: {} for k in (args or {})}, 'additionalProperties': True}))
     ctx.copy = MagicMock(return_value=ctx)
     return ctx
 
@@ -69,8 +72,10 @@ class TestDairGateMiddleware:
         l.record_dair_call("Analyze", "", True, "Report", "", "push", "")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            with pytest.raises(ToolError, match="Report"):
-                asyncio.run(_run_middleware(mw, "vol_psscan"))
+            _, next_call = asyncio.run(_run_middleware(mw, "vol_psscan"))
+            assert next_call.await_count == 1
+            assert l._current_phase != 'Report'
+            assert any(e.get('type') == 'phase_transition' for e in l._entries)
 
     @pytest.mark.parametrize('correction', [False, True])
     def test_submission_in_report_requires_revision_target(self, tmp_path, correction):
@@ -87,8 +92,9 @@ class TestDairGateMiddleware:
                 _, next_call = asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
                 assert next_call.await_count == 1
             else:
-                with pytest.raises(ToolError, match='Report'):
-                    asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
+                _, next_call = asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
+                assert next_call.await_count == 1
+                assert log._current_phase == 'Analyze' 
 
     def test_long_collect_batch_never_blocks(self, tmp_path):
         """Regression: a long lead-following batch in a collection phase must

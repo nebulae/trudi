@@ -182,6 +182,12 @@ def submit(log, request, key, selectors=None):
             previous = _existing(log, key, request_hash)
             if previous:
                 return previous
+            identical = next((e for e in log._entries if e.get('type') == 'finding'
+                              and e.get('submission_request_hash') == request_hash), None)
+            if identical:
+                # A new transport key must not spend a receipt again or create
+                # another copy of the identical already-recorded conclusion.
+                return _existing(log, identical['submission_key'], request_hash)
             known = log.index().by_call_id
             if any(cid not in known for cid in cited_ids(request)):
                 raise PacketError('Unknown/future evidence call IDs in this case')
@@ -250,7 +256,9 @@ def submit(log, request, key, selectors=None):
             if not packet_current(log, packet):
                 outcome = _failure('retryable-review-failure', 'Reviewed evidence changed; retry with current evidence')
             elif not result.get('success'):
-                outcome = _failure('retryable-review-failure', result.get('error', 'Review did not complete'))
+                outcome = _failure(result['status'] if result.get('status') in ('in_progress', 'access_failure', 'classification_mismatch', 'review_budget_exhausted') else
+                                   'retryable-review-failure', result.get('error', 'Review did not complete'),
+                                   next_action=result.get('next_action'), review_session_id=result.get('review_session_id'))
             elif result.get('verdict') != 'SUPPORTED':
                 status = 'contradicted' if result.get('verdict') == 'CHALLENGED' else 'needs-evidence'
                 outcome = _failure(status, result.get('conclusion') or 'Reviewer needs more evidence',
@@ -272,6 +280,12 @@ def submit(log, request, key, selectors=None):
                 finally:
                     submission_commit.reset(token)
                 outcome['status'] = 'recorded' if outcome.get('success') else 'needs-evidence'
+            if not outcome.get('success') and result.get('_trudi_call_id'):
+                from core.review_delivery import client_review
+                saved = client_review(log, result)
+                outcome.update(review_call_id=saved['review_call_id'], details=saved['details'],
+                               uncited_sources=result.get('uncited_sources', []),
+                               candidate_search=result.get('candidate_search', {}))
             _event(log, key, request_hash, outcome['status'], owner=owner,
                    review_call_id=result.get('_trudi_call_id'), error=outcome.get('error'))
             return outcome

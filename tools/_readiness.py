@@ -41,7 +41,11 @@ def assess_readiness(log, include_synthesis=True):
     if not has_plan:
         issues.append("reason.plan was not called — mandatory before tool selection")
     if include_synthesis and not has_synthesize:
-        issues.append("reason.synthesize was not called — mandatory before writing report")
+        attempted = any(e.get('tool') == 'reason_synthesize' or
+                        e.get('mcp_tool') == 'reason_synthesize' or
+                        e.get('cmd') == '<py>:reason_synthesize' for e in entries)
+        issues.append("reason.synthesize failed — repair the review before writing report" if attempted
+                      else "reason.synthesize was not called — mandatory before writing report")
 
     latest_synth = None
     synth_unresolved: list = []
@@ -51,7 +55,7 @@ def assess_readiness(log, include_synthesis=True):
             latest_synth = e
             break
     if include_synthesis and latest_synth is not None:
-        structured = ([] if "review_issues" in latest_synth else latest_synth.get("blockers"))  # list | None (absent on legacy traces)
+        structured = ([] if "review_issues" in latest_synth or latest_synth.get("review_session_id") else latest_synth.get("blockers"))  # list | None (absent on legacy traces)
         if structured is not None:
             # Tier opinions (either direction) are advisories: the recorded tier
             # was set by the evaluate reviewer's cap and the record gates; a
@@ -105,6 +109,10 @@ def assess_readiness(log, include_synthesis=True):
                 )
 
     if include_synthesis:
+        from core.synthesis_session import readiness_error
+        synthesis_error = readiness_error(log)
+        if synthesis_error:
+            issues.append(synthesis_error)
         from core.review_issues import review_state
         for issue in review_state(log._entries):
             if issue['status'] == 'open' and issue['kind'] != 'advisory':
@@ -120,6 +128,12 @@ def assess_readiness(log, include_synthesis=True):
             current = state_fingerprint(log._entries, log._case_id, include_synthesis=False)
             if current != latest_synth['synthesis_fingerprint']:
                 issues.append("Synthesis snapshot is stale; review the changed findings/evidence")
+
+    from core.question_outcomes import questions as declared_question_map, answered as answered_question_map
+    if any(e.get('type') == 'question_declared' for e in log._entries):
+        unresolved_questions = set(declared_question_map(log._entries)) - set(answered_question_map(log))
+        if unresolved_questions:
+            issues.append('Declared questions need reviewed outcomes: ' + ', '.join(sorted(unresolved_questions)))
 
     # Case-question gate (typed). The question is DECLARED — reason.plan(
     # case_question=…) or dair_assess(case_question=…) — and a CONFIRMED/LIKELY
@@ -138,6 +152,13 @@ def assess_readiness(log, include_synthesis=True):
             and bool((e.get("claim") or {}).get("answers_case_question"))
             for e in entries
         )
+        from core.question_outcomes import answered, questions
+        declared_questions = questions(log._entries)
+        resolved_questions = answered(log)
+        if any(e.get('type') == 'question_declared' for e in log._entries):
+            addressed = all(qid in resolved_questions for qid in declared_questions)
+        else:
+            addressed = addressed or all(qid in resolved_questions for qid in declared_questions)
         if not addressed:
             issues.append(
                 f"Case question \"{case_question}\" is not answered by any CONFIRMED or "
@@ -431,7 +452,19 @@ def assess_readiness(log, include_synthesis=True):
                     referenced.append(c["principal"])
             leftovers = []          # engaged correspondents: must be settled
             inbound_only = []       # inbound-only senders: report inventory (warned), never blocking
+            from core.correspondent_scope import current_groups
+            from core.question_outcomes import questions as scope_questions
+            question_ids = set(scope_questions(log._entries))
+            groups = current_groups(log)
+            scoped_out = set()
+            if question_ids and not any((_claim(f).get('kind') == 'negative') for f in recipient_findings):
+                # A member is optional only for all declared questions. Global
+                # absence assertions retain exhaustive correspondent coverage.
+                scoped_out = {member for member in corr if all(any(
+                    g['question_id'] == qid and member in g['members'] for g in groups) for qid in question_ids)}
             for full, meta in sorted(corr.items()):
+                if full in scoped_out:
+                    continue
                 if any(entity_matches(full, r) for r in referenced):
                     continue
                 if find_disposition(idx_all, "correspondent", full,
@@ -1227,11 +1260,23 @@ def assess_readiness(log, include_synthesis=True):
         import sys as _sys
         print(f"[TRUDI WARN] scoping-leads check failed: {_e}", file=_sys.stderr)
 
+    from core.phase_routing import pending_work
+    follow_up = pending_work(log)
+    issues.extend(f"Follow-up {w['request_id']} ({w['status']}): {w['tool']} "
+                  f"requires its exact target/scope completion or justified disposition"
+                  for w in follow_up)
+    typed_issues = issue_records(issues)
+    from core.review_issues import review_state
+    typed_issues.extend(i for i in review_state(log._entries)
+                        if i['status'] == 'open' and i.get('action'))
     ready = len(issues) == 0
+    from tools._gates.curiosity_budget import status as curiosity_status
     return {
         "ready_to_report": ready if include_synthesis else False,
         "ready_for_synthesis": ready if not include_synthesis else None,
-        "issues": issue_records(issues),
+        "issues": typed_issues,
+        "follow_up": [{k: v for k, v in w.items() if k != 'result'} for w in follow_up],
+        "curiosity": curiosity_status(log._entries),
         "registry_inventory": registry_inventory,
         "synthesize_blockers_unresolved": synth_unresolved,
         "correspondents_auto_noise": correspondents_auto_noise,

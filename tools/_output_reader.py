@@ -41,6 +41,44 @@ _OUTPUT_FILE_EXTS = (".csv", ".json", ".txt", ".tsv", ".jsonl", ".eml", ".mbox")
 _CITED_TOPK = 400   # best-scoring matching lines retained while scanning
 
 
+# path -> (stat version, sha256): hashing a large output is done once per
+# on-disk state, not once per review task.
+_CONTENT_HASH_CACHE: dict = {}
+
+
+def _content_changed(path: str, item: dict) -> bool:
+    """Has this manifested output CHANGED since it was produced?
+
+    File metadata alone is the wrong test. Re-running an extractor into the
+    same path rewrites identical bytes under a new inode and mtime, and a
+    stat-only check then reports the output as changed — which refused an
+    entire synthesis over a byte-identical file. When the manifest recorded a
+    production-time sha256, the content decides; metadata is only the fast path.
+    """
+    from core.evidence_packets import file_version
+    current = file_version(path)
+    if current is None:
+        return True
+    if current == item.get('version'):
+        return False
+    recorded = item.get('sha256')
+    if not recorded:
+        return True            # nothing to verify against: metadata is all we have
+    key = (path, tuple(current))
+    digest = _CONTENT_HASH_CACHE.get(key)
+    if digest is None:
+        import hashlib
+        h = hashlib.sha256()
+        try:
+            with open(path, 'rb') as fh:
+                for block in iter(lambda: fh.read(1 << 20), b''):
+                    h.update(block)
+        except OSError:
+            return True
+        digest = _CONTENT_HASH_CACHE[key] = h.hexdigest()
+    return digest != recorded
+
+
 @dataclass
 class ScanResult:
     body: str = ""
@@ -159,6 +197,21 @@ def _cited_query_terms(text: str) -> list[str]:
     return maximal
 
 
+def _looks_like_path(token: str) -> bool:
+    """A flag's value is an output path only if it looks like one.
+
+    The same short flags mean other things to other tools: Sleuth Kit's `-o` is
+    a partition OFFSET (`fls -o 1411072 image.E01`) and mount's `-t` is a
+    filesystem TYPE. Reading those as promised output files made every tsk call
+    look like an invocation log whose output had vanished, which refused the
+    call as evidence and blocked synthesis for any finding citing it.
+    """
+    t = (token or "").strip()
+    if not t or t.startswith("-"):
+        return False
+    return "/" in t or t.lower().endswith(_OUTPUT_FILE_EXTS)
+
+
 def _cmd_output_paths(cmd: str) -> list[str]:
     """Output file/dir paths named in a recorded tool cmd, best-effort."""
     if not cmd:
@@ -169,8 +222,14 @@ def _cmd_output_paths(cmd: str) -> list[str]:
     except ValueError:
         toks = cmd.split()
     out = []
+    pairs = dict(zip(toks, toks[1:]))
     for i, t in enumerate(toks[:-1]):
-        if t in _OUTPUT_FLAGS:
+        if t in ('--csv', '--json') and pairs.get(t + 'f'):
+            out.append(os.path.join(toks[i + 1], pairs[t + 'f']))
+            continue
+        if t in ('--csvf', '--jsonf') and pairs.get(t[:-1]):
+            continue
+        if t in _OUTPUT_FLAGS and _looks_like_path(toks[i + 1]):
             out.append(toks[i + 1])
     return out
 
@@ -524,6 +583,11 @@ class TextSource:
     total_chars: int = 0
     stored_chars: int = 0
     label: str = ""
+    version: list | None = None
+    attribution: str = 'legacy_discovery_unverified'
+    selector: dict | None = None
+    producer_call_id: int | None = None
+    stale: bool = False
 
 
 def entry_text_sources(entry: dict) -> list[TextSource]:
@@ -539,19 +603,38 @@ def entry_text_sources(entry: dict) -> list[TextSource]:
                               label=str(entry.get("tool") or "reason")))
         return out
     seen: set[str] = set()
+    manifest = entry.get('output_manifest')
+    if manifest is not None:
+        from core.evidence_packets import file_version
+        for item in manifest.get('files', []):
+            if entry.get('success') is not True and not item.get('validated'):
+                continue
+            path = item['path']
+            stale = _content_changed(path, item)
+            out.append(TextSource('file', path=path, label=os.path.basename(path),
+                complete=bool(item.get('complete')) and not stale and entry.get('scope_complete') is not False,
+                version=item.get('version'), attribution=manifest.get('attribution', ''),
+                selector=item.get('selector'), producer_call_id=item.get('producer_call_id'), stale=stale))
+    if entry.get('job_completion') and entry.get('scope_complete') is False:
+        # A failed worker's banner or cut stdout is not a validated record.
+        return out
     op = entry.get("output_path")
-    if op:
+    if op and manifest is None:
         for f in _candidate_output_files(str(op)):
             if f not in seen:
                 seen.add(f); out.append(TextSource("file", path=f, label=os.path.basename(f)))
-    for tgt in _cmd_output_paths(entry.get("cmd") or ""):
+    for tgt in (_cmd_output_paths(entry.get("cmd") or "") if manifest is None else []):
         for f in _candidate_output_files(tgt):
             if f not in seen:
                 seen.add(f); out.append(TextSource("file", path=f, label=os.path.basename(f)))
     sp = entry.get("stdout_path")
     if sp and os.path.isfile(sp):
+        from core.evidence_packets import file_version
+        stale = bool(entry.get('stdout_version') and file_version(sp) != entry['stdout_version'])
         out.append(TextSource("stdout_sidecar", path=sp,
-                              complete=not entry.get("stdout_partial"),
+                              complete=not entry.get("stdout_partial") and not stale and entry.get('scope_complete') is not False,
+                              version=entry.get('stdout_version'), stale=stale,
+                              attribution='retained_stdout', producer_call_id=entry.get('call_id'),
                               total_chars=int(entry.get("stdout_chars") or 0),
                               label="stdout (complete)"))
     excerpt = (entry.get("stdout_excerpt") or "").strip()
@@ -565,9 +648,23 @@ def entry_text_sources(entry: dict) -> list[TextSource]:
         else:
             total = int(total)
             complete = total <= len(entry.get("stdout_excerpt") or "")
-        out.append(TextSource("stdout_excerpt", text=excerpt, complete=bool(complete),
+        out.append(TextSource("stdout_excerpt", text=excerpt, complete=bool(complete) and entry.get('scope_complete') is not False,
+                              attribution='retained_stdout', producer_call_id=entry.get('call_id'),
                               total_chars=int(total), stored_chars=len(excerpt),
                               label="stdout excerpt"))
+    # Older traced reads kept selectors in their command. Treat these as
+    # selection hints only, without inventing historical producer ownership.
+    if manifest is None and str(entry.get('cmd', '')).startswith('read.output '):
+        cmd = entry['cmd']
+        selector = {}
+        for key in ('query', 'where', 'columns'):
+            match = re.search(r'\s' + key + r'=(.*?)(?=\s(?:query|where|columns)=|$)', cmd)
+            if match:
+                selector[key] = match.group(1)
+        if selector:
+            for source in out:
+                if source.kind == 'file':
+                    source.selector = {**selector, 'legacy_hint': True}
     return out
 
 

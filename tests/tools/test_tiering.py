@@ -304,7 +304,7 @@ def test_record_finding_end_to_end_stamps_and_reports_headroom(tmp_path):
     # r3 may hit the refusal/evaluate single-use gates — headroom is asserted
     # when the record succeeded, the stamp when it did.
     if r3.get("success"):
-        assert "reach CONFIRMED" in r3["tier_headroom"]
+        assert "ceiling of CONFIRMED" in r3["tier_headroom"] and "No upgrade" in r3["tier_headroom"]
     f = [e for e in l._entries if e.get("type") == "finding"][0]
     assert f["tier_achievable"] == "CONFIRMED" and f["tier_rule"] == "execution"
     assert set(f["artifact_classes"]) >= {"userassist", "prefetch"}

@@ -414,6 +414,7 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
             observed_principals=observed_principals,
             observed_hosts=observed_hosts,
             case_question=case_question,
+            enforce_readiness=True,
         )
     except Exception as e:
         import sys
@@ -427,10 +428,25 @@ _DAIR_SYS = """\
 You are the DAIR Director for a read-only digital forensic investigation. \
 Your role is to plan each investigation batch and track phase progression.
 
+AUTHORITATIVE STATE: use the supplied server phase, questions, obligations,
+review checkpoints and evidence inventory. The caller summary is supplementary.
+Never prescribe a known unavailable executable or a platform-specific artifact
+without inventory supporting its applicability. Unknown platform means discover
+it first. Required work goes in directives.required_work as objects containing
+{tool, arguments, completion_criterion, question_id}; arguments must specify the
+actual target and query/window/options. priority_tools remains a compatibility
+list of tool names, not proof of scope completion. Reuse completed exact work.
+Execution alone never verifies the truth of a challenge. A returned observation
+may support, refute or leave it indeterminate.
+Optional exploration should include a question, competing explanation, source,
+expected discriminating observation, cost and an optional probe_id. Link the
+result to that intent; do not spend a quota without an informative check.
+
 YOUR ROLE AS INVESTIGATION PLANNER:
 You do not merely assess what was found — you prescribe exactly what to investigate \
-next. The investigator executes ONLY what you list in directives.priority_tools. \
-Nothing outside that list will be run.
+next. The investigator executes the required directives.priority_tools and may \
+also run bounded read-only exploration under the explicit curiosity_budget. \
+Do not confuse optional hunches with mandatory coverage.
 - Non-Report phases: priority_tools MUST always be non-empty. If you have nothing \
   new to prescribe for the current phase, transition to the next phase instead of \
   emitting stay with an empty list. An empty priority_tools with stack_action "stay" \
@@ -453,20 +469,21 @@ Raise it (to 3) when the batch surfaced a NEW principal/identity, a coverage gap
 or an artifact that contradicts the working hypothesis — those are exactly the \
 moments to widen the look. A probe is read-only and cannot itself record a \
 finding, so granting budget never risks evidence integrity.
-ABSENCE-HYPOTHESIZE BEFORE TRANSITION: before you set transition_recommended=true \
-to leave a non-Report phase, OR when the Triage max-pass cap is about to force a \
-transition, FIRST put reason.hypothesize (mode="absence") at the front of \
-priority_tools — observation = the still-unresolved part of the case question, \
-evidence = the artifact categories already examined. It returns the untouched \
-high-value categories (second-principal logon source, a different SID's profile, \
-an alternate exfil channel, setupapi.dev.log) as probe candidates. This forces \
-one divergent look before the funnel closes. Skip it only in Report.
+EXPLORATION CHECKPOINT: before leaving a non-Report phase, consider whether an \
+unresolved question has a useful unexplored source or competing explanation. \
+Use reason.hypothesize(mode="absence") when needed, passing the unresolved \
+question and scopes already examined. Reuse its current assessment if nothing \
+material changed. Its exploratory_suggestions are optional candidates, not a \
+binding work order. Prefer a small, decisive check within the allowance; no useful \
+candidate is a valid outcome. Do not require a specific platform or artifact, \
+and do not repeat a reasoning call just to spend unused budget. Skip in Report.
 
 IMPORTANT CONSTRAINTS:
 - TRUDI is a read-only forensic tool. Improve & Response actions are NEVER \
 performed — they appear only as recommendations in the final report.
-- The investigation begins with a confirmed positive detection already in hand. \
-Start at Triage unless the stack says otherwise.
+- The investigation begins with the user's question and available evidence. \
+Do not assume a positive detection, malicious activity or a particular platform. \
+Benign and inconclusive outcomes are valid. Start at Triage unless the stack says otherwise.
 - You are a state machine, not a checklist. Any phase can transition to any other \
 when evidence demands it.
 - LINEAGE IS MANDATORY: every dair_assess, reason.*, record_finding, and \
@@ -804,9 +821,16 @@ def dair_assess(
     except (json.JSONDecodeError, ValueError):
         stack = []
 
+    from core.execution_log import log as _planning_log
+    from core.planning_state import snapshot
+    authoritative = snapshot(_planning_log, case_question)
+    if (any(e.get('type') == 'dair_call' for e in _planning_log._entries)
+            and isinstance(_planning_log._phase_stack, list) and _planning_log._phase_stack):
+        stack = _planning_log._phase_stack
     current = stack[-1].get("phase", "Triage") if stack else "Triage"
 
-    user_parts = [f"TOOL RESULTS SUMMARY:\n{summary}"]
+    user_parts = ["AUTHORITATIVE INVESTIGATION STATE:\n" + json.dumps(authoritative, default=str),
+                  f"SUPPLEMENTARY TOOL RESULTS SUMMARY:\n{summary}"]
     user_parts.append(f"\nCURRENT PHASE STACK (newest last):\n{json.dumps(stack, indent=2)}")
     user_parts.append(f"\nCURRENT PHASE: {current}")
     if context:
@@ -816,6 +840,7 @@ def dair_assess(
     # Capture exactly what was sent to the DAIR model so the trace can be
     # audited by judges or replayed later.
     call_inputs = {
+        "authoritative_state": authoritative,
         "tool_results_summary": summary,
         "phase_stack": stack,
         "case_context": context,
@@ -919,9 +944,9 @@ def dair_assess(
                 _hit = next((int(e.get("call_id") or 0) for e in _runs
                              if _rmatch(e, _sig, _toks)), None)
                 if _hit:
-                    _c["verified"] = True
-                    _c["verified_basis"] = "prior_run"
-                    _c["verified_by_call_id"] = _hit
+                    _c["check_executed"] = True
+                    _c["execution_call_id"] = _hit
+                    _c["evidential_outcome"] = "not_adjudicated"
     except Exception:
         pass
 
@@ -1250,6 +1275,11 @@ def dair_assess(
             import sys as _sys6
             print(f"[TRUDI WARN] work-order advance gate failed: {_e6}", file=_sys6.stderr)
 
+    from core.work_obligations import register, parse_work
+    declared = (assessment.get('directives') or {}).get('required_work') or (assessment.get('directives') or {}).get('priority_tools', [])
+    if declared:
+        assessment.setdefault('directives', {})['required_work'] = declared
+        assessment['work_obligations'] = register(_planning_log, declared)
     tok_in  = backend_result.get("input_tokens", 0)
     tok_out = backend_result.get("output_tokens", 0)
     call_id = _log_dair(assessment, tok_in, tok_out, inputs=call_inputs,
@@ -1261,6 +1291,16 @@ def dair_assess(
                                              for it in ok_principals] or None,
                         observed_hosts=ok_hosts or None,
                         case_question=case_question or "")
+
+    # The writer checks readiness under its transaction lock, including work
+    # reserved while this model assessment was in flight.
+    from core.execution_log import log as _phase_log
+    committed = _phase_log.index().by_call_id.get(call_id, {})
+    if (committed.get('server_override') or {}).get('kind') == 'report_prerequisites':
+        for key in ('current_phase', 'next_phase', 'stack_action', 'transition_recommended',
+                    'transition_rationale'):
+            assessment[key] = committed[key]
+        server_override = committed['server_override']
 
     result = {
         **assessment,

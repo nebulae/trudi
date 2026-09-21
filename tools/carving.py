@@ -1,5 +1,6 @@
 """File carving tools — bulk_extractor, foremost, scalpel."""
 from typing import Optional
+from core.job_adapters import job_backed
 from fastmcp import FastMCP
 from core import run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
@@ -9,6 +10,7 @@ mcp = FastMCP("carving")
 
 @mcp.tool()
 @output_safe
+@job_backed
 def bulk_extractor_scan(
     image_path: str,
     output_dir: str,
@@ -34,6 +36,7 @@ def bulk_extractor_scan(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def bulk_extractor_unallocated(
     unallocated_raw: str,
     output_dir: str,
@@ -49,6 +52,7 @@ def bulk_extractor_unallocated(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def foremost_carve(
     image_path: str,
     output_dir: str,
@@ -71,6 +75,7 @@ def foremost_carve(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def scalpel_carve(
     image_path: str,
     output_dir: str,

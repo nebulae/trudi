@@ -130,7 +130,14 @@ def output_safe(func):
             value = bound.arguments.get(name)
             if value:
                 assert_output_safe(value)
-        return func(*args, **kwargs)
+        bound.apply_defaults()
+        from core.execution_log import log
+        from core.output_protection import version_destinations
+        redirected = version_destinations(bound.arguments, relevant, log)
+        result = func(*bound.args, **bound.kwargs)
+        if redirected and isinstance(result, dict):
+            result['output_versions'] = redirected
+        return result
 
     return wrapper
 

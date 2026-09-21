@@ -34,6 +34,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from core.jobs import reset_guard
 
 _CACHE_DIR = os.path.expanduser("~/.cache/trudi")
 _LOCK_FILE = os.path.join(_CACHE_DIR, "hook.lock")
@@ -182,6 +183,7 @@ def _purge_outputs(case_dir: str, no_backup: bool) -> tuple[str | None, list[str
     return backup_dir, actions
 
 
+@reset_guard
 def reset(case_dir: str, keep_trace: bool = False, no_backup: bool = False,
           purge_outputs: bool = False, force: bool = False) -> dict:
     """Perform the reset. Returns a result dict with what was done. Refuses

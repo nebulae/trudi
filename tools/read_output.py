@@ -40,6 +40,8 @@ def _guard(path: str):
     (None, error_dict)."""
     try:
         resolved = assert_readable_output(path)
+        from core.evidence_admission import read_provenance
+        read_provenance(resolved)
     except ValueError as e:
         return None, {"success": False, "error": str(e),
                       "hint": "Extract the artifact via its typed wrapper first, "
@@ -52,7 +54,7 @@ def _guard(path: str):
     return resolved, None
 
 
-def _selflog(cmd: str, body: str, success: bool = True) -> int:
+def _selflog(cmd: str, body: str, success: bool = True, output_manifest=None) -> int:
     """Self-log a read as a tool_call so it is citable; return _trudi_call_id."""
     result = {"success": success, "stdout": (body or "")[:_EXCERPT], "stderr": "",
               "exit_code": 0 if success else 1, "truncated": False, "retries": 0,
@@ -60,7 +62,10 @@ def _selflog(cmd: str, body: str, success: bool = True) -> int:
               # Full body → stdout sidecar (E-01): the reviewer must be able to
               # fetch exactly the rows/columns the agent read, not a 600-char
               # head of them ("excerpt omits the MAC/MachineID columns").
-              "_stdout_full": body or "", "_stdout_chars": len(body or "")}
+              "_stdout_full": body or "", "_stdout_chars": len(body or ""),
+              'output_manifest': output_manifest}
+    if output_manifest and any(f.get('complete') is False for f in output_manifest.get('files', [])):
+        result['scope_complete'] = False
     try:
         _log_tool(result)
     except Exception:
@@ -89,6 +94,9 @@ def read_output(path: str, query: str = "", columns: str = "", where: str = "",
     if err:
         return err
     terms = _query_terms(query)
+    from core.evidence_packets import file_version
+    from core.output_manifest import read_manifest
+    before = file_version(resolved)
     cols = [c.strip() for c in columns.split(",") if c.strip()] or None
     budget = max(500, min(int(max_chars), OUTPUT_CAP))
 
@@ -109,7 +117,10 @@ def read_output(path: str, query: str = "", columns: str = "", where: str = "",
     if query:   _cmd += f" query={query[:80]}"
     if cols:    _cmd += f" columns={','.join(cols)}"
     if where:   _cmd += f" where={where[:60]}"
-    cid = _selflog(_cmd, body)
+    if before != file_version(resolved):
+        return {'success': False, 'error': 'Output changed during read; retry the selection.'}
+    cid = _selflog(_cmd, body, output_manifest=read_manifest(resolved, before,
+        {'query': query, 'columns': cols or [], 'where': where or '', 'max_rows': max_rows}))
     truncated = bool(body) and ("[truncated]" in body or "[row cap]" in body)
     return {"success": True, "_trudi_call_id": cid, "path": resolved,
             "query": query, "columns": cols or [], "where": where or "",

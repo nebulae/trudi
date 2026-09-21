@@ -11,3 +11,8 @@ flare-floss>=3.0.0     # obfuscated/stacked string extraction
 # Office document forensics (phishing initial access)
 oletools>=0.60         # olevba, mraptor — Office macro detection
 
+
+# Windows Prefetch (libscca) — PECmd refuses to run off Windows, so ez.pecmd
+# parses the same artifact with this on Linux.
+libscca-python>=20240215
+jsonschema>=4.20       # Validate visible MCP requests before phase transitions

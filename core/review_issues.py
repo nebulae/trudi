@@ -21,13 +21,24 @@ def review_state(entries):
     active = {e['call_id'] for e in active_findings(entries)}
     all_findings = {e['call_id'] for e in entries if e.get('type') == 'finding'}
     for it in issues.values():
+        receipt = (it.get('resolution') or {}).get('adjudication_receipt')
+        if it['status'] == 'resolved' and receipt:
+            from core.evidence_packets import file_version, entry_identity
+            from core.evidence_display import renderer_version
+            by_id = {e.get('call_id'): e for e in entries}
+            if ((receipt.get('display_renderer_version') is not None and
+                    receipt['display_renderer_version'] != renderer_version()) or
+                    any(file_version(p) != v for p, v in receipt['file_versions'].items()) or
+                    any(entry_identity(by_id.get(int(cid), {})) != sig
+                        for cid, sig in receipt['entry_identities'].items())):
+                it.update(status='open', resolution_stale=True)
         refs = set(it.get('finding_call_ids') or [])
         if it['status'] == 'open' and refs and refs <= all_findings and not refs & active:
             it.update(status='obsolete', resolution={'basis': 'retired_revisions'})
     return list(issues.values())
 
 
-def normalize_review(result, entries):
+def normalize_review(result, entries, evidence_packet=None):
     """Validate reviewer IDs and explicit resolution evidence before storing them."""
     rb = result.get('result_block') or {}
     by_id = {e['call_id']: e for e in entries}
@@ -50,6 +61,13 @@ def normalize_review(result, entries):
             raise ValueError('finding_call_ids must reference findings')
         it = {'kind': raw['kind'], 'message': raw['message'],
               'finding_call_ids': sorted(set(fids)), 'evidence_call_ids': sorted(set(eids))}
+        if raw.get('action') is not None:
+            action = raw['action']
+            if (not isinstance(action, dict) or type(action.get('required')) is not bool
+                    or action.get('kind') not in ('collect', 'analyze', 'scan', 'repair', 'report_local')
+                    or not isinstance(action.get('arguments', {}), dict)):
+                raise ValueError('Issue action needs typed required/kind/arguments fields')
+            it['action'] = dict(action)
         it['issue_id'] = 'R-' + digest(it)[:16]
         if raw.get('issue_id'):
             old = prior.get(raw['issue_id'])
@@ -68,11 +86,60 @@ def normalize_review(result, entries):
                 or any(type(c) is not int or c not in by_id for c in refs)):
             raise ValueError('Resolution needs an existing issue, reason and real supporting call IDs')
         fresh = [by_id[c] for c in refs if c > (old.get('raised_call_id') or 0)]
-        if not any(e.get('type') in ('finding', 'tool_call', 'disposition', 'finding_retracted') for e in fresh):
-            raise ValueError('Resolution needs new evidence, a corrected finding or a typed disposition')
         basis = r.get('basis')
-        if basis not in ('corrected_finding', 'evidence', 'qualified_limitation'):
+        if basis not in ('corrected_finding', 'evidence', 'qualified_limitation', 'reviewer_error'):
             raise ValueError('Invalid issue resolution basis')
+        if basis != 'reviewer_error' and not any(e.get('type') in (
+                'finding', 'tool_call', 'disposition', 'finding_retracted') for e in fresh):
+            raise ValueError('Resolution needs new evidence, a corrected finding or a typed disposition')
+        if basis == 'reviewer_error':
+            premise = r.get('incorrect_premise')
+            quotes = r.get('evidence_quotes')
+            adjudicator = by_id.get(result.get('_trudi_call_id'), {})
+            if (not evidence_packet or adjudicator.get('tool') != 'reason_synthesize'
+                    or adjudicator.get('success') is not True
+                    or adjudicator.get('call_id', 0) <= old.get('raised_call_id', 0)):
+                raise ValueError('Reviewer-error resolution needs a fresh independent synthesis and its evidence packet')
+            if not isinstance(premise, str) or not premise.strip() or premise not in old['message']:
+                raise ValueError('incorrect_premise must quote the exact objection being corrected')
+            if not isinstance(quotes, list) or not quotes:
+                raise ValueError('Reviewer-error resolution needs exact evidence_quotes from the packet')
+            from core.evidence_packets import entry_identity, file_version
+            from core.evidence_display import displayed_text, renderer_version
+            identities, versions = {}, {}
+            for proof in quotes:
+                if not isinstance(proof, dict) or proof.get('call_id') not in refs:
+                    raise ValueError('Each evidence quote must name a supporting call_id')
+                quote, path, cid = proof.get('quote'), proof.get('path'), proof['call_id']
+                sources = [s for s in evidence_packet['evidence']
+                           if s['call_id'] == cid and s.get('path') == path]
+                # Shared rows remain available under another call's identical
+                # physical source/version. Never match a different path.
+                sources += [s for s in evidence_packet['evidence'] if path and s.get('path') == path
+                            and any(s['output_sha256'] == x['output_sha256'] for x in sources)]
+                texts = [displayed_text(span) for s in sources for sel in s['selections'] for span in sel['spans']]
+                # Server-generated fetch receipts retain the actual displayed
+                # rows. A reviewer may correct a premise after pulling a row
+                # that was not in the initial selection.
+                texts += [displayed_text(sel) for fetch in result.get('evidence_fetches', [])
+                          if sources and fetch.get('call_id') == cid and fetch.get('status') == 'ok'
+                          for sel in fetch.get('source_selections', []) if sel.get('path') == path]
+                if (not isinstance(quote, str) or not quote.strip() or
+                        not any(quote in text for text in texts)):
+                    raise ValueError('Reviewer-error quote was not shown in the versioned source selection')
+                sig = evidence_packet['entry_identities'].get(str(cid))
+                if not sig or entry_identity(by_id[cid]) != sig:
+                    raise ValueError('Reviewer-error evidence changed during review')
+                identities[str(cid)] = sig
+                if path:
+                    version = evidence_packet['file_versions'].get(path)
+                    if version is None or file_version(path) != version:
+                        raise ValueError('Reviewer-error source changed during review')
+                    versions[path] = version
+            r = {**r, 'adjudication_receipt': {
+                'display_renderer_version': renderer_version(),
+                'review_call_id': adjudicator['call_id'], 'packet_id': evidence_packet['packet_id'],
+                'issue_id': old['issue_id'], 'entry_identities': identities, 'file_versions': versions}}
         if basis == 'corrected_finding':
             targets = set(old.get('finding_call_ids') or [])
             if not any((e.get('type') == 'finding' and e.get('supersedes') in targets

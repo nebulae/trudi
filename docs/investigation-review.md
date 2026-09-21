@@ -2,6 +2,85 @@
 
 Implemented scope: steps 1–4 of the trace review plan. Evidence packets supply the initial review context; existing bounded evidence fetching remains available for additional rows.
 
+Follow-up: [additional improvements plan](investigation-improvements-plan.md) covers compact actionable guidance, evidence sharing, reviewer corrections, task completion and bounded exploration across evidence capabilities. The [curiosity assessment](curiosity-review.md) documents the baseline reasons for probe underuse. Historical runs supply regression examples, not case-specific runtime rules.
+
+## Follow-up delivery status
+
+The first implementation tranche adds:
+
+- **Bounded guidance:** readiness, pre-report and synthesis responses stay within
+  a 6,000-byte application payload budget, leaving transport headroom. Small
+  responses retain their existing fields. Larger responses expose counts and
+  explicit detail references. `reason.readiness_status(section=..., state_version=...)`
+  reads the current projection; `reason.review_details(call_id=..., section=...,
+  state_version=...)` reads a saved review without another model call. Join
+  `json_chunk` fragments in `next_offset` order, then parse JSON; offsets are
+  Unicode characters. Changed snapshots refuse mixed-version paging. Full
+  pre-report results remain in the trace. Synthesis now refuses known
+  deterministic prerequisites before invoking its model. Failed synthesis is
+  reported as failed, rather than “not called.”
+- **Shared synthesis evidence:** current finding review packets supply sources
+  and selected rows, or are rebuilt when stale. Every active finding has a source
+  mapping, including principal and full output path; finding/control entries no
+  longer consume a twelve-source inventory limit. Repeated physical-source byte
+  spans are shared while preserving citation provenance. The existing bounded
+  fetcher remains available. Fetches may specify `finding_call_id` and `path`;
+  a mismatch returns a scope error, not an absence result. Source and semantic
+  snapshot checks guard final acceptance under the trace writer lock.
+- **Reviewer-premise corrections:** a new independent synthesis can resolve an
+  earlier issue with `basis="reviewer_error"`, the exact `incorrect_premise`,
+  supporting call IDs and exact `evidence_quotes` from the versioned packet or
+  actual fetched rows. Earlier evidence is eligible. Source/entry changes reopen
+  these resolutions. Genuine contradictions still require evidence; simply
+  repeating a review or deleting an objection does not close it.
+- **Immediate curiosity repairs:** the grant check uses durable history under
+  the same transaction as spending, so long batches and concurrent callers cannot
+  lose or double-spend the current allowance. Readiness exposes grant/spend state.
+  Absence-mode candidates become optional `exploratory_suggestions`, not binding
+  work orders; an empty list does not trigger invented prose-derived tasks.
+  DAIR, absence-mode prompts, slim descriptions and all four profiles explain the
+  exception and follow the actual question/evidence, including benign alternatives.
+- **PECmd path resolution:** `TRUDI_PECMD_DLL` explicitly selects the DLL;
+  otherwise the wrapper checks `<TRUDI_EZ_ROOT>/PECmd.dll` and
+  `<TRUDI_EZ_ROOT>/PECmd/PECmd.dll`. The root defaults to `/opt/zimmermantools`.
+  Missing binaries remain distinct from parser/runtime faults. No binary was
+  installed by this change; the default locations were absent at inspection.
+
+**Report follow-up routing is now implemented:** the
+[re-entry plan](report-phase-reentry-plan.md) records the delivered behavior and
+validation. Validated forensic requests in Report transition before execution in
+the same call; typed required review actions can register durable obligations.
+Request identity includes exact canonical arguments and source versions, with
+matching completion receipts, duplicate-result reuse and explicit refresh.
+Production DAIR entry to Report enforces shared readiness and unresolved-work
+checks. Permitted retained-output reads and report-local corrections stay in
+Report. Packet failures remain repair failures, and independent review gates
+remain in force.
+
+This is not the complete roadmap. General task obligations outside Report
+follow-up, pre-execution probe reservations, automatic probe-result recording,
+starvation prevention, zero-supported-finding closure, and controlled live-agent
+comparisons remain later work. The current
+curiosity API still logs after execution and a new DAIR grant still resets its
+batch allowance. Large synthesis contexts currently return an explicit
+`needs-evidence` error above 96,000 serialized characters; automatic partitioned
+review is not implemented. These limits must not be described as completed work
+or measured speed/accuracy gains.
+
+Tests cover generic source scopes, lossless large-response retrieval, old-evidence
+correction, stale/incorrect proof rejection, shared rows, concurrent probe spends,
+path resolution and synthetic end-to-end synthesis with a mocked backend. Load
+the changed tools/profiles in new or restarted MCP/client sessions; do not hot-swap
+code during a comparison investigation.
+
+Validation on 2026-09-20: **1,975** core/tool/regression, Pilot-profile and
+OpenCode-registration checks passed. **30** dashboard/chain-view/MCP-registration
+checks passed separately with localhost access; the sandbox denied socket binding
+for those tests. The new `reason_review_details` mounted name was also verified.
+`git diff --check` and documentation link checks passed. No live model run or
+paired accuracy/speed benchmark was performed, and existing case traces were not
+modified by this implementation.
+
 ## Current findings
 
 `core.findings.finding_view` provides active findings, history and lifecycle anomalies. The log index exposes active findings without changing historical `by_type` data. Synthesis, readiness, current coverage, attribution, reports and scorers use this projection. Historical evaluation spending and challenges still use the audit history.
@@ -98,4 +177,4 @@ failures, restart/lost-response recovery, stale evidence, revision races, receip
 spending and complete typed-claim binding. Independent review and all final
 gates remain active in submission tests; only model responses are mocked.
 
-Read-only replay against the original traces identifies Bogus Bill's competing successors of finding 999 and CFREDS DeepSeek's incompatible 715→746 and missing-target 707→748 links. No historical case was migrated. Live Claude/DeepSeek speed, cost and accuracy comparisons remain to be measured on isolated investigations.
+Read-only replay against the original traces identifies Bogus Bill's competing successors of finding 999 and CFREDS DeepSeek's incompatible 715→746 and missing-target 707→748 links. No historical case was migrated. The [Vanko DeepSeek 4.1 assessment](/home/trin/analysis/vanko-deepseek41-review-2026-09-20/review.md) documents an uncontrolled live comparison: lower DAIR overhead, higher review input tokens, incomplete coverage and no report. Controlled paired speed, cost and accuracy comparisons remain necessary.

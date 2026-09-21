@@ -279,6 +279,12 @@ def _seed_report_phase(tmp_path):
     from core.execution_log import ExecutionLog
     l = ExecutionLog()
     l.configure("TEST", str(tmp_path / "trace.json"))
+    l.record_reason_call("reason_plan", True, "plan", {})
+    l.record_dair_call("Triage", "", True, "Collect", "collect", "push", "")
+    l.record_dair_call("Collect", "", True, "Analyze", "analyze", "push", "")
+    source = l.record_tool_call('inspect retained artifact', True, False, 0, 0,
+                               stdout_excerpt='account observed', stdout_full='account observed')
+    l.record_finding('account observed', 'LIKELY', input_call_ids=[source])
     l.record_dair_call(
         current_phase="Report",
         phase_rationale="Investigation complete",
@@ -292,7 +298,7 @@ def _seed_report_phase(tmp_path):
 
 
 class TestReasonSynthesize:
-    def test_returns_success(self, tmp_path):
+    def test_uninspected_findings_are_not_approved(self, tmp_path):
         from tools.reasoning import reason_synthesize
         l = _seed_report_phase(tmp_path)
         with patch("core.execution_log.log", l), \
@@ -300,7 +306,7 @@ class TestReasonSynthesize:
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("1. Keylogger\n2. BITS exfil")
-        assert r["success"] is True
+        assert r['status'] == 'blocked' and not r['approved']
 
     def test_investigation_summary_included(self, tmp_path):
         from tools.reasoning import reason_synthesize
@@ -374,7 +380,8 @@ class TestSynthesizeGate:
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("findings")
-        assert r["success"] is True
+        assert "only callable in Report" not in r.get("error", "")
+        assert r["status"] == "blocked"  # incomplete factual review cannot approve
 
     def test_synthesize_uses_most_recent_dair_call(self, tmp_path):
         """Older dair_call in non-Report doesn't block if most recent is Report."""
@@ -383,14 +390,17 @@ class TestSynthesizeGate:
         l = ExecutionLog()
         l.configure("TEST", str(tmp_path / "trace.json"))
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        l.record_dair_call("Collect", "", False, "", "", "stay", "")
+        l.record_dair_call("Triage", "", True, "Collect", "collect", "push", "")
+        l.record_dair_call("Collect", "", True, "Analyze", "analyze", "push", "")
+        l.record_reason_call("reason_plan", True, "plan", {})
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         with patch("core.execution_log.log", l), \
              patch("httpx.post", return_value=_http_resp("ok\nBLOCKERS: []")), \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("findings")
-        assert r["success"] is True
+        assert "only callable in Report" not in r.get("error", "")
+        assert r["status"] == "blocked"  # incomplete factual review cannot approve
 
 
 class TestBackendConfig:
@@ -1655,6 +1665,8 @@ class TestPreReportStructuralIntegrity:
         base_log.record_finding("data exfiltrated over FTP", "CONFIRMED", "ftp", claim=_EGRESS_CLAIM("ftp"))
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
+        if r.get("details_required"):
+            r = base_log.index().by_call_id[r["_trudi_call_id"]]["control_result"]
         assert any("channel" in w.lower() for w in r["warnings"])
 
     def test_declared_recipient_without_comms_read_warns(self, base_log):
@@ -1955,7 +1967,8 @@ class TestPreReportHypothesisExhaustion:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-EXHAUST", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        l.record_dair_call("Triage", "", True, "Collect", "collect", "push", "")
+        l.record_dair_call("Collect", "", True, "Analyze", "analyze", "push", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         # J-3 relevance model: a principal only the REVIEWER listed is
@@ -2083,19 +2096,32 @@ class TestPreReportHypothesisExhaustion:
         calls = []
         def fake(system, user, **kw):
             calls.append(user)
-            cid = base_log.record_reason_call("reason_synthesize", True, "ok", {}, blockers=[])
-            return {"success": True, "conclusion": "ok", "blockers": [], "_trudi_call_id": cid}
+            task, packet = kw['review_progress'], kw['evidence_packet']
+            task['provider_calls'] += 1
+            rb = {'issues': [], 'resolutions': []}
+            if task['kind'] == 'comparison':
+                rb.update(comparison_complete=True, compared_finding_ids=task['finding_ids'])
+            elif not task['cache']:
+                rb['evidence_request'] = [{'call_id': packet['evidence'][0]['call_id'],
+                                          'query': 'account', 'finding_call_id': task['finding_ids'][0]}]
+            else:
+                rb['coverage'] = [{'finding_call_id': task['finding_ids'][0], 'complete': True,
+                                   'assertions_reviewed': ['account observed'], 'request_ids': list(task['cache'])}]
+            cid = base_log.record_reason_call('reason_synthesize', True, 'ok', {}, blockers=[])
+            return {'success': True, 'result_block': rb, '_trudi_call_id': cid}
         monkeypatch.setattr(R, "_ask", fake)
         base_log.record_dair_call("Report", "", False, "", "", "stay", "")
-        base_log.record_finding("account observed", "LIKELY", "ez.evtxecmd")
+        source = base_log.record_tool_call("read.read_output", True, False, 0, 0,
+                                           stdout_excerpt="account observed", stdout_full="account observed")
+        base_log.record_finding("account observed", "LIKELY", "read.read_output", linked_call_id=source)
         with patch("core.execution_log.log", base_log):
             first = R.reason_synthesize("account observed")
             second = R.reason_synthesize("same account")
-            assert first["success"] and second["cached"] and len(calls) == 1
-            assert "[LIKELY] cid" in calls[0]
+            assert first["approved"] and second["cached"] and len(calls) == 3
+            assert 'TASK: finding' in calls[0]
             base_log.record_tool_call("new evidence", True, False, 0, 0)
             assert R.reason_synthesize("account observed")["success"]
-            assert len(calls) == 2
+            assert len(calls) == 3  # unrelated evidence does not invalidate reviewed claims
 
     def test_pre_report_keeps_real_blockers_after_repeated_reviews(self, base_log):
         from tools.reasoning import reason_pre_report_check
@@ -2117,7 +2143,8 @@ class TestPreReportHypothesisExhaustion:
                                                       "_trudi_call_id": 0})
         with patch("core.execution_log.log", base_log):
             r = R.reason_synthesize("F1 …")
-        assert r["success"] is True and r["blockers"] == [] and r["tier_blockers_demoted"]
+        assert r['status'] == 'blocked' and r.get('packet_status') == 'no_findings'
+        assert 'only callable in Report' not in r.get('error', '')
         base_log.record_dair_call("Analyze", "", False, "", "", "stay", "")
         with patch("core.execution_log.log", base_log):
             r = R.reason_synthesize("F1 …")

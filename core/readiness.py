@@ -7,7 +7,7 @@ from core.findings import current_entries
 POLICY_VERSION = 'review-readiness-1'
 _IGNORED_TOOLS = {'reason_pre_report_check', 'reason_readiness_status', 'reason_audit_findings'}
 _IGNORED_TYPES = {'call_initiated', 'call_abandoned', 'reason_evidence_fetch',
-                  'investigation_narration', 'system_error'}
+                  'investigation_narration', 'system_error', 'synthesis_progress', 'finding_review_progress', 'operation_progress'}
 
 
 def digest(value) -> str:
@@ -42,6 +42,8 @@ def state_fingerprint(entries, case_id='', include_synthesis=True) -> str:
     policy = {}
     for pattern in ('core/findings.py', 'core/readiness.py', 'core/review_issues.py',
                     'core/evidence_packets.py', 'core/finding_submission.py',
+                    'core/synthesis_evidence.py', 'core/control_response.py',
+                    'core/phase_routing.py', 'core/middleware.py',
                     'tools/_readiness.py', 'tools/reasoning.py', 'tools/_llm_parse.py',
                     'tools/dair.py', 'tools/_gates/*.py', 'data/fk/tiering.yaml'):
         for p in root.glob(pattern):

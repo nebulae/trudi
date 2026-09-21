@@ -2,6 +2,7 @@
 import os
 import glob
 from typing import Optional
+from core.job_adapters import job_backed
 from fastmcp import FastMCP
 from core.paths import assert_output_safe
 from core import output_safe
@@ -61,6 +62,7 @@ def yara_scan_file(file_path: str, rules_path: str, timeout: int = 60) -> dict:
 
 @mcp.tool()
 @output_safe
+@job_backed
 def yara_scan_directory(
     directory: str,
     rules_path: str,
@@ -88,6 +90,15 @@ def yara_scan_directory(
             try:
                 matches = rules.match(fpath, timeout=timeout_per_file)
                 scanned += 1
+                # The worker retains completed records as they arrive. A later
+                # cancellation must not discard already validated matches.
+                records_path = os.environ.get('TRUDI_JOB_RECORDS') if os.environ.get('TRUDI_JOB_WORKER') == '1' else ''
+                if records_path:
+                    import json
+                    os.makedirs(os.path.dirname(records_path), exist_ok=True)
+                    with open(records_path, 'a') as records:
+                        records.write(json.dumps({'file': fpath, 'matches': [_match_to_dict(m) for m in matches]}) + '\n')
+                        records.flush()
                 if matches:
                     results.append({
                         "file": fpath,
@@ -102,6 +113,8 @@ def yara_scan_directory(
             "success": True,
             "directory": directory,
             "scanned": scanned,
+            "scope_complete": len(files) <= max_files and not errors,
+            "capped": len(files) > max_files,
             "hits": len(results),
             "results": results,
             "errors": errors[:50],

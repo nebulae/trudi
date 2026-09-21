@@ -1,6 +1,7 @@
 """The Sleuth Kit — filesystem navigation and timeline tools."""
 import shutil
 from typing import Optional
+from core.job_adapters import job_backed
 from fastmcp import FastMCP
 from core import run, run_with_output_file, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
 from core.paths import assert_output_safe
@@ -170,6 +171,7 @@ def tsk_blkls(
 
 @mcp.tool()
 @output_safe
+@job_backed
 def tsk_recover(
     image: str,
     output_dir: str,
