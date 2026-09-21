@@ -78,6 +78,8 @@ def _display(tool: str) -> str:
 _CONTROL_PLANE_TOOLS = frozenset({
     "misc.start_execution_log", "misc.export_execution_log", "misc.write_final_report",
     "misc.serve_dashboard", "misc.clear_case_run", "misc.retract_finding", "misc.submit_finding",
+    "misc.declare_questions", "misc.operation_status", "misc.job_recover",
+    "misc.review_correspondent_scope",
 })
 
 

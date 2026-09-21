@@ -231,6 +231,7 @@ def reserve(log, tool, arguments, phase, *, refresh=False, issue_id='', trigger_
         # argument normalization; never accept a subset of its scope.
         old = next((w for w in reversed(list(existing.values()))
                     if w['tool'] == normalized(tool)
+                    and not w.get('scope_unspecified')
                     and canonical(normalized(tool), w['arguments']) == arguments
                     and w['source_versions'] == source_versions(arguments)), None)
         if old:

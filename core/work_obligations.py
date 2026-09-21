@@ -55,8 +55,8 @@ def completed(entries, item):
         if entry.get('type') == 'phase_work':
             latest[entry['request_id']] = entry
     for entry in latest.values():
-        if (entry.get('tool') == tool and canonical(tool, entry.get('arguments') or {}) == arguments
-                and not entry.get('scope_unspecified')
+        if (entry.get('tool') == tool and not entry.get('scope_unspecified')
+                and canonical(tool, entry.get('arguments') or {}) == arguments
                 and entry.get('source_versions') == versions
                 and entry.get('status') in ('completed', 'dispositioned')):
             from core.evidence_packets import file_version

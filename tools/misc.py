@@ -1110,14 +1110,18 @@ def record_disposition(
                  claim>"; principal / correspondent / host / device → the identity
                  (any spelling; normalized server-side); hypothesis → H-id;
                  destruction_scope → the finding call_id; follow_up → the exact
-                 W-id of non-running Report follow-up work (requires a note and
+                 W-id of non-running scoped work in any phase (requires a note and
                  evidence_call_ids from that request's result/trigger).
                  job → exact job_id, after cancellation/completion and collection;
                  requires a note and that job's collected evidence call_id.
     reason:      absent_from_evidence | inapplicable | out_of_scope | noise |
                  excluded | not_a_principal | controller_unknown |
-                 evidence_unavailable | ruled_out | refuted | undetermined
+                 evidence_unavailable | ruled_out | refuted | undetermined |
+                 execution_failed | dependency_unavailable | incompatible | parse_failed
                  (each target_kind accepts a subset — the refusal lists it).
+                 Failure reasons document the failure and leave the work open.
+    alternatives_exhausted / remaining_scope: required to settle failed work
+                 as evidence_unavailable; explain the remaining limitation.
     evidence_call_ids: REQUIRED for excluded / ruled_out / refuted /
                  not_a_principal — the evidence tool calls that establish it.
     window:      {start, end} ISO dates the disposition covers (device rule-outs).
@@ -2656,17 +2660,22 @@ def declare_questions(questions: list[dict]) -> dict:
     from core.execution_log import log
     from core.phase_routing import append_event
     from core.question_outcomes import questions as current
-    known = current(log._entries)
     if not questions or any(not isinstance(q, dict) or not isinstance(q.get('question_id'), str)
             or not q['question_id'].strip() or not isinstance(q.get('question'), str)
             or not q['question'].strip() or not isinstance(q.get('scope'), dict) for q in questions):
         return {'success': False, 'error': 'Supply question_id, question and scope for each question'}
-    if any(q['question_id'] in known and known[q['question_id']] != {'question': q['question'], 'scope': q['scope']} for q in questions):
-        return {'success': False, 'error': 'Changed question/scope needs a new question_id'}
     with log.transaction():
+        known = current(log._entries)
+        proposed = dict(known)
+        for q in questions:
+            value = {'question': q['question'], 'scope': q['scope']}
+            if q['question_id'] in proposed and proposed[q['question_id']] != value:
+                return {'success': False, 'error': 'Changed question/scope needs a new question_id'}
+            proposed[q['question_id']] = value
         for q in questions:
             if q['question_id'] not in known:
                 append_event(log, 'question_declared', question_id=q['question_id'], question=q['question'], scope=q['scope'])
+                known[q['question_id']] = proposed[q['question_id']]
     return {'success': True, 'questions': current(log._entries)}
 
 

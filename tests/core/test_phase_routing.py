@@ -309,5 +309,6 @@ def test_only_matching_disposition_settles_request(log):
                                  evidence_call_ids=[unrelated], note='unrelated')
         assert not bad['success'] and P.pending_work(log)
         good = record_disposition('follow_up', work['request_id'], 'evidence_unavailable',
-                                  evidence_call_ids=[result_cid], note='Scoped export unavailable')
+                                  evidence_call_ids=[result_cid], note='Scoped export unavailable',
+                                  alternatives_exhausted=True, remaining_scope='Tenant export cannot be acquired')
     assert good['success'] and not P.pending_work(log)

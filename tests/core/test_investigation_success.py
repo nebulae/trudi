@@ -103,6 +103,58 @@ def test_string_projection_is_not_split_into_characters():
     assert normalize_requests([{'call_id': 1, 'query': 'invoice', 'columns': 'Date,From,To'}])[0]['columns'] == ['Date', 'From', 'To']
 
 
+def test_unspecified_work_can_be_refined_with_required_schema(monkeypatch):
+    from core.phase_routing import _TOOL_SCHEMAS
+    from core.work_obligations import register, completed
+    monkeypatch.setitem(_TOOL_SCHEMAS, 'strings_grep', {
+        'type': 'object', 'properties': {'path': {'type': 'string'}, 'pattern': {'type': 'string'}},
+        'required': ['path', 'pattern']})
+    bare = register(log, ['strings.grep'])[0]
+    scoped = {'tool': 'strings.grep', 'arguments': {'path': '/specific/source', 'pattern': 'needle'}}
+    assert not completed(log._entries, scoped)
+    precise = register(log, [scoped])[0]
+    assert precise['status'] == 'pending'
+    assert work_state(log)[bare['request_id']]['status'] == 'superseded'
+    assert not completed(log._entries, scoped)
+
+
+def test_question_outcome_commits_reviewed_indeterminate_answer():
+    from tools.misc import declare_questions
+    from core.question_outcomes import record, answered
+    from tests.tools.test_finding_submission import fake_review
+    log.record_dair_call('Analyze', '', False, '', '', 'stay', '')
+    assert declare_questions([{'question_id': 'Q-one', 'question': 'Who changed the record?',
+                               'scope': {'sources': ['audit']}}])['success']
+    cid = log.record_tool_call('read.output /audit.csv', True, False, 0, 0,
+                               stdout_full='Record changed; actor unavailable in retained audit.\n')
+    work, _, _ = reserve(log, 'read.output', {'path': '/audit.csv'}, 'Analyze')
+    finish(log, work, {'success': True, '_trudi_call_id': cid})
+    with patch('tools.reasoning._ask', side_effect=fake_review(log)):
+        result = record(log, 'Q-one', 'indeterminate', 'Audit identifies no actor', [cid],
+                        [work['request_id']], 'Actor identity remains unknown', [], 'question-outcome')
+    assert result['success'], result
+    assert answered(log)['Q-one']['outcome'] == 'indeterminate'
+
+
+def test_reviewed_correspondent_scope_preserves_inventory():
+    from tools.misc import declare_questions
+    from core.correspondent_scope import review, current_groups
+    from tests.tools.test_finding_submission import fake_review
+    log.record_dair_call('Analyze', '', False, '', '', 'stay', '')
+    declare_questions([{'question_id': 'Q-one', 'question': 'Who changed the record?',
+                        'scope': {'sources': ['audit']}}])
+    cid = log.record_tool_call('read.mail mode=messages', True, False, 0, 0,
+        stdout_full='newsletter@example.test sent a public newsletter unrelated to the audit.\n')
+    log.annotate_tool_call(cid, observed_correspondents=['newsletter@example.test'])
+    before = dict(log.index().correspondents)
+    with patch('tools.reasoning._ask', side_effect=fake_review(log)):
+        result = review(log, 'Q-one', ['newsletter@example.test'], {'relationship': 'public newsletter'},
+                        'Public informational newsletter unrelated to the audit question', [cid])
+    assert result['success'], result
+    assert log.index().correspondents == before
+    assert len(current_groups(log)) == 1
+
+
 def test_synthesis_pending_provisional_blockers_are_not_actionable():
     from core import synthesis_session as S
     from tests.core.test_synthesis_session import setup_findings, reviewer
@@ -204,6 +256,10 @@ def test_timeout_is_owned_reconnectable_and_cannot_duplicate(tmp_path):
 def test_question_closure_does_not_waive_feasible_work():
     from tools.misc import declare_questions
     from core.question_outcomes import record
+    conflict = declare_questions([
+        {'question_id': 'Q-one', 'question': 'First meaning', 'scope': {}},
+        {'question_id': 'Q-one', 'question': 'Different meaning', 'scope': {}}])
+    assert not conflict['success'] and not log.index().by_type.get('question_declared')
     assert declare_questions([{'question_id': 'Q-one', 'question': 'What occurred?', 'scope': {'sources': ['disk']}}])['success']
     work, _, _ = reserve(log, 'strings.grep', {'path': '/unexamined', 'pattern': 'one'}, 'Collect', execute=False)
     result = record(log, 'Q-one', 'indeterminate', 'Insufficient evidence', [], [work['request_id']], 'Unknown actor', [], 'question-key')

@@ -125,5 +125,7 @@ def _advance(log, key, system, user, packet, ids):
         result.setdefault('_trudi_call_id', task['last_call_id'])
         log.update_reason_call(task['last_call_id'], success=False, review_pending=True,
                                access_failures=list(task['access_failures'].values()))
+    if task['status'] in ('complete', 'blocked'):
+        task['result'] = deepcopy(result)
     save()
     return result

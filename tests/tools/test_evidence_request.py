@@ -65,7 +65,10 @@ class TestGrammar:
 
     def test_fenced_and_bad_items(self):
         raw = 'EVIDENCE_REQUEST:\n```json\n[{"call_id": "x", "query": "q"}, {"call_id": 3, "query": ""}, {"call_id": 4, "query": "ok"}]\n```'
-        assert R._parse_evidence_request(raw) == [{"call_id": 4, "query": "ok", "columns": []}]
+        assert R._parse_evidence_request(raw) == []
+        from tools._llm_parse import validate_result
+        assert 'Invalid evidence_request' in validate_result(
+            {'_raw': raw + '\nVERDICT: SUPPORTED'}, 'reason_evaluate_finding')
 
     def test_marker_lost_in_thinking_fallback(self):
         # A thinking model may leave the header in <think> and emit only the
@@ -93,7 +96,7 @@ class TestGrammar:
     def test_cap(self, monkeypatch):
         monkeypatch.setattr(R, "COMPAT_EVIDENCE_MAX_REQUESTS", 2)
         raw = "EVIDENCE_REQUEST: " + json.dumps(
-            [{"call_id": i, "query": "q"} for i in range(5)])
+            [{"call_id": i, "query": "q"} for i in range(1, 6)])
         assert len(R._parse_evidence_request(raw)) == 2
 
     def test_boolean_operators_are_not_terms(self, pull_env):

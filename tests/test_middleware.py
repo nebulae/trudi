@@ -25,6 +25,7 @@ async def test_note_extracted_and_logged(mock_context):
     call_next = AsyncMock(return_value="tool_result")
     with patch("core.execution_log.log") as mock_log:
         mock_log._entries = []  # cold-start trace: isolate narration from the DAIR phase-gate
+        mock_log._path = None   # no configured trace: work routing needs one and is out of scope here
         from core.middleware import NarrationMiddleware
         await NarrationMiddleware().on_call_tool(mock_context, call_next)
     # Middleware now passes input_call_ids=[_last_dair_cid] for lineage.
@@ -44,6 +45,7 @@ async def test_note_stripped_before_tool_sees_it(mock_context):
 
     with patch("core.execution_log.log") as mock_log:
         mock_log._entries = []  # cold-start trace: isolate narration from the DAIR phase-gate
+        mock_log._path = None   # no configured trace: work routing needs one and is out of scope here
         from core.middleware import NarrationMiddleware
         await NarrationMiddleware().on_call_tool(mock_context, capture)
     assert "_note" not in (captured.get("args") or {})
@@ -55,6 +57,7 @@ async def test_no_note_passes_through(mock_context):
     call_next = AsyncMock(return_value="ok")
     with patch("core.execution_log.log") as mock_log:
         mock_log._entries = []  # cold-start trace: isolate narration from the DAIR phase-gate
+        mock_log._path = None   # no configured trace: work routing needs one and is out of scope here
         from core.middleware import NarrationMiddleware
         await NarrationMiddleware().on_call_tool(mock_context, call_next)
     mock_log.record_agent_message.assert_not_called()

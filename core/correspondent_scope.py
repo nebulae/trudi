@@ -28,7 +28,6 @@ def current_groups(log):
 
 def review(log, question_id, members, scope, rationale, evidence_ids):
     from core.question_outcomes import questions
-    from tools._gates._entities import norm_entity
     from core.findings import active_findings
     from tools._gates._entities import entity_matches
     from core.phase_routing import append_event
@@ -39,7 +38,9 @@ def review(log, question_id, members, scope, rationale, evidence_ids):
     if question_id not in questions_now or not rationale.strip() or not isinstance(scope, dict) or not scope:
         return {'success': False, 'error': 'Name a declared question, explicit source/time/relationship scope and shared rationale'}
     inventory = log.index().correspondents
-    members = sorted(set(norm_entity(m) for m in members))
+    # The inventory preserves punctuation. Entity alias folding would merge
+    # distinct mailboxes and no longer match the actual inventoried addresses.
+    members = sorted(set(str(m).strip().lower() for m in members))
     if not members or any(m not in inventory for m in members):
         return {'success': False, 'error': 'Every member must be an exact inventoried correspondent'}
     # Referenced parties remain material; narrowing policy never hides them.

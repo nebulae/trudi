@@ -86,6 +86,29 @@ including inline stdout: inspect them before citing, and obtain a new independen
 review after changing citations. Empty/capped suggestions do not require new
 collection. Narrowing the claim remains available.
 
+An `in_progress` finding review is a checkpoint: repeat the unchanged submission
+to resume its requests and budget. Do not revise merely because an exchange ended.
+Synthesis likewise resumes while coverage is incomplete; only its finalized
+issues are actionable. Empty issues alone are not approval. A watchdog result
+with `operation_id` and `status: running` means the original work still owns the
+request: use `misc.operation_status` instead of starting a duplicate.
+
+DAIR `directives.required_work` names exact `tool` and `arguments` objects. A bare
+tool priority requires scope specification. Complete the named target or settle
+its exact work ID; another use of the same tool does not count. Request-scoped
+`execution_failed`, `dependency_unavailable`, `incompatible` and `parse_failed`
+dispositions document failure while leaving the obligation open. Failed scope
+can be settled as unavailable only with exhausted alternatives and a stated
+remaining limitation. Repeated failure is never evidence of absence.
+
+For explicitly scoped questions, use `misc.declare_questions` with stable IDs,
+question text and scope, then `misc.record_question_outcome` after the named work
+is settled. Supported, refuted and indeterminate outcomes all require evidence
+review; indeterminate also names the remaining uncertainty. A question ID's
+meaning cannot be changed. `misc.review_correspondent_scope` can review an
+enumerated group with a shared question/scope/rationale while preserving its
+inventory and exact identities. It cannot establish global absence.
+
 ## Finding capture — narration that states facts must carry findings
 
 `misc.record_agent_message` is for reasoning and direction, not facts. A

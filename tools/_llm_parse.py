@@ -231,6 +231,16 @@ def validate_result(result: dict, tool: str) -> str:
         return 'Review output was truncated; review is incomplete'
     raw = result.get('_raw', '')
     rb = result.get('result_block')
+    from core.evidence_requests import normalize_requests
+    from tools.reasoning import _find_evidence_request_span
+    span = _find_evidence_request_span(raw)
+    if span:
+        try:
+            normalize_requests(span[2])
+        except ValueError as exc:
+            return 'Invalid evidence_request: ' + str(exc)
+    elif re.search(r'\bEVIDENCE_REQUEST\b\s*\**\s*:', raw, re.I):
+        return 'Malformed EVIDENCE_REQUEST array'
     if rb is None:
         if result.get('evidence_requests') and 'RESULT:' not in raw:
             return ''
@@ -254,12 +264,13 @@ def validate_result(result: dict, tool: str) -> str:
     if type(rb.get('schema_version', 1)) is not int or rb.get('schema_version', 1) != 1:
         return 'Unsupported RESULT schema_version'
     req = rb.get('evidence_request')
-    if req:
-        if not isinstance(req, list) or any(not isinstance(r, dict) or
-                not isinstance(r.get('call_id'), int) or not isinstance(r.get('query', ''), str)
-                for r in req):
-            return 'Invalid evidence_request'
-        return ''
+    if req is not None:
+        try:
+            normalize_requests(req)
+        except ValueError as exc:
+            return 'Invalid evidence_request: ' + str(exc)
+        if req:
+            return ''
     if not isinstance(rb.get('rationale', ''), str):
         return 'rationale must be text'
     if tool == 'reason_synthesize':
