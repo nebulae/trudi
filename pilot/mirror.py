@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -101,6 +102,51 @@ def _finding_attrs(entry: dict) -> dict:
     return attrs
 
 
+# Vera keeps an action's output in the case file, so the mirror carries the
+# RETAINED output (the sidecar the trace persists), not the 600-char excerpt an
+# action row used to get — bounded, and explicit about any clip.
+MIRROR_OUTPUT_CHARS = int(os.environ.get("TRUDI_MIRROR_OUTPUT_CHARS") or "262144")
+
+
+def _action_output(entry: dict) -> str:
+    """The fullest retained output for a tool_call, within a size bound.
+
+    Prefers the persisted stdout sidecar over the excerpt. A clip is stated in
+    the text with the sidecar path, so the action never reads as complete
+    output when it is not.
+    """
+    excerpt = entry.get("stdout_excerpt", "") or ""
+    path = entry.get("stdout_path")
+    text = excerpt
+    if path:
+        try:
+            with open(path, errors="replace") as fh:
+                text = fh.read(MIRROR_OUTPUT_CHARS + 1)
+        except OSError:
+            text = excerpt
+    if len(text) > MIRROR_OUTPUT_CHARS:
+        total = entry.get("stdout_chars")
+        text = (text[:MIRROR_OUTPUT_CHARS].rstrip() +
+                f"\n… [clipped at {MIRROR_OUTPUT_CHARS} chars"
+                + (f" of {total}" if total else "") +
+                f"; full output retained at {path}]")
+    elif path and entry.get("truncated"):
+        text += f"\n… [tool output was truncated when captured; sidecar {path}]"
+    return text
+
+
+def _action_fields(entry: dict) -> dict:
+    """Typed columns vera already has: which tool ran, and what it produced."""
+    cmd = str(entry.get("cmd") or "")
+    tool = entry.get("mcp_tool") or ""
+    if not tool and cmd.startswith("<py>:"):
+        tool = cmd[len("<py>:"):].strip()
+    # Otherwise leave it to vera, which takes the command's first token. Passing
+    # our own would put a shell fragment ("P=/mnt/x;") in the tool column.
+    produced = entry.get("output_path") or ""
+    return {"tool": tool[:120], "produced": produced}
+
+
 def _mirror_evidence(case: Case, entry: dict, known_labels: set[str]) -> bool:
     """A verify_evidence_hash call is the custody record: one Evidence row."""
     cmd = entry.get("cmd", "")
@@ -144,13 +190,17 @@ def mirror_trace(trace_path: str, case_path: str, investigator: str = "") -> dic
                 if cid in actions:
                     continue
                 cmd = entry.get("cmd", "") or "<unknown>"
+                fields = _action_fields(entry)
                 notes = f"[trudi:cid {cid}]"
+                if fields["produced"]:
+                    notes += f" produced: {fields['produced']}"
                 if not entry.get("success", True):
                     stderr = (entry.get("stderr") or "")[:400]
                     notes += f" FAILED. {stderr}".rstrip()
                 aid = case.add_action(
                     command=cmd,
-                    output=entry.get("stdout_excerpt", "") or "",
+                    **({"tool": fields["tool"]} if fields["tool"] else {}),
+                    output=_action_output(entry),
                     exit_code=entry.get("exit_code"),
                     performed_at=entry.get("ts", ""),
                     notes=notes)
@@ -243,9 +293,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--follow", action="store_true",
                     help="keep tailing the trace after the initial pass")
     args = ap.parse_args(argv)
-    counts = mirror_trace(args.trace, args.case, args.investigator)
-    print(f"mirrored {args.trace} -> {args.case}: "
-          + ", ".join(f"{v} {k}" for k, v in counts.items()))
+    # --follow may start before the run does (a cleared case, or the mirror
+    # spawned at launch): wait for the trace instead of exiting.
+    if os.path.exists(args.trace):
+        counts = mirror_trace(args.trace, args.case, args.investigator)
+        print(f"mirrored {args.trace} -> {args.case}: "
+              + ", ".join(f"{v} {k}" for k, v in counts.items()))
+    elif not args.follow:
+        print(f"no trace at {args.trace}", file=sys.stderr)
+        return 1
+    else:
+        print(f"waiting for {args.trace}")
     if args.follow:
         follow(args.trace, args.case, args.investigator)
     return 0
