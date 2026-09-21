@@ -78,3 +78,49 @@ class TestParseResultBlock:
     def test_real_line_comments_still_stripped(self):
         raw = 'RESULT:\n{\n  "schema_version": 1, // note\n  "verdict": "SUPPORTED"\n}'
         assert LP.parse_result_block(raw)[0]["verdict"] == "SUPPORTED"
+
+
+class TestSalvageMissingClosers:
+    """Regression (VANKO run 5, 2026-09-21): a reviewer answer finished with
+    finish_reason=stop but its RESULT object was one closing brace short, then
+    a legacy EVIDENCE_REQUEST block followed. The format-repair retry repeated
+    the slip and a finding submission was lost. Only missing closers are
+    repaired; every other kind of damage stays malformed."""
+
+    def test_missing_final_brace_before_a_legacy_block(self):
+        raw = ('RESULT:\n{"schema_version": 1, "verdict": "UNVERIFIABLE", '
+               '"gaps": ["no cited row shows it"]\n\n'
+               'EVIDENCE_REQUEST:\n[{"call_id": 108, "query": "usb drive"}]')
+        obj, path = LP.parse_result_block(raw)
+        assert obj["verdict"] == "UNVERIFIABLE" and path == "result_json"
+        assert "missing closing" in obj["_repaired"]
+
+    def test_the_legacy_block_survives_stripping(self):
+        raw = ('RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED", "gaps": []\n\n'
+               'EVIDENCE_REQUEST:\n[{"call_id": 7, "query": "x"}]')
+        assert "EVIDENCE_REQUEST" in LP.strip_result_block(raw)
+
+    def test_nested_missing_closers_are_appended_in_order(self):
+        raw = 'RESULT:\n{"schema_version": 1, "directives": {"priority_tools": ["ez.evtxecmd"'
+        obj, _ = LP.parse_result_block(raw)
+        assert obj["directives"]["priority_tools"] == ["ez.evtxecmd"]
+
+    def test_cut_inside_a_string_is_not_salvaged(self):
+        raw = 'RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED", "rationale": "the log sho'
+        assert LP.parse_result_block(raw) == (None, "")
+
+    def test_trailing_comma_is_not_salvaged(self):
+        raw = 'RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED",'
+        assert LP.parse_result_block(raw) == (None, "")
+
+    def test_mismatched_bracket_is_not_salvaged(self):
+        raw = 'RESULT:\n{"schema_version": 1, "gaps": ["a"}'
+        assert LP.parse_result_block(raw) == (None, "")
+
+    def test_too_many_missing_closers_is_not_salvaged(self):
+        raw = 'RESULT:\n{"a": {"b": {"c": {"d": [1'
+        assert LP.parse_result_block(raw) == (None, "")
+
+    def test_a_well_formed_answer_is_never_marked_repaired(self):
+        obj, _ = LP.parse_result_block('RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED"}')
+        assert "_repaired" not in obj

@@ -129,11 +129,60 @@ def _find_result(text: str) -> tuple[int, int, int, int] | None:
     return best
 
 
+# A model sometimes finishes (finish_reason=stop) with a RESULT object that is
+# missing its final closing bracket(s), then emits a legacy block after it:
+#   RESULT:\n{... "gaps": ["x"]}\n\nEVIDENCE_REQUEST:\n[...]
+# The format-repair retry tends to repeat the same slip. When the damage is
+# ONLY missing closers — the scan ends outside a string, at a block boundary —
+# appending them is unambiguous. Anything else (cut mid-string, trailing comma,
+# deeper damage) is left as malformed.
+_BLOCK_LABEL_RE = re.compile(
+    r"\n\s*\**(?:EVIDENCE_REQUEST|DIRECTIVES|BLOCKERS|EVIDENCE_AUDIT|VERDICT)\**\s*:", re.IGNORECASE)
+_MAX_MISSING_CLOSERS = 3
+
+
+def _salvage_unclosed(text: str) -> tuple[int, int, dict] | None:
+    """(start, end, obj) for a headed RESULT object missing only its closers."""
+    for m in reversed(list(_RESULT_HEAD_RE.finditer(text or ""))):
+        if _balanced_object(text, m.end()) is not None:
+            continue
+        nxt = _BLOCK_LABEL_RE.search(text, m.end())
+        stop = nxt.start() if nxt else len(text)
+        segment = text[m.end():stop].rstrip()
+        segment = re.sub(r"\s*```\s*$", "", segment)
+        stack, in_str, esc = [], False, False
+        for c in segment:
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c in "{[":
+                stack.append("}" if c == "{" else "]")
+            elif c in "}]":
+                if not stack or stack.pop() != c:
+                    return None
+        if in_str or not stack or len(stack) > _MAX_MISSING_CLOSERS:
+            continue
+        obj = _load(segment + "".join(reversed(stack)))
+        if isinstance(obj, dict):
+            obj.setdefault("_repaired", f"appended {len(stack)} missing closing bracket(s)")
+            return m.start(), stop, obj
+    return None
+
+
 def find_result_span(text: str) -> tuple[int, int] | None:
     """(start, end) of the LAST well-formed RESULT block in `text`, header
     (or fence) included, or None."""
     found = _find_result(text)
-    return (found[0], found[3]) if found else None
+    if found:
+        return found[0], found[3]
+    salvaged = _salvage_unclosed(text)
+    return (salvaged[0], salvaged[1]) if salvaged else None
 
 
 def parse_result_block(text: str) -> tuple[dict | None, str]:
@@ -141,7 +190,8 @@ def parse_result_block(text: str) -> tuple[dict | None, str]:
     RESULT_JSON, or (None, '') when absent/malformed."""
     found = _find_result(text)
     if found is None:
-        return None, ""
+        salvaged = _salvage_unclosed(text)
+        return (salvaged[2], RESULT_JSON) if salvaged else (None, "")
     obj = _load(text[found[1]:found[2]])
     return (obj, RESULT_JSON) if isinstance(obj, dict) else (None, "")
 
