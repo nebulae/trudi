@@ -16,6 +16,9 @@ def case(tmp_path):
 
 
 def approve(log, limitations=None):
+    if log._current_phase != 'Report':
+        # report tools run only in the server-recorded Report phase
+        log.record_dair_call('Triage', '', True, 'Report', '', 'push', '')
     log.record_reason_call('reason_pre_report_check', True, 'READY_TO_REPORT: true', {},
                           extra={'ready_to_report': True,
                                  'readiness_fingerprint': state_fingerprint(log._entries, log._case_id),

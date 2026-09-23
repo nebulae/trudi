@@ -142,6 +142,21 @@ def ioc_tokens(ioc: dict) -> set:
     if ioc.get("ioc_type") == "device" and ":" in str(ioc.get("normalized") or ""):
         vid, pid = str(ioc["normalized"]).lower().split(":")
         toks |= {f"vid_{vid}&pid_{pid}", f"vid_{vid}", f"{vid}:{pid}"}
+    norm = str(ioc.get("normalized") or "").lower()
+    if ioc.get("ioc_type") == "url":
+        m = re.match(r"^[a-z][a-z0-9+.-]*://([^/:?#]+)", norm)
+        if m:
+            toks.add(m.group(1))
+    # Tools print host and domain names in part: NetBIOS-style short names
+    # (STARKRESEARCH for starkresearch.stark.local), bare second-level labels.
+    if ioc.get("ioc_type") == "hostname" and "." in norm:
+        label = norm.split(".", 1)[0]
+        if len(label) >= 4:
+            toks.add(label)
+    if ioc.get("ioc_type") == "domain" and norm.count(".") >= 1:
+        label = norm.split(".")[-2]
+        if len(label) >= 5:
+            toks.add(label)
     if ioc.get("ioc_type") in ("file_path", "scheduled_task", "registry_key"):
         leaf = str(ioc.get("normalized") or "").rsplit("\\", 1)[-1]
         if len(leaf) >= 4:
@@ -224,7 +239,46 @@ def _examined_for(views, spec: dict, tokens: set, reads: list) -> list:
     return hits
 
 
-def coverage(entries, platform: str = "Windows") -> dict:
+_PCAP_EXT = (".pcap", ".pcapng", ".cap")
+_MEM_EXT = (".vmem", ".mem", ".lime", ".dmp", ".raw", ".vmss", ".vmsn", ".mddramimage")
+
+
+def _evidence_kinds(entries, case_dir: str | None = None) -> set:
+    """Evidence KINDS the case holds ("pcap", "memory"): files under the case's
+    evidence/ directory, plus any evidence a trace command touched. A
+    component only a packet capture or a memory image can show is not open
+    work on a disk-only case."""
+    kinds: set = set()
+
+    def _see(name: str) -> None:
+        n = name.lower()
+        if n.endswith(_PCAP_EXT):
+            kinds.add("pcap")
+        elif n.endswith(_MEM_EXT) or "memory" in n and n.endswith((".bin", ".img")):
+            kinds.add("memory")
+    if case_dir is None:
+        try:
+            from core.execution_log import log
+            if log._path:
+                case_dir = os.path.dirname(os.path.dirname(os.path.abspath(log._path)))
+        except Exception:
+            case_dir = None
+    if case_dir and os.path.isdir(os.path.join(case_dir, "evidence")):
+        for _root, _dirs, files in os.walk(os.path.join(case_dir, "evidence")):
+            for f in files:
+                _see(f)
+            if len(kinds) == 2:
+                break
+    for e in entries or []:
+        if isinstance(e, dict) and e.get("type") == "tool_call" and e.get("success") is True:
+            if str(e.get("mcp_tool") or "").startswith("vol_"):
+                kinds.add("memory")
+            for tok in str(e.get("cmd") or "").split():
+                _see(tok.strip("'\""))
+    return kinds
+
+
+def coverage(entries, platform: str = "Windows", case_dir: str | None = None) -> dict:
     """Per IOC x technique x ATT&CK data component (for `platform`): covered
     when a mapped tool's data was examined for that IOC, dispositioned by a
     `coverage` disposition (technique:component, any IOC), or open.
@@ -237,6 +291,7 @@ def coverage(entries, platform: str = "Windows") -> dict:
     idx = index_from_entries(entries)
     reads = _reads(entries)
     views = _call_views(entries)
+    kinds = _evidence_kinds(entries, case_dir)
     items = []
     for ioc in ioc_state(entries).values():
         tokens = ioc_tokens(ioc)
@@ -248,8 +303,12 @@ def coverage(entries, platform: str = "Windows") -> dict:
                 spec = cmap.get(comp)
                 row = {"technique": tid, "technique_name": det["name"], "component": comp,
                        "iocs": [ioc["key"]]}
+                needs = spec.get("requires") if spec else None
                 if not spec:
                     row["status"] = "unmapped"
+                elif needs and needs not in kinds:
+                    row.update(status="not_applicable",
+                               reason=f"needs {needs} evidence; the case holds none")
                 else:
                     row["examine_with"] = spec.get("tools", [])
                     row["artifacts"] = spec.get("artifacts", "")
@@ -269,4 +328,5 @@ def coverage(entries, platform: str = "Windows") -> dict:
     open_items = [i for i in items if i["status"] == "open"]
     return {"platform": platform, "items": items, "open": open_items,
             "counts": {s: sum(1 for i in items if i["status"] == s)
-                       for s in ("covered", "dispositioned", "open", "unmapped", "advisory")}}
+                       for s in ("covered", "dispositioned", "open", "unmapped", "not_applicable",
+                                 "advisory")}}

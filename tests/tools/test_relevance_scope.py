@@ -19,7 +19,7 @@ from tools._gates._claims import normalize_claim
 def base_log(tmp_path):
     l = ExecutionLog()
     l.configure("REL-SCOPE", str(tmp_path / "trace.json"), save_session=False)
-    for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+    for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
         l.record_dair_call(cur, "", True, nxt, "", "push", "")
     l.record_dair_call("Analyze", "", False, "", "", "stay", "")
     l.record_reason_call("reason_plan", True, "plan", {})
@@ -44,6 +44,9 @@ def _roster(log, terms):
 
 def _pre(log):
     from tools.reasoning import reason_pre_report_check
+    if log._current_phase != "Report":
+        # a not-ready check returned the trace to Collect; DAIR brings it back
+        log.record_phase_transition("Report", "follow_up_done", trigger="test")
     with patch("core.execution_log.log", log):
         return reason_pre_report_check()
 

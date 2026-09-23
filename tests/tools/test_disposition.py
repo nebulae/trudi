@@ -207,7 +207,7 @@ class TestDispositionEvidenceRelevance:
         from unittest.mock import patch
         from tools.reasoning import reason_pre_report_check
         l = self._log(tmp_path)
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})

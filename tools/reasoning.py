@@ -1991,7 +1991,10 @@ _EVALUATE_SYS = (
     "field and value in the cited rows that holds it. Fetch rows with an "
     "EVIDENCE_REQUEST whenever the inventory does not already show them.\n"
     "2. CONTRADICTIONS — any cited row that contradicts a stated fact (a "
-    "different account, source address, time, path or count). Quote the row.\n"
+    "different account, source address, time, path or count). Quote the row. "
+    "A time that differs from the stated UTC time by a whole-hour offset matching "
+    "the host's time zone (local-time rendering by a tool) is the same moment, "
+    "not a contradiction.\n"
     "3. HALLUCINATION CHECK — flag any fact stated as evidence but not "
     "derivable from the cited rows: invented specificity (precise numbers or "
     "offsets without a cited source), fabricated mechanism ('VAD tag X proves "
@@ -2569,6 +2572,11 @@ def reason_evaluate_finding(
             for entry in reversed(recent):
                 t = entry.get("type")
                 if t == "reason_call" and entry.get("tool") == "reason_evaluate_finding":
+                    # A review that never produced a verdict (backend error,
+                    # malformed answer) was not a reformulation of the claim.
+                    if (not entry.get("success") or entry.get("schema_error")
+                            or entry.get("parse_path") == PARSE_NONE):
+                        continue
                     blob = entry.get("conclusion", "") + " " + str(entry.get("inputs", {}).get("user_message", ""))
                     ec = entry.get("claim")
                     same_claim = bool(claim_now) and isinstance(ec, dict) and _cm(claim_now, ec)
@@ -3091,6 +3099,26 @@ def reason_audit_findings(narration_window: int = 60,
 
 
 
+def report_phase_refusal(log, tool: str) -> dict | None:
+    """Refusal unless the SERVER-recorded phase is Report. The phase is owned by
+    the trace (dair transitions + recorded phase_transitions), not by what the
+    agent passes or what the last model answer echoed — a report written while
+    the trace sits in Analyze/Collect skipped the work that phase still owes."""
+    if not any(e.get("type") == "dair_call" for e in log._entries):
+        return {"success": False, "gate": "report_phase_required",
+                "error": (f"{tool} refused: No dair_assess call found in the execution "
+                          f"trace. Call dair_assess to establish phase state first.")}
+    phase = log._current_phase or ""
+    if phase == "Report":
+        return None
+    return {"success": False, "gate": "report_phase_required", "current_phase": phase,
+            "error": (f"{tool} refused: it is only callable in Report phase. Current "
+                      f"(server-recorded) DAIR phase: {phase or 'unknown'}. Finish that "
+                      f"phase's work order, then call dair_assess "
+                      f"(stack_action='pop' when the follow-up is done) until it moves the "
+                      f"investigation into Report.")}
+
+
 @mcp.tool()
 @with_tool_timeout(_REASON_WATCHDOG, label="reason_synthesize")
 def reason_synthesize(findings: str, investigation_summary: str = "",
@@ -3109,36 +3137,9 @@ def reason_synthesize(findings: str, investigation_summary: str = "",
     call returned current_phase="Report"; otherwise refused.
     """
     from core.execution_log import log
-    recent_dair = None
-    for e in reversed(log._entries):
-        if e.get("type") == "dair_call":
-            recent_dair = e
-            break
-    if recent_dair is None:
-        return {
-            "success": False,
-            "error": (
-                "No dair_assess call found in execution trace. Call dair_assess "
-                "to establish phase state before reason.synthesize."
-            ),
-        }
-    phase = recent_dair.get("current_phase", "")
-    # The DAIR transition INTO Report is the Report entry — via a PUSH
-    # (Analyze→Report as a new frame) OR a POP that resumes a parent Report
-    # frame already on the stack (a nested sub-phase resolving). Both enter
-    # Report; requiring one more dair_assess first only costs a refused call.
-    entering_report = (str(recent_dair.get("next_phase") or "") == "Report"
-                       and str(recent_dair.get("stack_action") or "") in ("push", "pop")
-                       and bool(recent_dair.get("transition_recommended")))
-    if phase != "Report" and not entering_report:
-        return {
-            "success": False,
-            "error": (
-                f"reason.synthesize is only callable in Report phase. Current "
-                f"DAIR phase: {phase or 'unknown'}. Continue the DAIR loop until "
-                f"dair_assess returns next_phase='Report'."
-            ),
-        }
+    refusal = report_phase_refusal(log, "reason.synthesize")
+    if refusal is not None:
+        return refusal
     prior_synth = _synthesizes_since_evidence(log._entries)
     synth_fingerprint = state_fingerprint(log._entries, log._case_id, include_synthesis=False,
                                           scope="claims")
@@ -3407,6 +3408,12 @@ def reason_pre_report_check() -> dict:
     """
     from core.execution_log import log
     from tools._readiness import assess_readiness
+    # With no dair_assess at all the readiness checks below already block
+    # (phase coverage); refuse here only a trace that is IN another phase.
+    if log._path and any(e.get("type") == "dair_call" for e in log._entries):
+        refusal = report_phase_refusal(log, "reason.pre_report_check")
+        if refusal is not None:
+            return {**refusal, "ready_to_report": False, "blocking_issues": [refusal["error"]]}
     with log.transaction():
         result = assess_readiness(log)
         fingerprint = state_fingerprint(log._entries, log._case_id)

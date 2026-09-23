@@ -1170,10 +1170,15 @@ def record_disposition(
                  destruction_scope → the finding call_id.
     reason:      absent_from_evidence | inapplicable | out_of_scope | noise |
                  excluded | not_a_principal | controller_unknown |
-                 evidence_unavailable | ruled_out | refuted | undetermined
+                 evidence_unavailable | ruled_out | refuted | undetermined |
+                 same_as | verified (challenge) | tool_unavailable (tool) |
+                 present_unparseable (source / coverage)
                  (each target_kind accepts a subset — the refusal lists it).
     evidence_call_ids: REQUIRED for excluded / ruled_out / refuted /
-                 not_a_principal — the evidence tool calls that establish it.
+                 not_a_principal / same_as / verified, and for
+                 absent_from_evidence or present_unparseable on a source or
+                 coverage row — the evidence tool calls that establish it
+                 (for "absent": the listing or search that shows it absent).
     window:      {start, end} ISO dates the disposition covers (device rule-outs).
     """
     from core.execution_log import log
@@ -1191,7 +1196,7 @@ def record_disposition(
     rs = reason.strip().lower()
     tk = target_kind.strip().lower()
     cids = sorted({int(c) for c in (evidence_call_ids or []) if c})
-    if rs in D.EVIDENCE_REQUIRED:
+    if D.evidence_required(tk, rs):
         bad = [c for c in cids if not is_evidence_tool_call(idx.by_call_id.get(c) or {})]
         if not cids or bad:
             return {"success": False, "gate": "typed_disposition",
@@ -1769,6 +1774,11 @@ def write_final_report(output_path: str, content: str) -> dict:
                 ),
             }
         return refusal
+    from core.execution_log import log as _plog
+    from tools.reasoning import report_phase_refusal
+    phase_refusal = report_phase_refusal(_plog, "write_final_report")
+    if phase_refusal is not None:
+        return phase_refusal
 
     assert_output_safe(output_path)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -1876,16 +1886,20 @@ def write_final_report(output_path: str, content: str) -> dict:
         if cc:
             sec.append(f"\nATT&CK detection coverage for these techniques: "
                        f"{cc.get('covered', 0)} data sources examined, "
-                       f"{cc.get('dispositioned', 0)} settled by disposition, "
-                       f"{cc.get('open', 0)} NOT examined, "
+                       f"{cc.get('open', 0) + cc.get('dispositioned', 0)} NOT examined "
+                       f"({cc.get('dispositioned', 0)} of them with a recorded reason), "
+                       f"{cc.get('not_applicable', 0)} needing evidence the case does not hold, "
                        f"{cc.get('unmapped', 0)} with no disk-forensic equivalent.")
-        if ioc_inv.get("open"):
+        not_examined = list(ioc_inv.get("open") or []) + list(ioc_inv.get("dispositioned") or [])
+        if not_examined:
             sec.append("\n### Detection sources not examined\n")
-            sec.append("| technique | data component | indicators | would be examined with |\n|---|---|---|---|")
-            for i in ioc_inv["open"]:
+            sec.append("| technique | data component | indicators | would be examined with | "
+                       "why not examined |\n|---|---|---|---|---|")
+            for i in not_examined:
                 sec.append(f"| {i.get('technique','')} {i.get('technique_name','')} | "
                            f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
-                           f"{', '.join((i.get('examine_with') or [])[:4])} |")
+                           f"{', '.join((i.get('examine_with') or [])[:4])} | "
+                           f"{('disposition: ' + str(i.get('disposition'))) if i.get('disposition') else 'open'} |")
         content = content.rstrip() + "\n".join(sec) + "\n"
     if unshown and "## details the reviewer could not see" not in content.lower():
         sec = ["\n\n## Details the reviewer could not see",

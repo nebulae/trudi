@@ -250,6 +250,25 @@ def sibling_match_counts(by_id: dict, entry: dict, terms: list, limit: int = 3) 
     return out
 
 
+def _dir_is_capped(tgt: str) -> bool:
+    """True when `tgt` is a directory holding more data files than the scan
+    cap takes — a miss over the kept subset is not absence (13,385 mail files
+    were scanned as 5 and reported COMPLETE, 2026-09-23)."""
+    import glob
+    try:
+        if not os.path.isdir(tgt):
+            return False
+        n = 0
+        for f in glob.iglob(os.path.join(tgt, "**", "*"), recursive=True):
+            if os.path.isfile(f) and f.lower().endswith(_OUTPUT_FILE_EXTS):
+                n += 1
+                if n > 5:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _candidate_output_files(tgt: str) -> list[str]:
     """Files behind one output target: a dir → its newest 5 data files; a file →
     itself; a prefix (--csvf names a file inside a sibling --csv dir) → glob."""
@@ -557,15 +576,16 @@ def entry_text_sources(entry: dict) -> list[TextSource]:
                               label=str(entry.get("tool") or "reason")))
         return out
     seen: set[str] = set()
-    op = entry.get("output_path")
-    if op:
-        for f in _candidate_output_files(str(op)):
-            if f not in seen:
-                seen.add(f); out.append(TextSource("file", path=f, label=os.path.basename(f)))
-    for tgt in _cmd_output_paths(entry.get("cmd") or ""):
+    targets = ([str(entry["output_path"])] if entry.get("output_path") else []) \
+        + _cmd_output_paths(entry.get("cmd") or "")
+    for tgt in targets:
+        capped = _dir_is_capped(tgt)
         for f in _candidate_output_files(tgt):
             if f not in seen:
-                seen.add(f); out.append(TextSource("file", path=f, label=os.path.basename(f)))
+                seen.add(f)
+                out.append(TextSource("file", path=f, complete=not capped,
+                                      label=os.path.basename(f) + (" (subset of a larger output directory)"
+                                                                   if capped else "")))
     sp = entry.get("stdout_path")
     if sp and os.path.isfile(sp):
         out.append(TextSource("stdout_sidecar", path=sp,

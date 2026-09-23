@@ -250,6 +250,7 @@ def test_csv_selection_retains_header_multiline_record_and_exact_byte_span(case,
     path = tmp_path / 'rows.csv'
     raw = b'name,detail\nalpha,"first line\nsecond line"\nbeta,other\n'
     path.write_bytes(raw)
+    cid = log.record_tool_call(f'ez.evtxecmd --csv {path}', True, False, 0, 0)
     log.annotate_tool_call(cid, output_path=str(path))
     req = make_request('Alpha record', 'SUSPECTED', [cid], {}, linked_call_id=cid)
     packet = build_packet(log, req)
@@ -328,6 +329,7 @@ def test_followup_fetch_uses_only_versioned_packet_sources(case, tmp_path):
     artifact.write_text('name\nAlpha\n')
     sidecar = tmp_path / 'invocation.txt'
     sidecar.write_text('SECRET banner only\n')
+    cid = log.record_tool_call(f'ez.evtxecmd --csv {artifact}', True, False, 0, 0)
     log.annotate_tool_call(cid, output_path=str(artifact), stdout_path=str(sidecar))
     packet = build_packet(log, request(cid))
     with patch('tools._output_reader.sibling_match_counts') as siblings:
@@ -376,3 +378,20 @@ def test_receipt_mismatch_names_the_differing_field(case):
                        supporting_evidence='Observed alpha record', techniques=['T1048'], **claim)
     assert not r['success'] and r.get('detail_gate') == 'review_receipt'
     assert 'claim.techniques' in r['error']
+
+
+def test_cited_read_is_reviewed_from_its_own_result_first(case, tmp_path):
+    # 2026-09-23: the reviewer was shown the first rows of the whole file a
+    # read.output had filtered, not the rows the read returned.
+    log, _ = case
+    artifact = tmp_path / 'rows.csv'
+    artifact.write_text('name\n' + ''.join(f'alpha noise {i}\n' for i in range(40))
+                        + 'alpha deciding row\n')
+    result = tmp_path / 'read_result.txt'
+    result.write_text('alpha deciding row\n')
+    cid = log.record_tool_call(f'read.output --output {artifact} query=deciding', True, False, 0, 0)
+    log.annotate_tool_call(cid, output_path=str(artifact), stdout_path=str(result))
+    packet = build_packet(log, request(cid))
+    kinds = [e['kind'] for e in packet['evidence']]
+    assert kinds[0] == 'read_result' and 'artifact_output' in kinds
+    assert packet['evidence'][0]['selections'][0]['spans'][0]['text'] == 'alpha deciding row\n'

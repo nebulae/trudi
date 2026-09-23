@@ -7,6 +7,10 @@ from core.paths import assert_output_safe
 
 mcp = FastMCP("sleuthkit")
 
+# sudo resets the environment, so the host's local zone would leak into
+# printed times (a reviewer then reads a 4-hour offset as a contradiction).
+_UTC = ["env", "TZ=UTC"]
+
 
 @mcp.tool()
 @output_safe
@@ -47,7 +51,7 @@ def tsk_fls(
     bodyfile: output in mactime bodyfile format for timeline creation.
     deleted_only: show only deleted entries.
     """
-    cmd = ["fls"]
+    cmd = _UTC + ["fls"]
     if recursive:
         cmd.append("-r")
     if bodyfile:
@@ -69,7 +73,7 @@ def tsk_istat(image: str, inode: int, offset_sectors: Optional[int] = None) -> d
     Display inode metadata: MAC times, size, allocated blocks, file type.
     offset_sectors: from mmls output.
     """
-    cmd = ["istat"]
+    cmd = _UTC + ["istat"]
     if offset_sectors:
         cmd += ["-o", str(offset_sectors)]
     cmd += [image, str(inode)]
@@ -120,7 +124,7 @@ def tsk_ils(
     unallocated_only: only unallocated inodes.
     allocated_only: only allocated inodes.
     """
-    cmd = ["ils"]
+    cmd = _UTC + ["ils"]
     if orphan_only:
         cmd.append("-p")
     elif unallocated_only:

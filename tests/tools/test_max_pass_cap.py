@@ -151,6 +151,7 @@ class TestGateAndPreReport:
         l.record_reason_call("reason_synthesize", True, "ok", {})
         l.record_dair_call("Triage", "", False, "", "", "stay", "",
                            verification_challenges=[_ch("acct created", "ez.evtxecmd")])
+        l.record_phase_transition("Report", "test", trigger="test")
         with patch("core.execution_log.log", l):
             r = reason_pre_report_check()
         assert any("verification challenge never run" in i for i in r["blocking_issues"])

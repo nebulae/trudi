@@ -8,6 +8,9 @@
 # e.g. an event-log parser only counts when it read the relevant channels or
 # the whole winevt\Logs directory.
 #
+# `requires` (optional): pcap | memory — the component can only be shown by
+# that evidence kind; on a case without it the row is `not_applicable`.
+#
 # Components absent from this map (directory services, cloud, network sensors)
 # are reported as `unmapped`, never as open work.
 
@@ -17,13 +20,17 @@ components:
     tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt, ez_pecmd,
             ez_amcacheparser, ez_appcompatcacheparser, ez_recmd_hive, ez_recmd_batch, misc_regripper_hive]
   Command Execution:
-    artifacts: PowerShell 4103/4104, PowerShell/Operational, ConsoleHost_history.txt, Security 4688 command line
-    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt]
-    where: [powershell, security, winevt, logs]
+    artifacts: PowerShell 4103/4104, PowerShell/Operational, ConsoleHost_history.txt, Security 4688 command line, Prefetch
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt, ez_pecmd,
+            strings_grep, strings_extract, tsk_icat, vol_cmdline, vol_consoles, vol_cmdscanner]
+    where: [powershell, security, winevt, logs, consolehost_history]
+    where_applies_to: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt,
+                       strings_grep, strings_extract, tsk_icat]
   Script Execution:
-    artifacts: PowerShell 4104 script blocks, PowerShell/Operational
-    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt]
-    where: [powershell, winevt, logs]
+    artifacts: PowerShell 4104 script blocks, PowerShell/Operational, ConsoleHost_history.txt
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt, strings_grep,
+            strings_extract, tsk_icat]
+    where: [powershell, winevt, logs, consolehost_history]
   File Creation:
     artifacts: $MFT, $UsnJrnl:$J, directory listings
     tools: [ez_mftecmd, ez_mftecmd_dir, misc_usnparser_parse, misc_analyzemft_parse, tsk_fls]
@@ -44,10 +51,12 @@ components:
     tools: [ez_evtxecmd, misc_evtx_filter, misc_hindsight_chrome, vol_netscan, vol_netstat,
             net_tcpdump_list_connections]
   Network Traffic Flow:
-    artifacts: PCAP flows, firewall log
+    artifacts: PCAP flows
+    requires: pcap
     tools: [net_tcpdump_list_connections, net_tcpdump_read, net_pcap_identity_timeline]
   Network Traffic Content:
     artifacts: PCAP payloads, HTTP sessions
+    requires: pcap
     tools: [net_http_session_inventory, net_tcpdump_extract_http, net_ngrep_search, net_tcpxtract_streams]
   Module Load:
     artifacts: Sysmon 7, memory module lists
@@ -139,6 +148,7 @@ components:
     tools: [ez_evtxecmd, vol_malfind, vol_hollowprocesses]
   OS API Execution:
     artifacts: memory image (API hooks, injected code)
+    requires: memory
     tools: [vol_malfind, vol_hollowprocesses, vol_unhooked_system_calls]
   Firewall Rule Modification:
     artifacts: SYSTEM\...\FirewallPolicy, Firewall With Advanced Security log

@@ -1306,7 +1306,11 @@ def assess_readiness(log, include_synthesis=True):
         if _iocs:
             _cov = _ioc_coverage(entries)
             ioc_inventory = {"iocs": _iocs, "coverage_counts": _cov["counts"],
-                             "open": _cov["open"][:60]}
+                             "open": _cov["open"][:60],
+                             # settled without being examined — the report
+                             # still lists them as not examined, with the reason
+                             "dispositioned": [i for i in _cov["items"]
+                                               if i["status"] == "dispositioned"][:60]}
             if _cov["open"]:
                 _shown = "; ".join(f"{i['technique']}/{i['component']}" for i in _cov["open"][:8])
                 warnings.append(

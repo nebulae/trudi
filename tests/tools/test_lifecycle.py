@@ -64,7 +64,7 @@ class TestCoverageModel:
 class TestPreReportAdvisory:
     def _log(self, tmp_path, extra_entries=()):
         l = ExecutionLog(); l.configure("LC", str(tmp_path / "t.json"), save_session=False)
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         l.record_reason_call("reason_plan", True, "p", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
@@ -103,7 +103,7 @@ class TestReportTable:
         from tools.reasoning import reason_pre_report_check
         from tools.misc import write_final_report
         l = ExecutionLog(); l.configure("LCR", str(tmp_path / "t.json"), save_session=False)
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         l.record_reason_call("reason_plan", True, "p", {})
         l.record_reason_call("reason_hypothesize", True, "h", {})

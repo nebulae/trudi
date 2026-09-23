@@ -382,9 +382,9 @@ class TestSynthesizeGate:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        l.record_dair_call("Collect", "", False, "", "", "stay", "")
-        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        # the phase is the server's record of transitions, not the model's echo
+        l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
+        l.record_dair_call("Collect", "", True, "Report", "", "push", "")
         with patch("core.execution_log.log", l), \
              patch("httpx.post", return_value=_http_resp("ok\nBLOCKERS: []")), \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
@@ -660,7 +660,7 @@ class TestReasonPreReportCheck:
         # K-1 phase coverage: these tests exercise the OTHER pre-report checks;
         # give the trace a transited Collect/Analyze history so the (separately
         # tested) phase_coverage blocker stays out of the way.
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         return l
 
@@ -1594,7 +1594,8 @@ class TestPreReportStructuralIntegrity:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-STRUCT", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         l.record_reason_call("reason_hypothesize", True, "hyp", {})
@@ -1688,7 +1689,8 @@ class TestPreReportHypothesisLedger:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-HYP", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         return l
@@ -1788,7 +1790,8 @@ class TestPreReportAttributionClosure:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-CLOSURE", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         l.record_reason_call("reason_hypothesize", True, "hyp", {})
@@ -1955,7 +1958,8 @@ class TestPreReportHypothesisExhaustion:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-EXHAUST", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         # J-3 relevance model: a principal only the REVIEWER listed is
@@ -2036,6 +2040,8 @@ class TestPreReportHypothesisExhaustion:
         base_log.record_finding("Guest logged on interactively", "SUSPECTED", "ez.evtxecmd",
                                 claim=_normc(claim_kind="positive", category="logon_auth", act="logon",
                                              entities=["Guest"]))
+        # a not-ready check returns the trace to Collect; DAIR brings it back
+        base_log.record_phase_transition("Report", "follow_up_done", trigger="test")
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert any("guest" in i for i in r["blocking_issues"])
@@ -2122,7 +2128,7 @@ class TestPreReportHypothesisExhaustion:
         with patch("core.execution_log.log", base_log):
             r = R.reason_synthesize("F1 …")
         assert r["success"] is True and r["blockers"] == [] and r["tier_blockers_demoted"]
-        base_log.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        base_log.record_phase_transition("Collect", "report_follow_up", trigger="test")
         with patch("core.execution_log.log", base_log):
             r = R.reason_synthesize("F1 …")
         assert r["success"] is False and "only callable in Report" in r["error"]
@@ -2161,6 +2167,7 @@ class TestPreReportHypothesisExhaustion:
             r = reason_pre_report_check()
         assert any("helpsvc" in i for i in r["blocking_issues"])        # park alone: still blocks
         base_log.record_disposition("source", "security_logon", "absent_from_evidence")
+        base_log.record_phase_transition("Report", "follow_up_done", trigger="test")
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert not any("helpsvc" in i for i in r["blocking_issues"])

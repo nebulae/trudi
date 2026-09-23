@@ -77,8 +77,15 @@ def request_identity(request):
     return digest(request)
 
 
-def _selection(raw, query, selector, budget, path=''):
+def _selection(raw, query, selector, budget, path='', weights=None, row_limit=None):
+    """Select rows to show the reviewer. Without byte selectors, the rows that
+    match the most distinct terms (claim identifiers weigh more than words from
+    the description) are kept — not merely the first K matches in file order,
+    which surfaced incidental rows ahead of the deciding one (2026-09-23)."""
+    import heapq
     from tools.reasoning import COMPAT_PUSH_ROWS_PER_CID
+    limit = COMPAT_PUSH_ROWS_PER_CID if row_limit is None else row_limit
+    weights = weights or {}
     start, end = selector.get('start_byte', 0), selector.get('end_byte', len(raw))
     if type(start) is not int or type(end) is not int or not 0 <= start <= end <= len(raw):
         raise PacketError('Byte selectors must lie within the retained output')
@@ -118,13 +125,30 @@ def _selection(raw, query, selector, budget, path=''):
                 stop = offset + len(line)
                 yield offset, stop, line.decode('utf-8', errors='replace')
                 offset = stop
+    ranked = []                     # min-heap of (score, -row, span) — top `limit` by score
     for begin, stop, body in records():
         scanned += 1
-        if not terms or any(t in body.lower() for t in terms):
-            matches += 1
-            if used + len(body) <= budget and (explicit or len(spans) < COMPAT_PUSH_ROWS_PER_CID):
-                spans.append({'start_byte': begin, 'end_byte': stop, 'row_number': scanned, 'text': body})
+        low = body.lower()
+        hit = [t for t in terms if t in low] if terms else []
+        if terms and not hit:
+            continue
+        matches += 1
+        span = {'start_byte': begin, 'end_byte': stop, 'row_number': scanned, 'text': body}
+        if explicit or not terms:
+            if used + len(body) <= budget and (explicit or len(spans) < limit):
+                spans.append(span)
                 used += len(body)
+            continue
+        score = sum(weights.get(t, 1) for t in set(hit))
+        item = (score, -scanned, span)
+        if len(ranked) < limit:
+            heapq.heappush(ranked, item)
+        elif item > ranked[0]:
+            heapq.heapreplace(ranked, item)
+    for _, _, span in sorted(ranked, key=lambda x: x[2]['row_number']):
+        if used + len(span['text']) <= budget:
+            spans.append(span)
+            used += len(span['text'])
     return {'selectors': {'start_byte': start, 'end_byte': end, 'query_terms': terms},
             'columns': columns, 'spans': spans, 'scanned_rows': scanned,
             'matched_lines': matches, 'shown_lines': len(spans),
@@ -156,7 +180,9 @@ def build_packet(log, request, selectors=None):
     claim = request.get('claim') or {}
     identifiers = [*(claim.get('entities') or []), *(claim.get('recipients') or []),
                    claim.get('principal', ''), claim.get('actor', '')]
-    terms = sorted(set(terms + [str(v).lower() for v in identifiers if str(v).strip()]))
+    ident_terms = {str(v).lower() for v in identifiers if str(v).strip()}
+    terms = sorted(set(terms) | ident_terms)
+    weights = {t: 3 for t in ident_terms}
     evidence, contexts, identities, watches = [], [], {}, {}
     remaining = MAX_PACKET_CHARS
     scanned_bytes = 0
@@ -179,11 +205,20 @@ def build_packet(log, request, selectors=None):
                 raise PacketError(f'Hashed source changed after call {cid}; hash it again', 'needs-evidence')
             watches[hashed_path] = version
         sources = entry_text_sources(entry)
+        # A cited read.output / read.mail is reviewed from its OWN result — the
+        # rows its query/where returned — not re-selected from the underlying
+        # file with the finding's general terms (which showed unrelated rows
+        # and failed a finding whose deciding rows the read had returned).
+        is_read = (str(entry.get('mcp_tool') or '') in ('read_output', 'read_mail')
+                   or str(entry.get('cmd') or '').startswith(('read.output', 'read.mail')))
+        read_result = [s for s in sources if s.kind == 'stdout_sidecar'] if is_read else []
         has_artifact = any(s.kind == 'file' for s in sources)
         if not has_artifact and (entry.get('output_path') or _cmd_output_paths(entry.get('cmd') or '')):
             raise PacketError(f'Call {cid} has only an invocation log; its artifact output is unavailable', 'needs-evidence')
         if has_artifact:
-            sources = [s for s in sources if s.kind == 'file']
+            # The read's own result first (the rows it returned), then the
+            # file it read — still checked for authorship and version-watched.
+            sources = read_result + [s for s in sources if s.kind == 'file']
         elif any(s.kind == 'stdout_sidecar' for s in sources):
             sources = [s for s in sources if s.kind == 'stdout_sidecar']
         # Discovery may return only a subset of an output directory. Never
@@ -236,7 +271,11 @@ def build_packet(log, request, selectors=None):
                 continue
             selections = []
             for i, sel in selected or [(-1, {})]:
-                result = _selection(raw, terms, sel, max(0, remaining), path)
+                if is_read and source.kind == 'stdout_sidecar' and not sel:
+                    # The read already filtered: show its rows, up to the budget.
+                    result = _selection(raw, [], sel, max(0, remaining), path, row_limit=400)
+                else:
+                    result = _selection(raw, terms, sel, max(0, remaining), path, weights=weights)
                 remaining -= result.pop('selected_chars')
                 selections.append(result)
                 if i >= 0:
@@ -247,7 +286,9 @@ def build_packet(log, request, selectors=None):
                 retained_complete = retained_complete and not bool(entry.get('truncated'))
                 if not raw and entry.get('stdout_chars') is None:
                     retained_complete = False
-            evidence.append({'call_id': cid, 'kind': 'artifact_output' if has_artifact else 'tool_stdout',
+            kind = ('read_result' if is_read and source.kind == 'stdout_sidecar'
+                    else 'artifact_output' if has_artifact else 'tool_stdout')
+            evidence.append({'call_id': cid, 'kind': kind,
                              'path': path or None, 'output_sha256': hashlib.sha256(raw).hexdigest(),
                              'output_bytes': len(raw), 'retained_output_complete': retained_complete,
                              'scan_truncated': scan_truncated,

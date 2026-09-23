@@ -9,7 +9,7 @@ from tools._gates._scheduled_tasks import TASK_ENUM_RE, INJECTOR_PAYLOAD_RE, tas
 
 def _log(tmp_path, name="N"):
     l = ExecutionLog(); l.configure(name, str(tmp_path / "t.json"), save_session=False)
-    for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+    for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
         l.record_dair_call(cur, "", True, nxt, "", "push", "")
     return l
 
@@ -252,7 +252,7 @@ class TestA8CompetingRecipient:
 
     def _log_cq(self, tmp_path):
         l = ExecutionLog(); l.configure("A8", str(tmp_path / "t.json"), save_session=False)
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "", case_question="who received it?")
         return l
 
