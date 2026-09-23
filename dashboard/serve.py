@@ -42,7 +42,10 @@ DASHBOARD_SRC = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD_PREFIX = "/_dashboard/"
 API_PREFIX = "/_dashboard/api/"
 TRACE_RE = re.compile(r".*_trace\.json$", re.IGNORECASE)
-DISCOVERY_FILE = os.path.expanduser("~/.cache/trudi/dashboard.url")
+# Mirrors core.paths.trudi_cache_dir() (this script runs standalone).
+DISCOVERY_FILE = os.path.join(
+    os.path.expanduser(os.environ.get("TRUDI_CACHE_DIR") or "~/.cache/trudi"),
+    "dashboard.url")
 
 
 def _detect_case_id(case_dir: str) -> str | None:

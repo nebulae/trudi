@@ -1722,3 +1722,41 @@ class TestTypedTierAndCiteVerdict:
                              inputs={"user_message": f"FINDING:\n{desc}"},
                              extra={"cite_verdict": "ALL_CITED"})
         assert cc.check(self._ctx(l, desc, "LIKELY")) is None
+
+
+def test_clear_case_run_clears_hidden_entries_and_spares_evidence(tmp_path, monkeypatch):
+    """Hidden sidecars/locks in the output dirs are cleared (a stale
+    analysis/.tool_output/<cid>.txt would be read by the next run under a
+    reused call id); evidence/, CLAUDE.md and .claude/ are never touched."""
+    from tools.misc import clear_case_run
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "session.json").write_text("{}")
+    monkeypatch.setenv("TRUDI_CACHE_DIR", str(cache))
+    case = tmp_path / "case"
+    sidecars = case / "analysis" / ".tool_output"
+    sidecars.mkdir(parents=True)
+    (sidecars / "42.txt").write_text("previous run")
+    (case / "analysis" / ".FR-abc.lock").write_text("")
+    (case / "analysis" / ".synthesis-x.lock").write_text("")
+    (case / "analysis" / "CASE_trace.json").write_text("{}")
+    (case / "exports").mkdir()
+    (case / "exports" / ".hidden.csv").write_text("x")
+    (case / "reports").mkdir()
+    (case / "reports" / "CASE.md").write_text("x")
+    (case / "evidence").mkdir()
+    (case / "evidence" / "disk.E01").write_bytes(b"\x00")
+    (case / "CLAUDE.md").write_text("case")
+    (case / ".claude").mkdir()
+    (case / ".claude" / "settings.json").write_text("{}")
+
+    r = clear_case_run(str(case))
+
+    assert r["success"], r
+    for sub in ("analysis", "exports", "reports"):
+        assert (case / sub).is_dir()
+        assert os.listdir(case / sub) == []
+    assert (case / "evidence" / "disk.E01").exists()
+    assert (case / "CLAUDE.md").exists()
+    assert (case / ".claude" / "settings.json").exists()
+    assert not (cache / "session.json").exists()

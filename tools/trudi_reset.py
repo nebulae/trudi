@@ -35,7 +35,9 @@ import shutil
 import sys
 from pathlib import Path
 
-_CACHE_DIR = os.path.expanduser("~/.cache/trudi")
+from core.paths import trudi_cache_dir
+
+_CACHE_DIR = trudi_cache_dir()
 _LOCK_FILE = os.path.join(_CACHE_DIR, "hook.lock")
 _COUNTER_FILE = os.path.join(_CACHE_DIR, "call_id.counter")
 _SESSION_FILE = os.path.join(_CACHE_DIR, "session.json")
