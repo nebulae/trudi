@@ -113,6 +113,11 @@ def launch(case_dir: str, client: str, mode: str, mirror: bool = False) -> int:
     if mirror:
         spawn_mirror(case_dir)
     os.chdir(case_dir)
+    # The MCP connect timeout is read from the client's environment at startup.
+    # A cold server start took 30.14 s against the 30,000 ms default (run 8,
+    # 2026-09-22) and the client treated the server as gone.
+    os.environ.setdefault("MCP_TIMEOUT", "120000")
+    os.environ.setdefault("MCP_TOOL_TIMEOUT", "1800000")
     print(f"launching {client} ({mode} mode) in {case_dir}")
     sys.stdout.flush()  # execv replaces the process — unflushed output is lost
     os.execv(binary, client_argv(client, mode))  # replaces this process

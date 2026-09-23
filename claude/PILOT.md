@@ -111,6 +111,23 @@ key. Separate evaluate/record remains available when the analyst wants to see
 the review before authorizing the write; keep the description, full typed claim,
 evidence IDs and supersedes target identical between those calls.
 
+## Concluding, blockers and interruptions
+
+The TRUDI report is the deliverable; vera is a mirror of the trace, never a
+substitute for it. Do not describe the investigation as complete, finished or
+fully recorded while `reason.pre_report_check` returns `ready_to_report: false`.
+When it lists blockers, for each one either do the work (parse the store,
+examine the flagged artifact, drive the principal to a verdict) or record the
+typed disposition with its evidence — and if a blocker is disputed (a spurious
+correspondent, a phase the server itself advanced), say so and ask the analyst
+rather than concluding around it. A prose summary in chat or a vera note does
+not close a case.
+
+If the `trudi-sift` server disconnects mid-loop, do not end the turn. Wait,
+call `dair_assess` with the resumption summary once tools return, and continue;
+if tools stay unavailable, say exactly that and stop — never declare the
+investigation complete because the tooling went away.
+
 ## Coaching
 
 When a gate refuses something, translate the refusal into plain language
