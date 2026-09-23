@@ -365,6 +365,18 @@ class TestPartialSources:
             [{"call_id": cid, "query": "FOUND", "columns": []}], [cid], 4000)
         assert "source COMPLETE" in block and recs[0]["status"] == "ok"
 
+    def test_unlocatable_output_is_not_absence(self, pull_env, tmp_path):
+        # VANKO-2016-DEEPSEEK41 2026-09-19: an LECmd call whose CSV could not be
+        # located (empty excerpt, no file) answered "0 rows scanned; source
+        # COMPLETE", and synthesis read that as the LNK rows being absent.
+        log = pull_env["log"]
+        cid = log.record_tool_call(f"dotnet LECmd.dll -d /in --csv {tmp_path / 'gone'}",
+                                   True, False, 0, 0, stdout_excerpt="")
+        block, recs = R._resolve_evidence_requests(
+            [{"call_id": cid, "query": "vacation photos", "columns": []}], [cid], 4000)
+        assert "source COMPLETE" not in block and "absence NOT established" in block
+        assert recs[0]["status"] == "no_sources" and recs[0]["source_complete"] is False
+
     def test_sidecar_is_fetched_past_the_excerpt(self, pull_env):
         # E-01 sidecar: the FOUND line sits after 600 chars of OK lines.
         body = "\n".join(f"/x/COMMANDS/file{i:02d}.exe: OK" for i in range(40))

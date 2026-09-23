@@ -799,6 +799,34 @@ def _pre_report_ready_gate() -> dict | None:
 
 @mcp.tool()
 @output_safe
+def _code_identity() -> str:
+    """Which server code is running: git commit, dirty flag, and a digest of
+    core/ + tools/ as they were when this server process imported them. Edits
+    landing on disk mid-run do not change the loaded code, so the trace must
+    say what was loaded, not what is on disk now."""
+    import hashlib
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    h = hashlib.sha256()
+    for p in sorted([*root.glob("core/**/*.py"), *root.glob("tools/**/*.py")]):
+        h.update(str(p.relative_to(root)).encode())
+        h.update(p.read_bytes())
+    def git(*args):
+        try:
+            return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        except Exception:
+            return ""
+    dirty = " dirty" if git("status", "--porcelain", "--", "core", "tools") else ""
+    return (f"commit {git('rev-parse', '--short', 'HEAD') or '?'} "
+            f"branch {git('rev-parse', '--abbrev-ref', 'HEAD') or '?'}{dirty} "
+            f"code_sha256 {h.hexdigest()[:16]}")
+
+
+_CODE_IDENTITY = _code_identity()
+
+
 def start_execution_log(case_id: str, output_path: str,
                         launch_dashboard: bool = True,
                         case_dir: str = "",
@@ -839,6 +867,7 @@ def start_execution_log(case_id: str, output_path: str,
         recovered = log.configure(case_id, output_path)
         log.record_system_error("trace_initialized",
                                 f"trace path {output_path}")
+        log.record_run_profile(_CODE_IDENTITY)
     except Exception as e:
         return {
             "success": False,

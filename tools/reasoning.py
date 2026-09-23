@@ -1589,7 +1589,21 @@ def _resolve_evidence_requests(requests: list[dict], input_call_ids, budget_char
         src_complete = all(x.complete for x in file_srcs) if file_srcs else True
         if not file_srcs:
             src = next((x for x in srcs if x.kind in ("stdout_excerpt", "conclusion")), None)
-            text = src.text if src else ""
+            from tools._output_reader import _cmd_output_paths
+            if src is None or (not (src.text or "").strip() and _cmd_output_paths(e.get("cmd") or "")):
+                # Nothing was searched: no artifact file or sidecar is reachable,
+                # and either no text is stored or the tool wrote its real output
+                # to a file that cannot be located (empty stdout from a --csv run
+                # says nothing; empty stdout from `strings` is a genuine result).
+                # Reporting "0 rows; source COMPLETE"
+                # here read as absence and contradicted supported findings
+                # (VANKO-2016-DEEPSEEK41, 2026-09-19).
+                rec.update(status="no_sources", source_complete=False)
+                blocks.append(f"[call {cid}: no retained output could be located for this "
+                              f"call — nothing was searched; absence NOT established. "
+                              f"Request another cited call that holds these rows]")
+                recs.append(rec); continue
+            text = src.text
             src_complete = bool(src.complete) if src else True
             hits = [ln for ln in text.splitlines() if any(t in ln.lower() for t in terms)]
             scanned_total = len(text.splitlines())

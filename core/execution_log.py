@@ -1067,6 +1067,17 @@ class ExecutionLog:
                 f"of the investigation before any forensic tools."
             )
 
+    def record_run_profile(self, code_identity: str) -> int:
+        """Which server code produced this trace (commit, dirty flag, digest of
+        the loaded core/ + tools/). One entry per start_execution_log."""
+        with self._lock:
+            if self._path is None:
+                return 0
+            cid = self._next_id()
+            self._append_entry({"call_id": cid, "type": "run_profile", "ts": _utcnow(),
+                                "code_identity": code_identity})
+            return cid
+
     def record_system_error(
         self,
         category: str,
