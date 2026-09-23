@@ -48,8 +48,8 @@ components:
     tools: [ez_mftecmd, tsk_istat, strings_file_identify, strings_exiftool_metadata, misc_pe_scanner]
   Network Connection Creation:
     artifacts: Sysmon 3, firewall log, SRUM network usage, browser history, memory sockets
-    tools: [ez_evtxecmd, misc_evtx_filter, misc_hindsight_chrome, vol_netscan, vol_netstat,
-            net_tcpdump_list_connections]
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_hindsight_chrome, misc_srum_export, vol_netscan,
+            vol_netstat, net_tcpdump_list_connections]
   Network Traffic Flow:
     artifacts: PCAP flows
     requires: pcap

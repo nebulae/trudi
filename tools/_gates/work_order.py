@@ -264,8 +264,9 @@ def unretried_blocks(entries) -> list:
                 f"replaced, or dispositioned — a failed capability is an audit "
                 f"obligation, not a dead end. Retry it, run a named fallback and "
                 f"record why, or misc.record_disposition(target_kind=\"tool\", "
-                f"target_id=\"{_display(tool)}\", reason=\"inapplicable\"|"
-                f"\"absent_from_evidence\") before Report."
+                f"target_id=\"{_display(tool)}\", reason=\"tool_unavailable\" (not "
+                f"installed / cannot run here)|\"inapplicable\"|\"absent_from_evidence\") "
+                f"before Report."
             )
             continue
         if not retried and not waived:
