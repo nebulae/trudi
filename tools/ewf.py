@@ -41,6 +41,13 @@ def ewf_umount(mount_point: str) -> dict:
     return run(["umount", mount_point], needs_sudo=True)
 
 
+_LOWNTFS = "/usr/bin/lowntfs-3g"
+
+
+def _lowntfs_available() -> bool:
+    return os.path.exists(_LOWNTFS)
+
+
 def _mount_ntfs_ro(ewf_device: str, mount_point: str, offset_bytes: int) -> dict:
     """Read-only NTFS mount, robust to hosts with no in-kernel NTFS driver.
 
@@ -49,19 +56,45 @@ def _mount_ntfs_ro(ewf_device: str, mount_point: str, offset_bytes: int) -> dict
     "wrong fs type, bad option, bad superblock". Also, on hosts whose kernel has
     no NTFS module (e.g. WSL2), ``mount`` without ``-t`` cannot auto-detect and
     fails the same way — so we retry with an explicit ``-t ntfs-3g``.
+
+    Windows paths are case-insensitive but ntfs-3g is not: a lookup of
+    Windows/AppCompat/Programs/Amcache.hve misses the on-disk
+    ``Windows/appcompat`` and reads as "Amcache absent". lowntfs-3g with
+    ``ignore_case`` is tried first when installed; the case-sensitive chain
+    below remains the fallback.
     """
     options = f"ro,loop,norecover,offset={offset_bytes}"
+    low = None
+    if _lowntfs_available():
+        low = run(["mount", "-t", "lowntfs-3g", "-o", options + ",ignore_case",
+                   ewf_device, mount_point], needs_sudo=True)
+        if low["success"]:
+            low["case_insensitive"] = True
+            return low
     first = run(["mount", "-o", options, ewf_device, mount_point], needs_sudo=True)
     if first["success"]:
-        return first
+        return _case_sensitive(first, low)
     second = run(
         ["mount", "-t", "ntfs-3g", "-o", options, ewf_device, mount_point],
         needs_sudo=True,
     )
     if second["success"]:
-        return second
+        return _case_sensitive(second, low)
     second["first_attempt_stderr"] = first.get("stderr", "")
-    return second
+    return _case_sensitive(second, low)
+
+
+def _case_sensitive(result: dict, low: Optional[dict]) -> dict:
+    """Mark a fallback mount case-sensitive so a path miss is not read as absence."""
+    result["case_insensitive"] = False
+    if low is not None:
+        result["lowntfs_attempt_stderr"] = low.get("stderr", "")
+    if result.get("success"):
+        result["path_case_note"] = ("Mounted case-SENSITIVE: a Windows path that is not "
+                                    "found may exist with different case (e.g. "
+                                    "Windows/appcompat) — list the parent directory "
+                                    "before concluding it is absent.")
+    return result
 
 
 @mcp.tool()

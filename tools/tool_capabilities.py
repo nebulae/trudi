@@ -8,6 +8,7 @@ priority_tools should come from these known, phase-appropriate capabilities.
 from __future__ import annotations
 
 import copy
+import shutil
 
 
 MANIFEST_VERSION = "2026-09-19.1"
@@ -79,6 +80,7 @@ _CAPABILITIES: list[dict] = [
             "ez.jlecmd",
             "ez.lecmd",
             "ez.pecmd",
+            "misc.srum_export",
             "misc.usnparser_parse",
             "plaso.create_timeline",
             "plaso.export_csv",
@@ -260,6 +262,60 @@ _SUBSTITUTIONS: list[dict] = [
 ]
 
 
+# Wrappers that shell out to an OPTIONAL binary (not on every SIFT build).
+# tool id -> (candidate names/paths — any one present = installed, install hint).
+# A tool whose binary is missing fails fast with a typed `tool_unavailable`
+# result and is left out of the manifest, so DAIR never prescribes it.
+_OPTIONAL_BINARIES: dict[str, tuple[tuple[str, ...], str]] = {
+    "misc.chainsaw_hunt": (("chainsaw",), "see install.sh for the binary release "
+                                         "(github.com/WithSecureLabs/chainsaw)"),
+    "misc.capa_analyze": (("capa",), "pip install flare-capa"),
+    "strings.floss_extract": (("floss",), "pip install flare-floss"),
+    "misc.olevba_scan": (("olevba", "olevba3"), "pip install oletools"),
+    "misc.mraptor_scan": (("mraptor", "mraptor3"), "pip install oletools"),
+    "misc.densityscout_scan": (("densityscout", "/usr/local/bin/densityscout"),
+                               "install densityscout (cert.at) to /usr/local/bin"),
+    "misc.hindsight_chrome": (("/usr/local/bin/hindsight.py",), "pip install pyhindsight"),
+    "misc.usnparser_parse": (("/usr/local/bin/usnparser",), "install usnparser to /usr/local/bin"),
+    "misc.pff_export": (("pffexport",), "apt install pff-tools"),
+    "misc.readpst_extract": (("readpst",), "sudo apt install pst-utils"),
+    "misc.srum_export": (("esedbexport",), "apt install libesedb-utils"),
+}
+
+
+def optional_binary(tool_id: str, which=None) -> str | None:
+    """Resolved binary for an optional-binary tool; None when none is installed.
+    Tools outside the table are always considered available ("")."""
+    spec = _OPTIONAL_BINARIES.get(tool_id)
+    if not spec:
+        return ""
+    which = which or shutil.which
+    return next((b for b in (which(n) for n in spec[0]) if b), None)
+
+
+def tool_unavailable_result(tool_id: str, which=None) -> dict | None:
+    """Typed fail-fast result when `tool_id`'s binary is missing, else None."""
+    if optional_binary(tool_id, which) is not None:
+        return None
+    names, hint = _OPTIONAL_BINARIES[tool_id]
+    return {"success": False, "status": "tool_unavailable", "tool_unavailable": True,
+            "binary": names[0],
+            "error": f"{names[0].rsplit('/', 1)[-1]} not installed — {hint}",
+            "note": ("An uninstalled tool establishes nothing about the evidence; "
+                     "settle it with misc.record_disposition(target_kind='tool', "
+                     "reason='inapplicable') or use another parser.")}
+
+
+def unavailable_tools() -> set[str]:
+    """Optional-binary tools whose binary is not installed on this host."""
+    return {t for t in _OPTIONAL_BINARIES if optional_binary(t) is None}
+
+
+def _installed(tools: list[str]) -> list[str]:
+    missing = unavailable_tools()
+    return [t for t in tools if t not in missing]
+
+
 def tool_capability_manifest() -> dict:
     """Return a copy of the structured manifest."""
     return {
@@ -274,7 +330,7 @@ def allowed_tool_names() -> set[str]:
     names: set[str] = set()
     for cap in _CAPABILITIES:
         names.update(cap.get("tools", []))
-    return names
+    return names - unavailable_tools()
 
 
 def capability_for_tool(tool_name: str) -> str:
@@ -314,8 +370,9 @@ def format_tool_manifest_for_prompt(max_tools_per_capability: int = 8) -> str:
         "- Select by capability/evidence type, then choose the smallest executable batch.",
     ]
     for cap in _CAPABILITIES:
-        tools = cap["tools"][:max_tools_per_capability]
-        if len(cap["tools"]) > max_tools_per_capability:
+        installed = _installed(cap["tools"])
+        tools = installed[:max_tools_per_capability]
+        if len(installed) > max_tools_per_capability:
             tools = tools + ["..."]
         lines.append(
             f"- {cap['id']} | phases={','.join(cap['phases'])} | "

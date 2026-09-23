@@ -12,6 +12,7 @@ from typing import Optional
 from fastmcp import FastMCP
 from core import run, run_with_output_file, output_safe
 from core.paths import assert_output_safe
+from tools.tool_capabilities import optional_binary, tool_unavailable_result
 
 mcp = FastMCP("misc")
 
@@ -297,6 +298,9 @@ def usnparser_parse(usn_journal: str, output_path: Optional[str] = None) -> dict
     """
     if output_path:
         assert_output_safe(output_path)
+    missing = tool_unavailable_result("misc.usnparser_parse", _bin_or_warn)
+    if missing:
+        return missing
     cmd = ["/usr/local/bin/usnparser", "-f", usn_journal]
     if output_path:
         cmd += ["-o", output_path]
@@ -338,6 +342,9 @@ def hindsight_chrome(
         back to 'jsonl' rather than failing on an invalid -f choice.
     """
     import os
+    missing = tool_unavailable_result("misc.hindsight_chrome", _bin_or_warn)
+    if missing:
+        return missing
     _VALID = {"jsonl", "sqlite", "xlsx"}
     _ALIAS = {"json": "jsonl", "csv": "xlsx", "xls": "xlsx", "db": "sqlite", "sqlite3": "sqlite"}
     fmt = (output_format or "").strip().lower()
@@ -400,11 +407,63 @@ def usbdeviceforensics(registry_path: str, output_path: Optional[str] = None) ->
     """
     Extract USB device connection history from registry hives.
     registry_path: path to SYSTEM hive or a directory containing SYSTEM.
+    output_path: optional TSV output file.
     """
     if output_path:
         assert_output_safe(output_path)
-    cmd = ["/usr/local/bin/usbdeviceforensics", registry_path]
-    return run(cmd, timeout=60)
+    # The tool takes a hive DIRECTORY via -r; a hive file means its folder.
+    hives = os.path.dirname(registry_path) if os.path.isfile(registry_path) else registry_path
+    cmd = ["/usr/local/bin/usbdeviceforensics", "-r", hives]
+    if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        cmd += ["-o", output_path, "-f", "tsv"]
+    result = run(cmd, timeout=60)
+    if output_path:
+        result["output_path"] = output_path
+    return result
+
+
+# ── SRUM (ESE database) ──────────────────────────────────────────────────────
+
+# SRUDB.dat tables the agent needs by name (GUID-named extension tables).
+_SRUM_TABLES = {
+    "{973F5D5C-1D90-4944-BE8E-24B94231A174}": "network_usage (bytes sent/received per app/user)",
+    "{D10CA2FE-6FCF-4F6D-848E-B2E99266FA89}": "app_resource_usage (per-app run/cycle time)",
+    "SruDbIdMapTable": "id_map (AppId/UserId -> app path / SID)",
+}
+
+
+@mcp.tool()
+@output_safe
+def srum_export(srudb_path: str, output_dir: str) -> dict:
+    """
+    Export SRUM (SRUDB.dat, an ESE db ez.sqlecmd cannot read) with esedbexport:
+    one TSV per table under <output_dir>/srudb.export/ (read with read.output).
+    `key_tables` names network usage, app resource usage and SruDbIdMapTable.
+    """
+    assert_output_safe(output_dir)
+    missing = tool_unavailable_result("misc.srum_export", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.srum_export", _bin_or_warn)
+    os.makedirs(output_dir, exist_ok=True)
+    target = os.path.join(output_dir, "srudb")
+    # esedbexport appends ".export" to the -t basename.
+    r = run([binary, "-t", target, srudb_path], timeout=1800, output_dir=output_dir)
+    export_dir = target + ".export"
+    tables = sorted(os.listdir(export_dir)) if os.path.isdir(export_dir) else []
+    r["output_path"] = export_dir
+    r["tables"] = [os.path.join(export_dir, t) for t in tables]
+    r["key_tables"] = {
+        label: os.path.join(export_dir, t)
+        for name, label in _SRUM_TABLES.items()
+        for t in tables if t.split(".")[0].upper() == name.upper()
+    }
+    r["table_legend"] = _SRUM_TABLES
+    if r.get("success") and not tables:
+        r["success"] = False
+        r["error"] = f"esedbexport wrote no tables under {export_dir}"
+    return r
 
 
 @mcp.tool()
@@ -2162,9 +2221,10 @@ def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     mode: items (default — produces a directory tree of messages), all,
           recovered, or debug. Outputs are written under output_dir.
     """
-    binary = _bin_or_warn("pffexport")
-    if not binary:
-        return {"success": False, "error": "pffexport not installed — apt install pff-tools"}
+    missing = tool_unavailable_result("misc.pff_export", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.pff_export", _bin_or_warn)
     os.makedirs(output_dir, exist_ok=True)
     # -q: quiet — suppress the progress banner from stdout. pffexport APPENDS
     # ".export" to the -t target, so the real output tree is
@@ -2190,9 +2250,10 @@ def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) ->
 
     format_mbox: True → -o mbox; False → -e (per-message .eml files).
     """
-    binary = _bin_or_warn("readpst")
-    if not binary:
-        return {"success": False, "error": "readpst not installed — sudo apt install pst-utils"}
+    missing = tool_unavailable_result("misc.readpst_extract", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.readpst_extract", _bin_or_warn)
     os.makedirs(output_dir, exist_ok=True)
     # -q: quiet — only error messages on stdout (progress banner otherwise
     # dominates the trace excerpt; converted mail is written under output_dir).
@@ -2215,9 +2276,10 @@ def densityscout_scan(target: str, threshold: float = 0.10) -> dict:
     threshold: density threshold (0.0–1.0). Higher = more permissive matches.
     Output rows are formatted as `<density> <offset> <path>` per region.
     """
-    binary = _bin_or_warn("densityscout") or "/usr/local/bin/densityscout"
-    if not os.path.exists(binary):
-        return {"success": False, "error": "densityscout not installed"}
+    missing = tool_unavailable_result("misc.densityscout_scan", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.densityscout_scan", _bin_or_warn)
     cmd = [binary, "-pe", "-t", str(threshold), target]
     return run(cmd, timeout=600)
 
@@ -2242,11 +2304,10 @@ def chainsaw_hunt(evtx_dir: str, sigma_dir: Optional[str] = None,
     """
     if output_path:
         assert_output_safe(output_path)
-    binary = _bin_or_warn("chainsaw")
-    if not binary:
-        return {"success": False, "error":
-                "chainsaw not installed — see install.sh for the binary release "
-                "(github.com/WithSecureLabs/chainsaw)"}
+    missing = tool_unavailable_result("misc.chainsaw_hunt", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.chainsaw_hunt", _bin_or_warn)
     if sigma_dir is None:
         for candidate in ("/opt/chainsaw/sigma", "/usr/local/share/chainsaw/sigma",
                           "/usr/share/chainsaw/sigma"):
@@ -2276,10 +2337,10 @@ def capa_analyze(file_path: str, output_path: Optional[str] = None) -> dict:
     """
     if output_path:
         assert_output_safe(output_path)
-    binary = _bin_or_warn("capa")
-    if not binary:
-        return {"success": False, "error":
-                "capa not installed — pip install flare-capa"}
+    missing = tool_unavailable_result("misc.capa_analyze", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.capa_analyze", _bin_or_warn)
     cmd = [binary]
     if output_path:
         cmd += ["-j"]  # JSON output to stdout, we redirect via run() if needed
@@ -2309,10 +2370,10 @@ def olevba_scan(office_path: str, decode: bool = True) -> dict:
     Flags suspicious patterns (AutoOpen, Shell, URLDownloadToFile, MZ headers
     in strings, IOCs, etc.) — a strong signal for phishing-borne initial access.
     """
-    binary = _bin_or_warn("olevba") or _bin_or_warn("olevba3")
-    if not binary:
-        return {"success": False, "error":
-                "olevba not installed — pip install oletools"}
+    missing = tool_unavailable_result("misc.olevba_scan", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.olevba_scan", _bin_or_warn)
     cmd = [binary]
     if decode:
         cmd.append("--decode")
@@ -2330,10 +2391,10 @@ def mraptor_scan(office_path: str) -> dict:
     pattern (auto-exec, write to system, execute external command, etc.).
     """
     from tools._exit_codes import policy
-    binary = _bin_or_warn("mraptor") or _bin_or_warn("mraptor3")
-    if not binary:
-        return {"success": False, "error":
-                "mraptor not installed — pip install oletools"}
+    missing = tool_unavailable_result("misc.mraptor_scan", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.mraptor_scan", _bin_or_warn)
     return run([binary, office_path], timeout=120, **policy("mraptor"))
 
 

@@ -97,7 +97,7 @@ classes:
     label: device-install inventory (setupapi.dev.log)
   srum:
     cmd: 'sqlecmd|srudb|srum'
-    tools: [ez.sqlecmd SRUDB]
+    tools: [misc.srum_export, ez.sqlecmd SRUDB]
     label: SRUM network / app usage
   scheduled_tasks:
     cmd: 'parse_scheduled_tasks|scheduled_tasks|schtasks|\\tasks\\|/tasks/'

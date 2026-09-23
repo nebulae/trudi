@@ -150,7 +150,8 @@ class TestMountOptionCompatibility:
               "truncated": False, "cmd": ""}
         bad = {"success": False, "stdout": "", "stderr": "wrong fs type, bad option",
                "exit_code": 32, "truncated": False, "cmd": ""}
-        with patch("tools.ewf.run", side_effect=[bad, ok]) as m:
+        with patch("tools.ewf.run", side_effect=[bad, ok]) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=False):
             r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=345001984)
         assert r["success"] is True
         assert m.call_count == 2
@@ -229,3 +230,44 @@ Units are in 512-byte sectors
         assert r["success"] is False
         assert "Ext4" in r["stderr"] and "1411072" in r["stderr"]
         assert len(r["partitions"]) == 3
+
+
+class TestCaseInsensitiveMount:
+    """Regression: ntfs-3g is case-sensitive, so Windows/AppCompat/Programs/
+    Amcache.hve missed the on-disk Windows/appcompat and read as absent."""
+
+    _ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+           "truncated": False, "cmd": ""}
+    _bad = {"success": False, "stdout": "", "stderr": "unknown filesystem type",
+            "exit_code": 32, "truncated": False, "cmd": ""}
+
+    def test_lowntfs_ignore_case_tried_first(self, tmp_path):
+        from tools.ewf import mount_ntfs
+        with patch("tools.ewf.run", return_value=dict(self._ok)) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=True):
+            r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=1048576)
+        assert m.call_count == 1 and r["case_insensitive"] is True
+        cmd = m.call_args[0][0]
+        assert cmd[:3] == ["mount", "-t", "lowntfs-3g"]
+        opts = cmd[cmd.index("-o") + 1].split(",")
+        assert {"ro", "loop", "norecover", "ignore_case", "offset=1048576"} <= set(opts)
+        assert m.call_args[1]["needs_sudo"] is True
+
+    def test_falls_back_to_case_sensitive_chain(self, tmp_path):
+        from tools.ewf import mount_ntfs
+        with patch("tools.ewf.run", side_effect=[dict(self._bad), dict(self._bad),
+                                                 dict(self._ok)]) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=True):
+            r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=0)
+        assert r["success"] is True and r["case_insensitive"] is False
+        assert "path_case_note" in r and r["lowntfs_attempt_stderr"]
+        assert m.call_args_list[2][0][0][:3] == ["mount", "-t", "ntfs-3g"]
+        assert all("ro" in c[0][0][c[0][0].index("-o") + 1].split(",")
+                   for c in m.call_args_list)
+
+    def test_lowntfs_absent_uses_current_command(self, tmp_path):
+        from tools.ewf import mount_ntfs
+        with patch("tools.ewf.run", return_value=dict(self._ok)) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=False):
+            mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=0)
+        assert m.call_args[0][0][:2] == ["mount", "-o"]
