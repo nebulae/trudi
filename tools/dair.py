@@ -737,6 +737,39 @@ def missing_report_phases(entries) -> list:
     return [ph for ph in required if ph not in entered]
 
 
+def _ioc_coverage_block(current_phase: str, limit: int = 20) -> str:
+    """Open ATT&CK coverage items for the recorded IOCs, as Scan leads. Only
+    from Analyze on: before then the IOC set is still forming. Advisory — the
+    items are warnings, never a transition gate."""
+    if current_phase not in ("Analyze", "Scan", "Report"):
+        return ""
+    try:
+        from core.execution_log import log
+        from core.iocs import coverage
+        cov = coverage(getattr(log, "_entries", None) or [])
+    except Exception:
+        return ""
+    if not cov["open"] and not any(i["status"] == "advisory" for i in cov["items"]):
+        return ""
+    lines = ["\nIOC COVERAGE LEADS (ATT&CK detection strategies for the recorded IOCs; "
+             "each open item is a data source that could confirm or scope the technique "
+             "and has not been examined — prescribe the listed tools in Scan, or settle "
+             "with misc.record_disposition(target_kind=\"coverage\", "
+             "target_id=\"<technique>:<component>\")):"]
+    for it in cov["open"][:limit]:
+        lines.append(f"- {it['technique']} {it['technique_name']} / {it['component']} "
+                     f"[{', '.join(it['iocs'][:3])}] — {it.get('artifacts', '')}; "
+                     f"tools: {', '.join(it.get('examine_with', [])[:5])}")
+    if len(cov["open"]) > limit:
+        lines.append(f"- … {len(cov['open']) - limit} more (misc.list_iocs)")
+    adv = [i for i in cov["items"] if i["status"] == "advisory"][:8]
+    if adv:
+        lines.append("RELATED TECHNIQUES (co-used by the same groups/software — hypotheses "
+                     "worth testing, not requirements):")
+        lines += [f"- {i['technique']} → {', '.join(i['related_techniques'])}" for i in adv]
+    return "\n".join(lines)
+
+
 @mcp.tool()
 def dair_assess(
     tool_results_summary: str,
@@ -811,6 +844,9 @@ def dair_assess(
     user_parts.append(f"\nCURRENT PHASE: {current}")
     if context:
         user_parts.append(f"\nCASE CONTEXT:\n{context}")
+    ioc_leads = _ioc_coverage_block(current)
+    if ioc_leads:
+        user_parts.append(ioc_leads)
     user = "\n".join(user_parts)
 
     # Capture exactly what was sent to the DAIR model so the trace can be
@@ -1273,4 +1309,13 @@ def dair_assess(
     }
     if candidate_pivots:
         result["candidate_pivots"] = candidate_pivots
+    if ioc_leads:
+        # The same leads the director saw, so the agent can act on them.
+        try:
+            from core.execution_log import log as _ilog
+            from core.iocs import coverage as _ioc_cov
+            _c = _ioc_cov(getattr(_ilog, "_entries", None) or [])
+            result["ioc_coverage"] = {"counts": _c["counts"], "open": _c["open"][:20]}
+        except Exception:
+            pass
     return result

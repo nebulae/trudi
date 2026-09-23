@@ -1257,9 +1257,32 @@ def assess_readiness(log, include_synthesis=True):
         import sys as _sys
         print(f"[TRUDI WARN] scoping-leads check failed: {_e}", file=_sys.stderr)
 
+    # IOC coverage — warnings only. An ATT&CK detection source left unexamined
+    # for a recorded IOC is a stated blind spot in the report, never a blocker.
+    ioc_inventory: dict = {"iocs": [], "coverage_counts": {}, "open": []}
+    try:
+        from core.iocs import ioc_state, coverage as _ioc_coverage
+        _iocs = list(ioc_state(entries).values())
+        if _iocs:
+            _cov = _ioc_coverage(entries)
+            ioc_inventory = {"iocs": _iocs, "coverage_counts": _cov["counts"],
+                             "open": _cov["open"][:60]}
+            if _cov["open"]:
+                _shown = "; ".join(f"{i['technique']}/{i['component']}" for i in _cov["open"][:8])
+                warnings.append(
+                    f"{len(_cov['open'])} ATT&CK coverage item(s) for recorded IOCs not examined: "
+                    f"{_shown}{' …' if len(_cov['open']) > 8 else ''}. Examine them with the "
+                    f"listed tools (misc.list_iocs) or record "
+                    f"misc.record_disposition(target_kind=\"coverage\", target_id=\"<technique>:<component>\"). "
+                    f"Open items are listed in the report as not examined.")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] IOC coverage check failed: {_e}", file=_sys.stderr)
+
     ready = len(issues) == 0
     return {
         "ready_to_report": ready if include_synthesis else False,
+        "ioc_inventory": ioc_inventory,
         "ready_for_synthesis": ready if not include_synthesis else None,
         "issues": issue_records(issues),
         "registry_inventory": registry_inventory,

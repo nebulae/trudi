@@ -24,6 +24,7 @@ DAIR_GATE_ALLOWLIST = frozenset({
     # Typed dispositions are bookkeeping, not evidence: legal in Report, where
     # pre_report_check surfaces the leads/sources/tools that need settling.
     "misc_record_disposition", "record_disposition",
+    "misc_record_ioc", "record_ioc", "misc_list_iocs", "list_iocs",
     "misc_serve_dashboard",
     # Phase director itself
     "dair_assess",

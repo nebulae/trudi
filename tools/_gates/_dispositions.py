@@ -14,7 +14,7 @@ from __future__ import annotations
 from ._entities import norm_entity
 
 TARGET_KINDS = ("source", "tool", "challenge", "principal", "correspondent",
-                "device", "hypothesis", "host", "destruction_scope")
+                "device", "hypothesis", "host", "destruction_scope", "coverage")
 
 REASONS = ("absent_from_evidence", "inapplicable", "out_of_scope", "noise",
            "excluded", "not_a_principal", "controller_unknown",
@@ -34,6 +34,8 @@ ALLOWED: dict[str, frozenset] = {
     "hypothesis":        frozenset({"refuted", "excluded", "evidence_unavailable"}),
     "host":              frozenset({"out_of_scope", "evidence_unavailable", "excluded"}),
     "destruction_scope": frozenset({"undetermined"}),
+    # "<technique>:<data component>" from the IOC coverage table (a warning, never a blocker).
+    "coverage":          frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),
 }
 
 # Reasons that settle a manifest source / tool / challenge without running it.

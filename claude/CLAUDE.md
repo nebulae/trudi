@@ -399,6 +399,32 @@ Pass the same `claim_kind`/`category`/`act`/`entities`/`principal`/`channel` to 
 
 ---
 
+## Indicators of compromise (`misc.record_ioc`)
+
+Record each indicator **when it surfaces**, in any phase — an attacker IP, a covert
+account or SID, a planted scheduled task, a device VID:PID, a staged archive path, a
+hash, a C2/recipient domain or address:
+
+```
+misc.record_ioc(ioc_type="scheduled_task", value="\\filetree", techniques=["T1053.005"],
+                evidence_call_ids=[<cid>], status="malicious"|"suspicious"|"observed"|"benign")
+```
+
+`ioc_type` is enumerated (the refusal lists it); values are normalised server-side;
+techniques are validated ATT&CK ids (`correlate.mitre_map` suggests candidates). An IOC is
+not a finding — the claim about it still goes through `misc.submit_finding`.
+
+Each technique's ATT&CK detection strategy names the data sources that would confirm or
+scope it. `misc.list_iocs` and `dair_assess` (`ioc_coverage`, from Analyze on) show which of
+those sources have not been examined — **these are Scan work**: examine them with the listed
+tools, or settle one with `misc.record_disposition(target_kind="coverage",
+target_id="<technique>:<data component>", reason=...)`. Open items are warnings, never
+blockers, and the report lists them as "Detection sources not examined". Related techniques
+(co-used by the same groups/software) are hypotheses to test, not requirements. Collection
+belongs in Collect/Analyze/Scan; synthesis only checks that the recorded findings hold together.
+
+---
+
 ## Dispositions (`misc.record_disposition`)
 
 The only way to settle a lead, source, tool, challenge, principal, correspondent, device or hypothesis **without a finding**. Prose ("absent from evidence", "inapplicable", "ruled out", "controller unknown") is never read.
@@ -418,6 +444,7 @@ misc.record_disposition(target_kind=..., target_id=..., reason=..., evidence_cal
 | `hypothesis` | `H0002` | `refuted`\* \| `excluded`\* \| `evidence_unavailable` |
 | `host` | host / IP | `out_of_scope` \| `evidence_unavailable` \| `excluded`\* |
 | `destruction_scope` | the destruction finding's call_id | `undetermined` |
+| `coverage` | `"<technique>:<data component>"` from the IOC coverage table | `absent_from_evidence` \| `inapplicable` \| `out_of_scope` |
 
 \* asserts a fact about the evidence — `evidence_call_ids` must name successful evidence tool calls.
 

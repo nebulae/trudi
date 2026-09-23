@@ -1231,6 +1231,33 @@ class ExecutionLog:
             self._append_entry(entry)
             return cid
 
+    def record_ioc(self, ioc_type: str, value: str, normalized: str, status: str,
+                   techniques: list[str], evidence_call_ids: list[int], note: str = "",
+                   input_call_ids: list[int] | None = None,
+                   aliases: list[str] | None = None) -> int:
+        """A typed indicator of compromise (`ioc`). Validated in the MCP tool;
+        repeated records of the same (type, normalized value) merge in
+        core.iocs.ioc_state."""
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"ioc: {ioc_type}:{value}")
+            cid = self._next_id()
+            entry: dict = {"call_id": cid, "type": "ioc", "ts": _utcnow(),
+                           "ioc_type": ioc_type, "value": str(value)[:500],
+                           "normalized": str(normalized)[:500], "status": status,
+                           "techniques": list(techniques or []),
+                           "evidence_call_ids": sorted({int(c) for c in evidence_call_ids if c})}
+            if note:
+                entry["note"] = str(note)[:500]
+            if aliases:
+                entry["aliases"] = [str(a)[:200] for a in aliases if str(a).strip()][:20]
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            elif self._last_dair_cid:
+                entry["input_call_ids"] = [self._last_dair_cid]
+            self._append_entry(entry)
+            return cid
+
     def record_finding_refused(
         self,
         description: str,

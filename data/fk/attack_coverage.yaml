@@ -1,0 +1,145 @@
+# ATT&CK data component -> the TRUDI tools that examine its forensic equivalent
+# on a Windows disk image. Used by core/iocs.py: an IOC's technique names data
+# components through its ATT&CK v18 detection strategy; a component is COVERED
+# once any listed tool has run successfully in the trace.
+#
+# `where` (optional) restricts the tools named in `where_applies_to` (default:
+# all listed tools) to runs whose command line mentions one of the substrings -
+# e.g. an event-log parser only counts when it read the relevant channels or
+# the whole winevt\Logs directory.
+#
+# Components absent from this map (directory services, cloud, network sensors)
+# are reported as `unmapped`, never as open work.
+
+components:
+  Process Creation:
+    artifacts: Security 4688, Sysmon 1, PowerShell/Operational, Prefetch, Amcache, Shimcache, UserAssist/BAM
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt, ez_pecmd,
+            ez_amcacheparser, ez_appcompatcacheparser, ez_recmd_hive, ez_recmd_batch, misc_regripper_hive]
+  Command Execution:
+    artifacts: PowerShell 4103/4104, PowerShell/Operational, ConsoleHost_history.txt, Security 4688 command line
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt]
+    where: [powershell, security, winevt, logs]
+  Script Execution:
+    artifacts: PowerShell 4104 script blocks, PowerShell/Operational
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt]
+    where: [powershell, winevt, logs]
+  File Creation:
+    artifacts: $MFT, $UsnJrnl:$J, directory listings
+    tools: [ez_mftecmd, ez_mftecmd_dir, misc_usnparser_parse, misc_analyzemft_parse, tsk_fls]
+  File Modification:
+    artifacts: $MFT timestamps, $UsnJrnl:$J
+    tools: [ez_mftecmd, ez_mftecmd_dir, misc_usnparser_parse, misc_analyzemft_parse]
+  File Deletion:
+    artifacts: $UsnJrnl:$J, $Recycle.Bin $I records, unallocated MFT entries
+    tools: [misc_usnparser_parse, ez_rbcmd, ez_mftecmd, tsk_fls]
+  File Access:
+    artifacts: LNK files, Jump Lists, ShellBags, Security 4663
+    tools: [ez_lecmd, ez_jlecmd, ez_sbecmd, ez_evtxecmd, misc_evtx_filter]
+  File Metadata:
+    artifacts: $MFT attributes, file signatures, EXIF/PE metadata
+    tools: [ez_mftecmd, tsk_istat, strings_file_identify, strings_exiftool_metadata, misc_pe_scanner]
+  Network Connection Creation:
+    artifacts: Sysmon 3, firewall log, SRUM network usage, browser history, memory sockets
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_hindsight_chrome, vol_netscan, vol_netstat,
+            net_tcpdump_list_connections]
+  Network Traffic Flow:
+    artifacts: PCAP flows, firewall log
+    tools: [net_tcpdump_list_connections, net_tcpdump_read, net_pcap_identity_timeline]
+  Network Traffic Content:
+    artifacts: PCAP payloads, HTTP sessions
+    tools: [net_http_session_inventory, net_tcpdump_extract_http, net_ngrep_search, net_tcpxtract_streams]
+  Module Load:
+    artifacts: Sysmon 7, memory module lists
+    tools: [ez_evtxecmd, misc_evtx_filter, vol_dlllist, vol_ldrmodules]
+    where: [sysmon, winevt, logs]
+    where_applies_to: [ez_evtxecmd, misc_evtx_filter]
+  Driver Load:
+    artifacts: setupapi.dev.log, Sysmon 6, System 7045, memory driver list
+    tools: [misc_device_install_inventory, ez_evtxecmd, misc_evtx_filter, vol_modules, vol_driverscan]
+  Drive Creation:
+    artifacts: setupapi.dev.log, USBSTOR, MountedDevices, MountPoints2, Partition/Diagnostic 1006
+    tools: [misc_device_install_inventory, ez_recmd_hive, ez_recmd_batch, misc_regripper_hive,
+            misc_usbdeviceforensics]
+  Drive Access:
+    artifacts: LNK/Jump List volume serials and labels, ShellBags
+    tools: [ez_lecmd, ez_jlecmd, ez_sbecmd]
+  Drive Modification:
+    artifacts: MountedDevices, volume serials
+    tools: [ez_recmd_hive, misc_regripper_hive]
+  Volume Creation:
+    artifacts: VSS catalog, System log
+    tools: [img_vshadow_list, ez_evtxecmd]
+  Windows Registry Key Modification:
+    artifacts: registry hives (key LastWrite times), transaction logs
+    tools: [ez_recmd_hive, ez_recmd_batch, ez_recmd_dir, misc_regripper_hive]
+  Windows Registry Key Creation:
+    artifacts: registry hives
+    tools: [ez_recmd_hive, ez_recmd_batch, ez_recmd_dir, misc_regripper_hive]
+  Windows Registry Key Access:
+    artifacts: registry hives, Security 4656/4663
+    tools: [ez_recmd_hive, ez_recmd_batch, misc_regripper_hive]
+  Logon Session Creation:
+    artifacts: Security 4624/4625/4648, TerminalServices LocalSessionManager/RemoteConnectionManager
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt]
+    where: [security, terminalservices, winevt, logs]
+  Logon Session Metadata:
+    artifacts: Security 4624 fields, TerminalServices 21/22/24/25, RDP bitmap cache
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump]
+    where: [security, terminalservices, winevt, logs]
+  User Account Authentication:
+    artifacts: Security 4624/4625/4776, SAM last-login
+    tools: [ez_evtxecmd, misc_evtx_filter, ez_recmd_hive, misc_regripper_hive]
+  User Account Creation:
+    artifacts: Security 4720/4722/4724/4732, SAM (RID, created)
+    tools: [ez_evtxecmd, misc_evtx_filter, ez_recmd_hive, misc_regripper_hive]
+  User Account Modification:
+    artifacts: Security 4738/4732/4724, SAM
+    tools: [ez_evtxecmd, misc_evtx_filter, ez_recmd_hive, misc_regripper_hive]
+  User Account Deletion:
+    artifacts: Security 4726, SAM, profile folders
+    tools: [ez_evtxecmd, misc_evtx_filter, ez_recmd_hive, tsk_fls]
+  User Account Metadata:
+    artifacts: SAM, ProfileList, NTUSER.DAT
+    tools: [ez_recmd_hive, misc_regripper_hive]
+  Service Creation:
+    artifacts: System 7045, Security 4697, SYSTEM\Services
+    tools: [ez_evtxecmd, misc_evtx_filter, ez_recmd_hive, misc_regripper_hive]
+  Service Metadata:
+    artifacts: SYSTEM\Services
+    tools: [ez_recmd_hive, misc_regripper_hive]
+  Service Modification:
+    artifacts: SYSTEM\Services LastWrite, System 7040
+    tools: [ez_recmd_hive, misc_regripper_hive, ez_evtxecmd]
+  Scheduled Job Creation:
+    artifacts: Windows\System32\Tasks XML, Security 4698, TaskScheduler/Operational 106
+    tools: [misc_parse_scheduled_tasks, ez_evtxecmd, misc_evtx_filter, vol_scheduled_tasks]
+  Scheduled Job Modification:
+    artifacts: Tasks XML, Security 4702, TaskScheduler/Operational 140
+    tools: [misc_parse_scheduled_tasks, ez_evtxecmd, misc_evtx_filter]
+  Scheduled Job Metadata:
+    artifacts: Tasks XML, TaskCache registry
+    tools: [misc_parse_scheduled_tasks, ez_recmd_hive, misc_regripper_hive]
+  Network Share Access:
+    artifacts: Security 5140/5145, LNK/Jump List UNC paths, ShellBags, MountPoints2
+    tools: [ez_evtxecmd, misc_evtx_filter, ez_lecmd, ez_jlecmd, ez_sbecmd]
+  WMI Creation:
+    artifacts: WMI-Activity/Operational, OBJECTS.DATA
+    tools: [ez_evtxecmd, misc_evtx_filter, strings_grep]
+  Application Log Content:
+    artifacts: Application/System/vendor event logs
+    tools: [ez_evtxecmd, misc_evtx_filter, misc_evtx_dump, misc_chainsaw_hunt]
+  Process Access:
+    artifacts: Sysmon 10, memory handles
+    tools: [ez_evtxecmd, misc_evtx_filter, vol_handles]
+    where: [sysmon, winevt, logs]
+    where_applies_to: [ez_evtxecmd, misc_evtx_filter]
+  Process Modification:
+    artifacts: Sysmon 8/25, memory injection scans
+    tools: [ez_evtxecmd, vol_malfind, vol_hollowprocesses]
+  OS API Execution:
+    artifacts: memory image (API hooks, injected code)
+    tools: [vol_malfind, vol_hollowprocesses, vol_unhooked_system_calls]
+  Firewall Rule Modification:
+    artifacts: SYSTEM\...\FirewallPolicy, Firewall With Advanced Security log
+    tools: [ez_recmd_hive, misc_regripper_hive, ez_evtxecmd]

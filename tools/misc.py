@@ -1042,6 +1042,109 @@ def record_curiosity_probe(
 
 
 @mcp.tool()
+def record_ioc(
+    ioc_type: str,
+    value: str,
+    evidence_call_ids: list[int],
+    techniques: list[str] | None = None,
+    status: str = "observed",
+    note: str = "",
+    aliases: list[str] | None = None,
+    input_call_ids: list[int] | None = None,
+) -> dict:
+    """
+    Record a typed indicator of compromise as soon as it surfaces, mapped to
+    MITRE ATT&CK. IOCs are filterable (misc.list_iocs), listed in the report,
+    and drive Scan: each technique's ATT&CK detection strategy names the data
+    sources that would confirm or scope it, and unexamined ones come back as
+    coverage leads (warnings, never blockers). Re-record the same value to
+    update its status or add techniques.
+
+    ioc_type: ipv4 | ipv6 | domain | url | email | md5 | sha1 | sha256 |
+              file_path | file_name | registry_key | account | sid | device
+              (VID:PID) | volume_serial | scheduled_task | service | process |
+              command_line | hostname
+    value:    the indicator as observed (normalised server-side for matching).
+    evidence_call_ids: REQUIRED — successful tool calls whose output shows it.
+    techniques: ATT&CK ids (e.g. ["T1200", "T1136.001"]); validated against the
+              local ATT&CK table. correlate.mitre_map can suggest candidates.
+    status:   observed | malicious | suspicious | benign | unknown
+    aliases:  other spellings the evidence uses for the same indicator (an
+              account's SID, a device's product string) — coverage counts an
+              examination as ABOUT this IOC when its command or read query
+              names the value or an alias.
+    """
+    from core.execution_log import log
+    from core import iocs as I
+    from tools._gates._evidence_calls import is_evidence_tool_call
+    from tools.mitre import validate as mitre_validate
+    try:
+        normalized = I.normalize(ioc_type, value)
+    except ValueError as exc:
+        return {"success": False, "gate": "typed_ioc", "error": str(exc),
+                "ioc_types": list(I.IOC_TYPES)}
+    if status not in I.STATUSES:
+        return {"success": False, "gate": "typed_ioc",
+                "error": f"status must be one of {', '.join(I.STATUSES)}"}
+    idx = log.index()
+    cids = sorted({int(c) for c in (evidence_call_ids or []) if c})
+    bad = [c for c in cids if not is_evidence_tool_call(idx.by_call_id.get(c) or {})]
+    if not cids or bad:
+        return {"success": False, "gate": "typed_ioc", "missing": ["evidence_call_ids"],
+                "error": ("An IOC must be grounded: pass evidence_call_ids of the successful "
+                          "evidence tool calls whose output shows it"
+                          + (f" (not evidence tool calls: {bad})" if bad else ""))}
+    tids = [str(t).strip().upper() for t in (techniques or []) if str(t).strip()]
+    unknown = [t for t in tids if not mitre_validate(t).get("exists")]
+    if unknown:
+        return {"success": False, "gate": "mitre_technique_validation",
+                "error": f"Unknown ATT&CK technique id(s): {unknown}. Use correlate.mitre_map "
+                         f"or correlate.mitre_validate to find the right id."}
+    cid = log.record_ioc(ioc_type, value, normalized, status, tids, cids, note, input_call_ids,
+                         aliases=aliases)
+    cov = I.coverage(log._entries)
+    mine = [i for i in cov["open"] if I.ioc_key(ioc_type, normalized) in i["iocs"]]
+    return {"success": True, "_trudi_call_id": cid, "key": I.ioc_key(ioc_type, normalized),
+            "normalized": normalized, "techniques": tids,
+            "coverage_open_for_this_ioc": mine[:12],
+            "coverage_counts": cov["counts"]}
+
+
+@mcp.tool()
+def list_iocs(ioc_type: str = "", technique: str = "", tactic: str = "", status: str = "",
+              include_coverage: bool = True) -> dict:
+    """
+    List recorded IOCs, filtered by ioc_type, ATT&CK technique (a parent id
+    matches its sub-techniques), tactic name, or status. With include_coverage,
+    each technique's ATT&CK detection components are shown as covered (with the
+    examining call ids), dispositioned, open (a Scan lead), or unmapped, plus
+    advisory related techniques.
+    """
+    from core.execution_log import log
+    from core import iocs as I
+    from tools.mitre import validate as mitre_validate
+    rows = list(I.ioc_state(log._entries).values())
+    if ioc_type:
+        rows = [r for r in rows if r["ioc_type"] == ioc_type]
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    if technique:
+        t = technique.strip().upper()
+        rows = [r for r in rows if any(x == t or x.startswith(t + ".") for x in r["techniques"])]
+    if tactic:
+        want = tactic.strip().lower()
+        rows = [r for r in rows if any(want in str(mitre_validate(x).get("tactic", "")).lower()
+                                       for x in r["techniques"])]
+    out = {"success": True, "count": len(rows), "iocs": rows}
+    if include_coverage:
+        cov = I.coverage(log._entries)
+        keys = {r["key"] for r in rows}
+        out["coverage"] = [i for i in cov["items"] if set(i["iocs"]) & keys]
+        out["coverage_counts"] = cov["counts"]
+    return out
+
+
+@mcp.tool()
 def record_disposition(
     target_kind: str,
     target_id: str,
@@ -1685,11 +1788,13 @@ def write_final_report(output_path: str, content: str) -> dict:
     # is still SHOWN, so relevance scoping never hides an identity.
     inventory: dict = {}
     lifecycle: dict = {}
+    ioc_inv: dict = {}
     try:
         for e in reversed(log._entries):
             if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
                 inventory = dict(e.get("registry_inventory") or {})
                 lifecycle = dict(e.get("lifecycle_coverage") or {})
+                ioc_inv = dict(e.get("ioc_inventory") or {})
                 break
     except Exception:
         inventory = {}
@@ -1756,6 +1861,30 @@ def write_final_report(output_path: str, content: str) -> dict:
                        f"(derived by misc.knowns_pattern_generate).")
         if inv_rows:
             content = content.rstrip() + "\n".join(sec) + "\n"
+    if ioc_inv.get("iocs") and "## indicators of compromise" not in content.lower():
+        sec = ["\n\n## Indicators of compromise",
+               "Typed indicators recorded during the investigation, each grounded in the "
+               "cited tool calls and mapped to MITRE ATT&CK.",
+               "\n| type | value | status | ATT&CK | evidence calls |\n|---|---|---|---|---|"]
+        for r in ioc_inv["iocs"]:
+            sec.append(f"| {r.get('ioc_type','')} | {r.get('value','')} | {r.get('status','')} | "
+                       f"{', '.join(r.get('techniques') or []) or '—'} | "
+                       f"{', '.join(str(c) for c in (r.get('evidence_call_ids') or [])[:6])} |")
+        cc = ioc_inv.get("coverage_counts") or {}
+        if cc:
+            sec.append(f"\nATT&CK detection coverage for these techniques: "
+                       f"{cc.get('covered', 0)} data sources examined, "
+                       f"{cc.get('dispositioned', 0)} settled by disposition, "
+                       f"{cc.get('open', 0)} NOT examined, "
+                       f"{cc.get('unmapped', 0)} with no disk-forensic equivalent.")
+        if ioc_inv.get("open"):
+            sec.append("\n### Detection sources not examined\n")
+            sec.append("| technique | data component | indicators | would be examined with |\n|---|---|---|---|")
+            for i in ioc_inv["open"]:
+                sec.append(f"| {i.get('technique','')} {i.get('technique_name','')} | "
+                           f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
+                           f"{', '.join((i.get('examine_with') or [])[:4])} |")
+        content = content.rstrip() + "\n".join(sec) + "\n"
     from core.findings import active_findings
     current = active_findings(log._entries)
     if current:

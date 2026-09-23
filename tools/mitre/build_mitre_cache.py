@@ -235,11 +235,86 @@ def write_outputs(output_dir: str, techniques: dict, groups: dict, source_url: s
     print(f"[build_mitre_cache] wrote {len(groups)} groups → {groups_path}", file=sys.stderr)
 
 
+def build_detection(stix: dict, related_top: int = 6) -> dict:
+    """Per technique: its detection strategies -> per-platform analytics -> log
+    sources (data component, log source name, channel), plus the techniques
+    most often used alongside it by the same groups/software (co-use, Jaccard).
+
+    ATT&CK v18+ carries detection guidance as x-mitre-detection-strategy /
+    x-mitre-analytic objects linked by `detects`; the legacy
+    x_mitre_detection / x_mitre_data_sources fields are gone.
+    """
+    objs = [o for o in stix.get("objects", [])
+            if not o.get("revoked") and not o.get("x_mitre_deprecated")]
+    by_id = {o["id"]: o for o in objs}
+    tech = {o["id"]: _extract_technique_id(o) for o in objs if o["type"] == "attack-pattern"}
+    out: dict = {}
+    for rel in objs:
+        if rel["type"] != "relationship" or rel.get("relationship_type") != "detects":
+            continue
+        strat, tid = by_id.get(rel.get("source_ref")), tech.get(rel.get("target_ref"))
+        if not strat or not tid:
+            continue
+        entry = out.setdefault(tid, {"name": by_id[rel["target_ref"]].get("name", ""),
+                                     "strategies": [], "analytics": [], "related": []})
+        entry["strategies"].append({"id": _extract_technique_id(strat), "name": strat.get("name", "")})
+        for aref in strat.get("x_mitre_analytic_refs", []) or []:
+            an = by_id.get(aref)
+            if not an:
+                continue
+            sources = []
+            for ls in an.get("x_mitre_log_source_references", []) or []:
+                dc = by_id.get(ls.get("x_mitre_data_component_ref"))
+                sources.append({"component": dc.get("name", "") if dc else "",
+                                "source": ls.get("name", ""), "channel": ls.get("channel", "")})
+            entry["analytics"].append({"id": _extract_technique_id(an),
+                                       "platforms": an.get("x_mitre_platforms", []) or [],
+                                       "description": (an.get("description") or "")[:600],
+                                       "log_sources": sources})
+    # Co-use: which techniques the same groups / software also use.
+    users: dict = {}
+    for rel in objs:
+        if rel["type"] == "relationship" and rel.get("relationship_type") == "uses":
+            t = tech.get(rel.get("target_ref"))
+            if t and by_id.get(rel.get("source_ref"), {}).get("type") in (
+                    "intrusion-set", "malware", "tool", "campaign"):
+                users.setdefault(t, set()).add(rel["source_ref"])
+    for tid, entry in out.items():
+        mine = users.get(tid) or set()
+        if not mine:
+            continue
+        scores = []
+        for other, theirs in users.items():
+            if other == tid or other.split(".")[0] == tid.split(".")[0]:
+                continue
+            inter = len(mine & theirs)
+            if inter >= 2:
+                scores.append((inter / len(mine | theirs), other))
+        entry["related"] = [t for _, t in sorted(scores, reverse=True)[:related_top]]
+    return out
+
+
+def write_detection(output_dir: str, detection: dict, source: str) -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "mitre_detection.json")
+    doc = {"_meta": {"source": source,
+                     "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                     "format": "{technique_id: {name, strategies, analytics[{id, platforms, "
+                               "description, log_sources[{component, source, channel}]}], related}}"},
+           "detection": detection}
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=2, sort_keys=True)
+    print(f"[build_mitre_cache] wrote detection for {len(detection)} techniques → {path}", file=sys.stderr)
+    return path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build MITRE ATT&CK cache for TRUDI.")
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--source", default=MITRE_CTI_URL)
     parser.add_argument("--input-file", help="Optional local STIX JSON to use instead of downloading")
+    parser.add_argument("--detection-only", action="store_true",
+                        help="Write only mitre_detection.json; leave the technique/group tables untouched")
     args = parser.parse_args()
 
     if args.input_file:
@@ -247,6 +322,10 @@ def main():
             stix = json.load(f)
     else:
         stix = fetch(args.source)
+
+    write_detection(args.output_dir, build_detection(stix), args.input_file or args.source)
+    if args.detection_only:
+        return
 
     existing_techniques_path = os.path.join(args.output_dir, "mitre_techniques.json")
     existing = _load_existing_techniques(existing_techniques_path)
