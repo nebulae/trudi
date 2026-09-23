@@ -24,8 +24,10 @@ import subprocess
 import time
 from pathlib import Path
 
+from core.paths import trudi_cache_dir
+
 # Overridable in tests. One JSON state file per job: JOBS_DIR/<job_id>.json.
-JOBS_DIR = os.path.expanduser("~/.cache/trudi/jobs")
+JOBS_DIR = os.path.join(trudi_cache_dir(), "jobs")
 
 
 def _job_path(job_id: str) -> str:

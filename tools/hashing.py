@@ -5,6 +5,8 @@ import hashlib
 import glob
 import threading
 from typing import Optional
+
+from core.paths import trudi_cache_dir
 from fastmcp import FastMCP
 from core import (run, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT, HASH_TIMEOUT,
                   output_safe, with_tool_timeout)
@@ -15,7 +17,8 @@ mcp = FastMCP("hashing")
 # ── Hash cache (keyed by path, size, nanosecond times and inode) ─────────────
 
 _HASH_CACHE_PATH = os.path.expanduser(
-    os.environ.get("TRUDI_HASH_CACHE", "~/.cache/trudi/hash_cache.json")
+    os.environ.get("TRUDI_HASH_CACHE")
+    or os.path.join(trudi_cache_dir(), "hash_cache.json")
 )
 _HASH_CACHE_LOCK = threading.Lock()
 _HASH_CACHE: Optional[dict] = None

@@ -41,6 +41,20 @@ DAIR_TIMEOUT     = int(os.environ.get("TRUDI_DAIR_TIMEOUT")     or "120")
 HASH_TIMEOUT     = int(os.environ.get("TRUDI_HASH_TIMEOUT")     or "900")
 
 
+def trudi_cache_dir() -> str:
+    """Return the TRUDI shared cache dir: $TRUDI_CACHE_DIR, else ~/.cache/trudi.
+
+    Single resolution point for session.json, call_id.counter, hook.lock,
+    hash_cache.json, jobs/ and dashboard.url. The default dir is SHARED with
+    any live investigation (the MCP server and the Claude hooks) — the call-id
+    counter there is machine-global. Test suites and ad-hoc smoke scripts MUST
+    set TRUDI_CACHE_DIR to a temp dir before importing core/tools modules, or
+    they consume call ids from (and can reroute the beacon of) a live run.
+    Module-level path constants are resolved at import time.
+    """
+    return os.path.expanduser(os.environ.get("TRUDI_CACHE_DIR") or "~/.cache/trudi")
+
+
 def is_evidence_path(path: str) -> bool:
     """Return True if path is under a protected evidence location."""
     p = os.path.realpath(path)

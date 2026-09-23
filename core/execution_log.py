@@ -13,10 +13,12 @@ from functools import wraps
 from dataclasses import dataclass, field
 from typing import Optional
 
+from core.paths import trudi_cache_dir
+
 # Shared lock file with the PostToolUse hook. Both writers acquire this
 # exclusive lock around their read-merge-write cycles so they never lose
 # each other's entries to a race.
-_TRACE_LOCK_FILE = os.path.expanduser("~/.cache/trudi/hook.lock")
+_TRACE_LOCK_FILE = os.path.join(trudi_cache_dir(), "hook.lock")
 # Durability knob: every flush fsyncs the trace (a crash must not lose an
 # entry — the audit trail is the product). Tests patch this False: on WSL2 an
 # fsync costs ~80 ms and the suite writes ~100k entries (the whole 11-minute
@@ -24,7 +26,7 @@ _TRACE_LOCK_FILE = os.path.expanduser("~/.cache/trudi/hook.lock")
 _TRACE_FSYNC = os.environ.get("TRUDI_TRACE_FSYNC", "1") != "0"
 # Shared call_id counter — single monotonic sequence across MCP server + hook
 # so call_ids are dense and reflect global write order.
-_CALL_ID_COUNTER_FILE = os.path.expanduser("~/.cache/trudi/call_id.counter")
+_CALL_ID_COUNTER_FILE = os.path.join(trudi_cache_dir(), "call_id.counter")
 
 # The MCP tool whose handler is running (set by core.middleware around each
 # call). record_tool_call stamps it on the entry as `mcp_tool`, because a
@@ -126,7 +128,7 @@ def _next_shared_call_id(trace_path: Optional[str] = None, in_memory_seq: int = 
         return n
 
 # Written on every configure() so the singleton can auto-recover after a server restart.
-_SESSION_FILE = os.path.expanduser("~/.cache/trudi/session.json")
+_SESSION_FILE = os.path.join(trudi_cache_dir(), "session.json")
 
 
 def _utcnow() -> str:

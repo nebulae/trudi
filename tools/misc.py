@@ -11,7 +11,7 @@ import shutil
 from typing import Optional
 from fastmcp import FastMCP
 from core import run, run_with_output_file, output_safe
-from core.paths import assert_output_safe
+from core.paths import assert_output_safe, trudi_cache_dir
 
 mcp = FastMCP("misc")
 
@@ -2088,7 +2088,9 @@ def job_status(job_id: str) -> dict:
 def clear_case_run(case_dir: str) -> dict:
     """
     Reset a case for a fresh investigation run. Deletes:
-      - analysis/, exports/, reports/ contents
+      - analysis/, exports/, reports/ contents, INCLUDING hidden entries
+        (analysis/.tool_output/ sidecars, .FR-*/.synthesis-* locks) so a new
+        run never reads a previous run's output under a reused call id
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
@@ -2101,9 +2103,16 @@ def clear_case_run(case_dir: str) -> dict:
 
     for subdir in ("analysis", "exports", "reports"):
         target = os.path.join(case_dir, subdir)
-        for item in glob.glob(os.path.join(target, "*")):
+        # os.listdir, not glob("*"): glob skips dotfiles, which left stale
+        # .tool_output/ sidecars behind for the next run to read.
+        try:
+            names = sorted(os.listdir(target))
+        except OSError:
+            names = []
+        for name in names:
+            item = os.path.join(target, name)
             try:
-                if os.path.isdir(item):
+                if os.path.isdir(item) and not os.path.islink(item):
                     shutil.rmtree(item)
                 else:
                     os.remove(item)
@@ -2111,7 +2120,7 @@ def clear_case_run(case_dir: str) -> dict:
             except OSError as e:
                 errors.append(str(e))
 
-    session = os.path.expanduser("~/.cache/trudi/session.json")
+    session = os.path.join(trudi_cache_dir(), "session.json")
     if os.path.exists(session):
         try:
             os.remove(session)
@@ -2375,7 +2384,7 @@ def batch_run(tool_calls: list[dict], max_concurrent: int = 4) -> dict:
 # ~/.cache/trudi/dashboard.url on startup, and surface a deep-link URL that
 # pre-selects this case's trace.
 
-_DASHBOARD_DISCOVERY_FILE = os.path.expanduser("~/.cache/trudi/dashboard.url")
+_DASHBOARD_DISCOVERY_FILE = os.path.join(trudi_cache_dir(), "dashboard.url")
 
 
 def _detect_case_id(case_dir: str) -> str:
