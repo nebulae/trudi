@@ -150,7 +150,7 @@ def test_issue_omission_does_not_resolve_and_revision_retires_scoped_issue(case)
     fid = case.record_finding('printing established', 'SUSPECTED')
     result = {'result_block': {'issues': [{'kind': 'unsupported_claim', 'message': 'No print job',
                                          'finding_call_ids': [fid], 'evidence_call_ids': []}]}}
-    issues, resolutions = normalize_review(result, case._entries)
+    issues, resolutions, _ = normalize_review(result, case._entries)
     case.record_reason_call('reason_synthesize', True, 'issue', {},
                             extra={'review_issues': issues, 'issue_resolutions': resolutions})
     case.record_reason_call('reason_synthesize', True, 'nothing new', {}, extra={'review_issues': []})
@@ -161,14 +161,52 @@ def test_issue_omission_does_not_resolve_and_revision_retires_scoped_issue(case)
 
 def test_contradiction_cannot_be_demoted_to_limitation(case):
     fid = case.record_finding('wrong', 'SUSPECTED')
-    issues, _ = normalize_review({'result_block': {'issues': [{'kind': 'contradiction',
+    issues, _, _ = normalize_review({'result_block': {'issues': [{'kind': 'contradiction',
         'message': 'Source says otherwise', 'finding_call_ids': [fid]}]}}, case._entries)
     case.record_reason_call('reason_synthesize', True, 'no', {}, extra={'review_issues': issues})
     new = case.record_tool_call('new evidence', True, False, 0, 0)
-    with pytest.raises(ValueError, match='cannot become a limitation'):
-        normalize_review({'result_block': {'issues': [], 'resolutions': [{
-            'issue_id': issues[0]['issue_id'], 'basis': 'qualified_limitation',
-            'reason': 'Tried twice', 'call_ids': [new]}]}}, case._entries)
+    _, resolutions, rejected = normalize_review({'result_block': {'issues': [], 'resolutions': [{
+        'issue_id': issues[0]['issue_id'], 'basis': 'qualified_limitation',
+        'reason': 'Tried twice', 'call_ids': [new]}]}}, case._entries)
+    assert resolutions == []
+    assert rejected[0]['item'] == 'resolution' and 'cannot become a limitation' in rejected[0]['reason']
+
+
+def test_one_invalid_resolution_does_not_discard_the_round(case):
+    # VANKO-2016-DEEPSEEK41 2026-09-23: a single invalid limitation raised and
+    # the whole synthesis round - including valid resolutions - was thrown away.
+    a = case.record_finding('claim a', 'SUSPECTED')
+    b = case.record_finding('claim b', 'SUSPECTED')
+    issues, _, _ = normalize_review({'result_block': {'issues': [
+        {'kind': 'contradiction', 'message': 'A conflicts', 'finding_call_ids': [a]},
+        {'kind': 'evidence_gap', 'message': 'B thin', 'finding_call_ids': [b]}]}}, case._entries)
+    case.record_reason_call('reason_synthesize', True, 'r1', {}, extra={'review_issues': issues})
+    fixed = case.record_finding('claim a corrected', 'SUSPECTED', supersedes=a)
+    ev = case.record_tool_call('new evidence', True, False, 0, 0)
+    new_issues, resolutions, rejected = normalize_review({'result_block': {
+        'issues': [{'kind': 'bogus', 'message': 'x'}],
+        'resolutions': [
+            {'issue_id': issues[1]['issue_id'], 'basis': 'qualified_limitation',
+             'reason': 'no narrowed finding', 'call_ids': [ev]},
+            {'issue_id': issues[0]['issue_id'], 'basis': 'evidence',
+             'reason': 'bad basis for this evidence', 'call_ids': [fixed]}]}}, case._entries)
+    assert new_issues == []
+    assert {r['item'] for r in rejected} == {'issue', 'resolution'} and len(rejected) == 3
+
+
+def test_reworded_reraise_keeps_the_issue_id(case):
+    fid = case.record_finding('rdp source name', 'CONFIRMED')
+    first, _, _ = normalize_review({'result_block': {'issues': [
+        {'kind': 'contradiction', 'message': 'Two source names', 'finding_call_ids': [fid]}]}},
+        case._entries)
+    case.record_reason_call('reason_synthesize', True, 'r1', {}, extra={'review_issues': first})
+    again, _, _ = normalize_review({'result_block': {'issues': [
+        {'kind': 'contradiction', 'message': 'BLOCKER (re-raised): two source names remain',
+         'finding_call_ids': [fid]}]}}, case._entries)
+    assert again[0]['issue_id'] == first[0]['issue_id']
+    case.record_reason_call('reason_synthesize', True, 'r2', {}, extra={'review_issues': again})
+    state = review_state(case._entries)
+    assert len(state) == 1 and state[0]['message'].startswith('BLOCKER (re-raised)')
 
 
 def test_malformed_dair_is_failure_without_phase_mutation(case):
@@ -294,3 +332,47 @@ def test_partial_structured_dair_does_not_invent_default_phase(case):
         result = D.dair_assess('facts')
     assert not result['success']
     assert not case.index().by_type.get('dair_call')
+
+
+def _synth_round(case, issues, resolutions=()):
+    fp = state_fingerprint(case._entries, case._case_id, include_synthesis=False, scope='claims')
+    return case.record_reason_call('reason_synthesize', True, 'round', {}, extra={
+        'review_issues': list(issues), 'issue_resolutions': list(resolutions),
+        'synthesis_fingerprint': fp})
+
+
+def test_open_objection_blocks_until_the_round_cap_then_is_carried(case):
+    from tools._readiness import assess_readiness
+    fid = case.record_finding('rdp source name', 'CONFIRMED')
+    issues, _, _ = normalize_review({'result_block': {'issues': [
+        {'kind': 'contradiction', 'message': 'Two source names', 'finding_call_ids': [fid]}]}},
+        case._entries)
+    _synth_round(case, issues)
+    r1 = assess_readiness(case)
+    assert any('Two source names' in b for b in r1['blocking_issues'])
+    _synth_round(case, issues)                      # round 2: still not satisfied
+    r2 = assess_readiness(case)
+    assert not any('Two source names' in b for b in r2['blocking_issues'])
+    assert any(u.startswith('UNRESOLVED after 2 review rounds') and 'Two source names' in u
+               for u in r2['synthesize_blockers_unresolved'])
+
+
+def test_tool_calls_do_not_make_synthesis_stale_but_findings_do(case):
+    from tools._readiness import assess_readiness
+    case.record_finding('claim', 'SUSPECTED')
+    _synth_round(case, [])
+    case.record_tool_call('a later read', True, False, 0, 0)
+    assert not any('stale' in b for b in assess_readiness(case)['blocking_issues'])
+    case.record_finding('new claim after review', 'SUSPECTED')
+    assert any('stale' in b for b in assess_readiness(case)['blocking_issues'])
+
+
+def test_follow_up_round_sends_only_changed_findings_in_full(case):
+    from tools.reasoning import _typed_findings_block
+    old = case.record_finding('old unchanged claim ' + 'x' * 400, 'SUSPECTED')
+    new = case.record_finding('new claim', 'LIKELY')
+    text, n = _typed_findings_block(case._entries, focus={new})
+    assert n == 2
+    old_line = next(l for l in text.splitlines() if f'cid {old} ' in l)
+    assert 'previously reviewed, unchanged' in old_line and len(old_line) < 320
+    assert 'previously reviewed' not in next(l for l in text.splitlines() if f'cid {new} ' in l)

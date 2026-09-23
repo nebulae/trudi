@@ -2093,7 +2093,11 @@ class TestPreReportHypothesisExhaustion:
             second = R.reason_synthesize("same account")
             assert first["success"] and second["cached"] and len(calls) == 1
             assert "[LIKELY] cid" in calls[0]
+            # A tool call alone changes no claim: the recorded review still holds.
             base_log.record_tool_call("new evidence", True, False, 0, 0)
+            assert R.reason_synthesize("account observed")["cached"] and len(calls) == 1
+            # A new finding is a changed claim: review again.
+            base_log.record_finding("second account observed", "LIKELY", "ez.evtxecmd")
             assert R.reason_synthesize("account observed")["success"]
             assert len(calls) == 2
 

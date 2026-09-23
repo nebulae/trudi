@@ -3142,7 +3142,8 @@ def reason_synthesize(findings: str, investigation_summary: str = "",
             ),
         }
     prior_synth = _synthesizes_since_evidence(log._entries)
-    synth_fingerprint = state_fingerprint(log._entries, log._case_id, include_synthesis=False)
+    synth_fingerprint = state_fingerprint(log._entries, log._case_id, include_synthesis=False,
+                                          scope="claims")
     previous = next((e for e in reversed(log._entries) if e.get("tool") == "reason_synthesize"), None)
     if (previous and previous.get("synthesis_fingerprint") == synth_fingerprint
             and previous.get("success") is True):
@@ -3154,15 +3155,31 @@ def reason_synthesize(findings: str, investigation_summary: str = "",
     # The reviewer judges the RECORDED findings (typed tier, claim, cids) —
     # not the investigator's narrative, whose wording can over- or
     # under-state the recorded tier.
-    typed_block, n_typed = _typed_findings_block(log._entries)
-    from core.review_issues import review_state, normalize_review
+    from core.review_issues import review_state, normalize_review, completed_rounds
     open_issues = [i for i in review_state(log._entries) if i['status'] == 'open']
+    # Round 2+: judge only what changed since the last recorded review, plus the
+    # findings the open issues name. Re-sending all findings in full overran the
+    # output budget (3 truncations) and re-faulted unchanged text every round.
+    focus = None
+    last_review = next((e for e in reversed(log._entries) if e.get("tool") == "reason_synthesize"
+                        and e.get("success") is not False and "review_issues" in e), None)
+    if last_review is not None:
+        focus = {e["call_id"] for e in active_findings(log._entries)
+                 if int(e["call_id"]) > int(last_review["call_id"])}
+        for i in open_issues:
+            focus |= set(i.get("finding_call_ids") or [])
+    typed_block, n_typed = _typed_findings_block(log._entries, focus=focus)
     user = (f"INVESTIGATOR NARRATIVE (non-authoritative; retired claims are not current):\n{findings}"
             + "\nOPEN REVIEW ISSUES (resolve explicitly; omission does not close them):\n"
             + json.dumps(open_issues))
     if n_typed:
         user += ("\n\nRECORDED FINDINGS (typed, from the trace — these ARE the recorded "
                  "tiers; judge these, and cite their cids):\n" + typed_block)
+        if focus is not None:
+            user += ("\n\nThis is a FOLLOW-UP round. Findings marked 'previously reviewed' "
+                     "were judged in an earlier round and are unchanged: raise a new issue "
+                     "against one only when a CHANGED finding contradicts it. Resolve the "
+                     "open issues and judge the changed findings.")
     if investigation_summary:
         user += f"\n\nINVESTIGATION COVERAGE:\n{investigation_summary}"
     # Citable set = the agent's ids ∪ every finding ∪ every finding's EVIDENCE
@@ -3190,13 +3207,18 @@ def reason_synthesize(findings: str, investigation_summary: str = "",
         pass
     if result.get("success"):
         try:
-            typed_issues, resolutions = normalize_review(result, log._entries)
+            typed_issues, resolutions, rejected = normalize_review(result, log._entries)
             result["review_issues"] = typed_issues
             result["issue_resolutions"] = resolutions
             result["synthesis_fingerprint"] = synth_fingerprint
+            result["review_rounds_completed"] = completed_rounds(log._entries) + 1
+            if rejected:
+                # Kept visible so the agent can repair the specific item.
+                result["review_items_rejected"] = rejected
             log.update_reason_call(result.get("_trudi_call_id", 0),
                                    review_issues=typed_issues, issue_resolutions=resolutions,
-                                   synthesis_fingerprint=synth_fingerprint)
+                                   synthesis_fingerprint=synth_fingerprint,
+                                   review_items_rejected=rejected or None)
         except ValueError as exc:
             result.update(success=False, error=str(exc), gate="review_schema", retryable=True)
             log.update_reason_call(result.get("_trudi_call_id", 0), success=False,
@@ -3303,9 +3325,13 @@ def _synthesizes_since_evidence(entries) -> int:
     return n
 
 
-def _typed_findings_block(entries, max_chars: int = 8000) -> tuple[str, int]:
+def _typed_findings_block(entries, max_chars: int = 8000,
+                          focus: set | None = None) -> tuple[str, int]:
     """The recorded findings as the synthesize reviewer must see them: tier,
-    cid, typed claim key, principal/entities, description. (text, count)."""
+    cid, typed claim key, principal/entities, description. (text, count).
+
+    With `focus`, findings outside it were judged in an earlier round and are
+    listed on one line with a short description, not re-sent in full."""
     lines: list[str] = []
     n = 0
     for e in active_findings(entries or []):
@@ -3314,6 +3340,11 @@ def _typed_findings_block(entries, max_chars: int = 8000) -> tuple[str, int]:
         n += 1
         c = e.get("claim") if isinstance(e.get("claim"), dict) else {}
         key = "|".join(str(c.get(k) or "-") for k in ("kind", "category", "act"))
+        if focus is not None and e.get("call_id") not in focus:
+            lines.append(f"- [{str(e.get('confidence') or '').upper()}] cid {e.get('call_id')} "
+                         f"{key} — previously reviewed, unchanged: "
+                         f"{str(e.get('description') or '')[:200]}")
+            continue
         who = (f" principal={c.get('principal')}" if c.get("principal") else "")
         ents = c.get("entities") or []
         ents_s = f" entities={', '.join(str(x) for x in ents)}" if ents else ""

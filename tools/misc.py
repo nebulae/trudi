@@ -1768,10 +1768,12 @@ def write_final_report(output_path: str, content: str) -> dict:
         content = content.rstrip() + "\n".join(section) + "\n"
     appended = 0
     if limitations:
-        content = (content.rstrip() + "\n\n## Reviewer limitations (adjudicated evidence gaps)\n"
+        content = (content.rstrip() + "\n\n## Reviewer limitations and unresolved objections\n"
                    "The adversarial reviewer raised the following points that could not be settled "
-                   "with the evidence in scope. A reviewed narrower claim and a typed "
-                   "evidence disposition support each limitation.\n"
+                   "with the evidence in scope. Entries marked UNRESOLVED are objections the "
+                   "reviewer still held when the bounded review ended — they are stated here, "
+                   "not settled; the others are adjudicated limitations backed by a reviewed "
+                   "narrower claim and a typed evidence disposition.\n"
                    + "\n".join(f"- {b}" for b in limitations) + "\n")
         appended = len(limitations)
     with open(output_path, "w", encoding="utf-8") as f:

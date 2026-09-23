@@ -15,11 +15,22 @@ def digest(value) -> str:
                                      separators=(',', ':')).encode()).hexdigest()
 
 
-def state_fingerprint(entries, case_id='', include_synthesis=True) -> str:
+# What a cross-finding review actually judged: the recorded claims and how
+# leads were settled. Tool calls, output-file stats and source hashes are not
+# claims; counting them made every later read force another full synthesis.
+_CLAIM_TYPES = {'finding', 'finding_retracted', 'disposition'}
+
+
+def state_fingerprint(entries, case_id='', include_synthesis=True, scope='full') -> str:
+    """scope='full' binds the pre-report approval to the whole semantic state;
+    scope='claims' is the synthesis staleness key (claims + dispositions)."""
     records, files = [], {}
     for e in current_entries(entries):
         typ, tool = e.get('type'), e.get('tool')
         if typ in _IGNORED_TYPES or tool in _IGNORED_TOOLS:
+            continue
+        if scope == 'claims' and typ not in _CLAIM_TYPES and not (
+                include_synthesis and tool == 'reason_synthesize'):
             continue
         if tool == 'reason_synthesize' and not include_synthesis:
             continue
@@ -38,6 +49,8 @@ def state_fingerprint(entries, case_id='', include_synthesis=True) -> str:
                     files[path] = [st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino]
                 except OSError:
                     files[path] = 'unavailable'
+    if scope == 'claims':
+        return digest([POLICY_VERSION, case_id, records])
     root = Path(__file__).resolve().parents[1]
     policy = {}
     for pattern in ('core/findings.py', 'core/readiness.py', 'core/review_issues.py',

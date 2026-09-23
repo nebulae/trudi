@@ -1,7 +1,12 @@
 """Shared deterministic readiness policy; no model calls or trace mutations."""
+import os
 import re
-from core.findings import current_entries, finding_view
+from core.findings import active_findings, current_entries, finding_view
 from core.readiness import issue_records, state_fingerprint
+
+# Recorded synthesis rounds after which open reviewer objections are carried
+# into the report as stated limitations instead of blocking it.
+SYNTH_ROUND_CAP = int(os.environ.get("TRUDI_SYNTH_ROUND_CAP") or "2")
 
 
 def assess_readiness(log, include_synthesis=True):
@@ -105,21 +110,46 @@ def assess_readiness(log, include_synthesis=True):
                 )
 
     if include_synthesis:
-        from core.review_issues import review_state
+        from core.review_issues import review_state, completed_rounds
+        # Bounded review: after SYNTH_ROUND_CAP recorded rounds the reviewer's
+        # remaining objections no longer block — they are carried into the
+        # report as stated, unresolved objections. A model reviewer that is
+        # never satisfied must not prevent an honest report.
+        rounds = completed_rounds(log._entries)
+        capped = rounds >= SYNTH_ROUND_CAP
+
+        def _block_or_carry(msg: str) -> None:
+            if capped:
+                synth_unresolved.append(f"UNRESOLVED after {rounds} review rounds — {msg}")
+            else:
+                issues.append(msg)
+
         for issue in review_state(log._entries):
             if issue['status'] == 'open' and issue['kind'] != 'advisory':
-                issues.append(f"{issue['issue_id']} [{issue['kind']}]: {issue['message']}")
+                _block_or_carry(f"{issue['issue_id']} [{issue['kind']}]: {issue['message']}")
             elif issue['status'] == 'limitation':
                 synth_unresolved.append(f"{issue['issue_id']}: {issue['message']} — "
                                         f"{issue['resolution']['reason']}")
         latest_attempt = next((e for e in reversed(log._entries)
                                if e.get('tool') == 'reason_synthesize'), None)
         if latest_attempt and latest_attempt.get('success') is False:
-            issues.append("Latest synthesis failed; repair review before reporting")
-        if latest_synth and latest_synth.get('synthesis_fingerprint'):
-            current = state_fingerprint(log._entries, log._case_id, include_synthesis=False)
-            if current != latest_synth['synthesis_fingerprint']:
-                issues.append("Synthesis snapshot is stale; review the changed findings/evidence")
+            if capped:
+                warnings.append("Latest synthesis attempt failed; the report rests on the "
+                                f"last recorded review (round {rounds}).")
+            else:
+                issues.append("Latest synthesis failed; repair review before reporting")
+        last_review = next((e for e in reversed(log._entries)
+                            if e.get('tool') == 'reason_synthesize'
+                            and e.get('synthesis_fingerprint')), None)
+        if last_review:
+            current = state_fingerprint(log._entries, log._case_id, include_synthesis=False,
+                                        scope='claims')
+            if current != last_review['synthesis_fingerprint']:
+                changed = sorted(e['call_id'] for e in active_findings(log._entries)
+                                 if int(e['call_id']) > int(last_review['call_id']))
+                _block_or_carry("Synthesis snapshot is stale; findings/dispositions changed "
+                                "after the last cross-finding review"
+                                + (f" (findings not cross-reviewed: {changed})" if changed else ""))
 
     # Case-question gate (typed). The question is DECLARED — reason.plan(
     # case_question=…) or dair_assess(case_question=…) — and a CONFIRMED/LIKELY
