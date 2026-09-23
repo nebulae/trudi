@@ -39,3 +39,25 @@ class TestPyToolBaseline:
         entry = [e for e in log._entries if e.get("call_id") == cid][0]
         assert cid and entry["cmd"] == "<py>:yara_scan_strings"
         assert "NinaResearch" in entry.get("stdout_excerpt", "")
+
+    def test_baseline_returns_self_logged_cid(self, tmp_path):
+        """A self-logging tool that rebuilt its result dict (dropping the id)
+        still gets its own tool_call id echoed — never another tool's."""
+        from unittest.mock import patch
+        from core.execution_log import ExecutionLog, current_mcp_tool
+        from core.middleware import _trace_success_baseline, _stamp_call_id
+        log = ExecutionLog()
+        log.configure("BASELINE", str(tmp_path / "trace.json"), save_session=False)
+        before = len(log._entries)
+        tok = current_mcp_tool.set("strings_grep")
+        try:
+            own = log.record_tool_call(cmd="strings -a x", success=True, truncated=False,
+                                       retries=0, exit_code=0, stderr="")
+        finally:
+            current_mcp_tool.reset(tok)
+        with patch("core.execution_log.log", log):
+            cid = _trace_success_baseline("strings_grep", 0.1, before, {"success": True})
+            other = _trace_success_baseline("tsk_fls", 0.1, before, {"success": True})
+        assert cid == own and other == 0
+        assert _stamp_call_id({"success": True}, cid)["_trudi_call_id"] == own
+        assert len(log._entries) == before + 1      # no duplicate baseline entry

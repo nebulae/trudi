@@ -524,6 +524,14 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
         new_entries = log._entries[entries_before:]
         self_logged = any(isinstance(e, dict) and e.get("type") != "call_initiated"
                           for e in new_entries)
+        if self_logged:
+            # A self-logging wrapper that rebuilt its result dict dropped the
+            # id _log_tool stamped: hand back its own (last) tool_call id so
+            # _stamp_call_id can echo it — never another tool's entry.
+            own = [e for e in new_entries if isinstance(e, dict)
+                   and e.get("type") == "tool_call"
+                   and e.get("mcp_tool", tool_name) == tool_name]
+            return int(own[-1].get("call_id") or 0) if own else 0
         if not self_logged:
             payload = _result_payload(result) or {}
             ok = payload.get("success", True) is not False

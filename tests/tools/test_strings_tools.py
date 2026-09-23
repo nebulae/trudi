@@ -70,6 +70,16 @@ class TestStringsGrep:
         assert r["match_count"] == 1 and r["matches"] == ["http://evil.com"]
         assert r["lines_scanned"] == 2
 
+    def test_result_echoes_its_own_call_id(self, mock_run):
+        """The self-logged id is returned inline — the agent cites it without
+        grepping the trace."""
+        from tools.strings_tools import strings_grep
+        with patch("subprocess.Popen", return_value=self._popen(["http://evil.com"])):
+            r = strings_grep("/malware/sample.exe", "http")
+        from core.execution_log import log
+        cids = [e["call_id"] for e in log._entries if e.get("type") == "tool_call"]
+        assert r["_trudi_call_id"] and r["_trudi_call_id"] == cids[-1]
+
     def test_match_far_past_old_output_cap_is_found(self, mock_run):
         """Regression: the old implementation buffered all strings output
         through a 50 KB cap BEFORE filtering, so a match past the cap was

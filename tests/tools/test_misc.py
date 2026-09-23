@@ -7,7 +7,11 @@ from unittest.mock import patch
 
 @pytest.fixture(autouse=True)
 def mock_run(run_ok):
-    with patch("tools.misc.run", return_value=run_ok) as m:
+    # Optional binaries resolve as installed unless a test says otherwise, so
+    # argv tests do not depend on what this host has installed.
+    with patch("tools.misc.run", return_value=run_ok) as m, \
+         patch("tools.misc._bin_or_warn",
+               side_effect=lambda n: n if n.startswith("/") else f"/usr/bin/{n}"):
         yield m
 
 
@@ -753,6 +757,97 @@ class TestMraptorScan:
         monkeypatch.setattr("tools.misc._bin_or_warn", lambda name: None)
         r = mraptor_scan("/tmp/x.docx")
         assert r["success"] is False
+
+
+class TestUsbDeviceForensics:
+    def test_registry_passed_with_r_flag_and_output_honoured(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        hives = tmp_path / "config"
+        hives.mkdir()
+        (hives / "SYSTEM").write_bytes(b"regf")
+        out = str(tmp_path / "exports" / "usb.tsv")
+        r = usbdeviceforensics(str(hives / "SYSTEM"), output_path=out)
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:3] == ["/usr/local/bin/usbdeviceforensics", "-r", str(hives)]
+        assert cmd[cmd.index("-o") + 1] == out and cmd[cmd.index("-f") + 1] == "tsv"
+        assert r["output_path"] == out
+
+    def test_directory_without_output(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        usbdeviceforensics(str(tmp_path))
+        assert mock_run.call_args[0][0] == ["/usr/local/bin/usbdeviceforensics", "-r", str(tmp_path)]
+
+    def test_output_into_evidence_refused(self):
+        from tools.misc import usbdeviceforensics
+        with pytest.raises(ValueError):
+            usbdeviceforensics("/mnt/x/SYSTEM", output_path="/mnt/x/usb.tsv")
+
+
+class TestToolUnavailable:
+    """A missing optional binary fails fast with a typed status and the tool
+    is dropped from the manifest DAIR prescribes from."""
+
+    @pytest.mark.parametrize("fn,args", [
+        ("chainsaw_hunt", ("/tmp/evtx",)), ("capa_analyze", ("/tmp/x.exe",)),
+        ("olevba_scan", ("/tmp/x.doc",)), ("mraptor_scan", ("/tmp/x.doc",)),
+        ("densityscout_scan", ("/tmp/x.exe",)), ("usnparser_parse", ("/tmp/$J",)),
+    ])
+    def test_typed_failure_without_running(self, mock_run, monkeypatch, fn, args):
+        import tools.misc as misc
+        monkeypatch.setattr("tools.misc._bin_or_warn", lambda name: None)
+        r = getattr(misc, fn)(*args)
+        assert r["success"] is False and r["status"] == "tool_unavailable"
+        assert "not installed" in r["error"]
+        assert not mock_run.called
+
+    def test_uninstalled_tools_excluded_from_manifest(self, monkeypatch):
+        import tools.tool_capabilities as tc
+        monkeypatch.setattr(tc.shutil, "which",
+                            lambda n: None if n == "chainsaw" else f"/usr/bin/{n}")
+        assert "misc.chainsaw_hunt" in tc.unavailable_tools()
+        assert "misc.chainsaw_hunt" not in tc.allowed_tool_names()
+        assert "misc.chainsaw_hunt" in tc.unknown_priority_tools(["misc.chainsaw_hunt"])
+        text = tc.format_tool_manifest_for_prompt(max_tools_per_capability=50)
+        assert "misc.chainsaw_hunt" not in text and "ez.evtxecmd" in text
+        monkeypatch.setattr(tc.shutil, "which", lambda n: f"/usr/bin/{n}")
+        assert "misc.chainsaw_hunt" in tc.allowed_tool_names()
+
+
+class TestSrumExport:
+    def test_esedbexport_argv_and_tables(self, monkeypatch, tmp_path):
+        from tools.misc import srum_export
+        out = tmp_path / "exports" / "srum"
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"], captured["kw"] = cmd, kw
+            exp = out / "srudb.export"
+            exp.mkdir(parents=True)
+            for t in ("{973F5D5C-1D90-4944-BE8E-24B94231A174}.7",
+                      "{D10CA2FE-6FCF-4F6D-848E-B2E99266FA89}.9", "SruDbIdMapTable.4"):
+                (exp / t).write_text("a\tb\n")
+            return {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+                    "_trudi_call_id": 5}
+        monkeypatch.setattr("tools.misc.run", fake_run)
+        r = srum_export("/mnt/x/Windows/System32/sru/SRUDB.dat", str(out))
+        assert captured["cmd"] == ["/usr/bin/esedbexport", "-t", str(out / "srudb"),
+                                   "/mnt/x/Windows/System32/sru/SRUDB.dat"]
+        assert r["success"] is True and r["output_path"] == str(out / "srudb.export")
+        assert len(r["tables"]) == 3
+        net = [v for k, v in r["key_tables"].items() if k.startswith("network_usage")]
+        assert net and net[0].endswith("{973F5D5C-1D90-4944-BE8E-24B94231A174}.7")
+        assert any(k.startswith("app_resource_usage") for k in r["key_tables"])
+
+    def test_output_into_evidence_refused(self):
+        from tools.misc import srum_export
+        with pytest.raises(ValueError):
+            srum_export("/mnt/x/SRUDB.dat", "/mnt/x/out")
+
+    def test_no_tables_is_failure(self, monkeypatch, tmp_path):
+        from tools.misc import srum_export
+        monkeypatch.setattr("tools.misc.run", lambda cmd, **kw: {"success": True})
+        r = srum_export("/tmp/SRUDB.dat", str(tmp_path / "exports"))
+        assert r["success"] is False and "no tables" in r["error"]
 
 
 class TestBatchRun:

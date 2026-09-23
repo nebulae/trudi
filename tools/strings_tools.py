@@ -121,8 +121,8 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
     start = time.perf_counter()
 
     def _trace(success: bool, matches: list[str], stderr: str, exit_code: int,
-               truncated: bool) -> None:
-        _log_tool({
+               truncated: bool) -> int:
+        tc = {
             "success": success,
             "stdout": "\n".join(matches)[:OUTPUT_CAP],
             "stderr": stderr,
@@ -131,7 +131,10 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
             "cmd": " ".join(cmd),
             "retries": 0,
             "elapsed_seconds": round(time.perf_counter() - start, 1),
-        })
+        }
+        _log_tool(tc)
+        # Echo the id inline so the result is citable without a trace lookup.
+        return tc.get("_trudi_call_id", 0)
 
     try:
         proc = subprocess.Popen(
@@ -139,8 +142,9 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
             text=True, errors="replace", bufsize=1,
         )
     except OSError as e:
-        _trace(False, [], str(e), -1, False)
-        return {"success": False, "error": f"failed to spawn strings: {e}", "matches": []}
+        cid = _trace(False, [], str(e), -1, False)
+        return {"success": False, "error": f"failed to spawn strings: {e}", "matches": [],
+                "_trudi_call_id": cid}
 
     stderr_buf: list[str] = []
 
@@ -189,9 +193,10 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
         stderr = (f"strings_grep scan aborted after {timeout}s "
                   f"({lines_scanned} lines scanned); " + stderr).strip("; ")
 
-    _trace(complete, matches, stderr, exit_code, truncated)
+    cid = _trace(complete, matches, stderr, exit_code, truncated)
 
     result = {
+        "_trudi_call_id": cid,
         "success": complete,
         "file": file_path,
         "pattern": pattern,
@@ -302,10 +307,11 @@ def floss_extract(
     """
     if output_path:
         assert_output_safe(output_path)
-    binary = shutil.which("floss")
-    if not binary:
-        return {"success": False, "error":
-                "floss not installed — pip install flare-floss"}
+    from tools.tool_capabilities import optional_binary, tool_unavailable_result
+    missing = tool_unavailable_result("strings.floss_extract", shutil.which)
+    if missing:
+        return missing
+    binary = optional_binary("strings.floss_extract", shutil.which)
     cmd = [binary, "-n", str(min_length)]
     if output_path:
         cmd += ["-j", output_path]
