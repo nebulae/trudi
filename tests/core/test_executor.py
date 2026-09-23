@@ -252,12 +252,12 @@ class TestStdoutSidecarAndExitPolicy:
             assert fh.read().endswith("LAST: FOUND\n")
 
     @patch("core.executor.subprocess.run")
-    def test_short_stdout_has_no_sidecar_but_records_length(self, mock_sub):
+    def test_short_stdout_is_kept_and_records_length(self, mock_sub):
         from core.execution_log import log
         mock_sub.return_value = make_proc(0, b"tiny", b"")
         r = run(["tool"])
         e = next(x for x in log._entries if x.get("call_id") == r["_trudi_call_id"])
-        assert e["stdout_chars"] == 4 and "stdout_path" not in e
+        assert e["stdout_chars"] == 4 and open(e["stdout_path"]).read() == "tiny"
 
     @patch("core.executor.subprocess.run")
     def test_sidecar_keeps_stdout_the_agent_cap_dropped(self, mock_sub):

@@ -2,6 +2,7 @@
 import contextvars
 import inspect
 import json
+import re
 import time
 import uuid
 from core.evidence_packets import (PacketError, build_packet, case_identity, cited_ids,
@@ -164,6 +165,22 @@ def _existing(log, key, request_hash):
     return None
 
 
+_NOT_SHOWN = re.compile(r"not (?:in|among|within) (?:the |any )?(?:selection|shown|displayed|rows? shown)"
+                        r"|(?:were|was) not shown|outside (?:the )?(?:\d+ of [\d,]+ )?(?:lines|rows)? ?shown"
+                        r"|not visible|shown spans", re.IGNORECASE)
+
+
+def rows_not_shown(result) -> list:
+    """Items the reviewer could not verify because the deciding rows were not
+    displayed to it (a display limit, not an absence). Empty otherwise."""
+    rb = result.get('result_block') if isinstance(result.get('result_block'), dict) else {}
+    items = [str(x) for x in (rb.get('unverifiable') or []) if str(x).strip()]
+    text = str(result.get('conclusion') or '')
+    if not (_NOT_SHOWN.search(text) or any(_NOT_SHOWN.search(i) for i in items)):
+        return []
+    return items[:12] or [text[:400]]
+
+
 def _failure(status, error, **extra):
     return {'success': False, 'status': status, 'error': error,
             'retryable': status == 'retryable-review-failure', **extra}
@@ -256,6 +273,14 @@ def submit(log, request, key, selectors=None):
                 outcome = _failure(status, result.get('conclusion') or 'Reviewer needs more evidence',
                                    review_call_id=result.get('_trudi_call_id'),
                                    next_actions=result.get('discriminators_missing') or result.get('directives'))
+                unshown = rows_not_shown(result) if status == 'needs-evidence' else []
+                if unshown:
+                    outcome.update(reason='rows_not_shown', unverified_items=unshown, guidance=(
+                        "The reviewer could not SEE these rows; it did not find them absent. Do not "
+                        "drop the fact: run a targeted read that returns exactly those rows (read.output "
+                        "with where=/query= on the event id, string or time over the extractor's "
+                        "output), cite that call, and resubmit. Remove a fact only if a targeted search "
+                        "over the complete source shows it is not there."))
             else:
                 from tools.misc import record_finding
                 token = submission_commit.set({'submission_key': key, 'submission_request_hash': request_hash,
@@ -273,7 +298,9 @@ def submit(log, request, key, selectors=None):
                     submission_commit.reset(token)
                 outcome['status'] = 'recorded' if outcome.get('success') else 'needs-evidence'
             _event(log, key, request_hash, outcome['status'], owner=owner,
-                   review_call_id=result.get('_trudi_call_id'), error=outcome.get('error'))
+                   review_call_id=result.get('_trudi_call_id'), error=outcome.get('error'),
+                   **({'reason': outcome['reason'], 'unverified_items': outcome['unverified_items']}
+                      if outcome.get('reason') == 'rows_not_shown' else {}))
             return outcome
     except Exception as exc:
         status = exc.status if isinstance(exc, PacketError) else 'retryable-review-failure'

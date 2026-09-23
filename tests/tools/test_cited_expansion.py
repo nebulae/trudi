@@ -255,8 +255,8 @@ class TestCitedOutputFileReading:
         with patch("core.execution_log.log", log), \
              patch.object(R, "COMPAT_EXPAND_CITED", True):
             block = R._expand_cited_evidence([cid], 6000, query_text="Anthony Vanko")
-        assert "[from output file]" not in block
-        assert "SHOULD_NOT_BE_READ" not in block
+        # The call's own kept stdout may be read; the unrelated CSV must not be.
+        assert "SHOULD_NOT_BE_READ" not in block and "x.csv" not in block
 
     def test_no_query_terms_does_not_read_file(self, tmp_path):
         out = tmp_path / "d"; out.mkdir()

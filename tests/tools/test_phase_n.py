@@ -317,7 +317,7 @@ class TestFix3PreReportPhaseReturn:
     """Fix 3: a failed pre_report_check boots DAIR out of Report back to Analyze
     so the phase gate permits the remediation tools the blockers demand."""
 
-    def test_failed_pre_report_returns_to_analyze(self, tmp_path):
+    def test_failed_pre_report_returns_to_collect(self, tmp_path):
         l = ExecutionLog(); l.configure("F3", str(tmp_path / "t.json"), save_session=False)
         for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
@@ -331,9 +331,10 @@ class TestFix3PreReportPhaseReturn:
         with patch("core.execution_log.log", l):
             r = reason_pre_report_check()
         assert r["ready_to_report"] is False
-        assert l._current_phase == "Analyze"          # booted out of Report
+        assert l._current_phase == "Collect"          # evidence work, above Report
+        assert l._phase_stack[-2]["phase"] == "Report"
         ent = [e for e in l._entries if e.get("tool") == "reason_pre_report_check"][-1]
-        assert ent["phase_returned_to"] == "Analyze"
+        assert ent["phase_returned_to"] == "Collect"
         assert ent["dair_phase"] == "Report"          # the check itself ran in Report
 
     def test_passed_pre_report_leaves_phase(self, tmp_path):
@@ -346,7 +347,7 @@ class TestFix3PreReportPhaseReturn:
             r = reason_pre_report_check()
         # zero findings -> not ready anyway, but assert the mechanism only fires from Report
         # (here it will return to Analyze since not ready) — verify the field is set:
-        assert l._current_phase in ("Analyze", "Report")
+        assert l._current_phase in ("Collect", "Report")
 
 
 class TestFix4BatchDispositions:

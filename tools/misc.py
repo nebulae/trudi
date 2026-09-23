@@ -1789,12 +1789,14 @@ def write_final_report(output_path: str, content: str) -> dict:
     inventory: dict = {}
     lifecycle: dict = {}
     ioc_inv: dict = {}
+    unshown: list = []
     try:
         for e in reversed(log._entries):
             if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
                 inventory = dict(e.get("registry_inventory") or {})
                 lifecycle = dict(e.get("lifecycle_coverage") or {})
                 ioc_inv = dict(e.get("ioc_inventory") or {})
+                unshown = list(e.get("unshown_review_details") or [])
                 break
     except Exception:
         inventory = {}
@@ -1884,6 +1886,15 @@ def write_final_report(output_path: str, content: str) -> dict:
                 sec.append(f"| {i.get('technique','')} {i.get('technique_name','')} | "
                            f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
                            f"{', '.join((i.get('examine_with') or [])[:4])} |")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if unshown and "## details the reviewer could not see" not in content.lower():
+        sec = ["\n\n## Details the reviewer could not see",
+               "During finding review these details could not be checked because the deciding "
+               "rows were not displayed to the reviewer — a display limit, not a finding of "
+               "absence. Compare each with the recorded findings: a detail absent from them was "
+               "removed rather than verified and remains un-checked."]
+        for u in unshown:
+            sec.append(f"- ({u.get('submission')}, call {u.get('call_id')}) {u.get('item')}")
         content = content.rstrip() + "\n".join(sec) + "\n"
     from core.findings import active_findings
     current = active_findings(log._entries)
@@ -2061,13 +2072,15 @@ def record_agent_message(
 @mcp.tool()
 def job_status(job_id: str) -> dict:
     """
-    Poll a background job (e.g. net.tcpxtract_streams). While running:
-    status + elapsed + files-so-far. When finished: the full tool result —
-    trace-logged with a citable _trudi_call_id on first collection. Poll
-    between other work; never wait idle on a running job.
+    Poll a background job. Long tools (ewf_verify, plaso, carvers, directory
+    scans, and any Volatility / EZ directory / event-log run that passes ~30 s)
+    return a job_id instead of blocking. While running: status (running |
+    queued) + elapsed. When finished: the tool's full result with its citable
+    _trudi_call_id. Poll between other work; never wait idle on a running job.
+    A job_id that is unknown after a server restart was lost — re-run the tool.
     """
-    from core.jobs import job_status as _job_status
-    return _job_status(job_id)
+    from core.jobs import job_status as _job_status, task_job_status
+    return task_job_status(job_id) or _job_status(job_id)
 
 
 @mcp.tool()

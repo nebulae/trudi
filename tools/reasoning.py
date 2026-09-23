@@ -3418,16 +3418,17 @@ def reason_pre_report_check() -> dict:
         conclusion = (f"READY_TO_REPORT: {str(ready).lower()}\n"
                       f"BLOCKING_ISSUES: {'; '.join(result['blocking_issues']) or 'none'}")
         if not ready and log._current_phase == "Report":
-            result["phase_returned_to"] = "Analyze"
+            result["phase_returned_to"] = "Collect"
         log.record_reason_call(
             tool="reason_pre_report_check", success=True, conclusion=conclusion,
             directives={}, blockers=result["blocking_issues"],
             input_call_ids=[e['call_id'] for e in active_findings(log._entries)],
             extra=result)
         if not ready and log._current_phase == "Report":
-            log._current_phase = "Analyze"
-            if log._phase_stack and log._phase_stack[-1].get("phase") == "Report":
-                log._phase_stack.pop()
+            # Evidence gaps go back to Collect, above Report: a DAIR pop resumes
+            # Report once the work is done. Recorded, so a restart replays it.
+            log.record_phase_transition("Collect", "pre_report_not_ready",
+                                        trigger="reason_pre_report_check")
         return result
 
 

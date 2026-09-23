@@ -365,6 +365,14 @@ from core.forensic_binaries import (  # noqa: F401
 
 # ── Gate helpers ──────────────────────────────────────────────────────────────
 
+def _report_phase() -> bool:
+    try:
+        from core.execution_log import log
+        return (getattr(log, "_current_phase", "") or "") == "Report"
+    except Exception:
+        return False
+
+
 def _gate_decision() -> tuple[bool, str]:
     """Return (should_block, reason). Fail-open on gate errors, but log them."""
     try:
@@ -562,6 +570,44 @@ def _stamp_call_id(result, cid: int):
     return result
 
 
+async def _run_as_job(jobs, mode: str, tool_name: str, args: dict, invoke):
+    """Run a long tool as an in-process background task. Returns ("done",
+    result) when it finishes within the inline wait (a short run stays a
+    normal call), else a job handle. The task is created while this call's
+    context (tool identity) is set, so it logs exactly as a synchronous run."""
+    started = {"flag": False}
+    job_id = {"id": None}
+
+    async def body():
+        async with jobs.slots():
+            started["flag"] = True
+            if job_id["id"]:
+                jobs.mark_state(job_id["id"], "running")
+            return await invoke(True)
+
+    task = asyncio.create_task(body())
+    wait = 0 if mode == "always" else jobs.INLINE_WAIT
+    if wait > 0:
+        await asyncio.wait({task}, timeout=wait)
+    if task.done():
+        return ("done", task.result())          # re-raises a ToolError as before
+    jid = jobs.register_task(tool_name, task, _arg_shapes(args))
+    job_id["id"] = jid
+    status = "running" if started["flag"] else "queued"
+    jobs.mark_state(jid, status)
+    handle = {"success": True, "status": status, "job_id": jid, "tool": tool_name,
+              "hint": (f"BACKGROUND JOB {jid} ({status}): {tool_name} is still running and "
+                       f"no longer blocks this turn. Continue with other work and poll "
+                       f"misc.job_status(job_id='{jid}'); the finished result carries the "
+                       f"citable _trudi_call_id. Up to {jobs.MAX_CONCURRENT} jobs run at once.")}
+    # Middleware must hand FastMCP a ToolResult, not a bare dict.
+    import json as _json
+    from fastmcp.tools.tool import ToolResult
+    from mcp.types import TextContent
+    return ToolResult(content=[TextContent(type="text", text=_json.dumps(handle))],
+                      structured_content=handle)
+
+
 # ── Middleware ────────────────────────────────────────────────────────────────
 
 class NarrationMiddleware(Middleware):
@@ -596,6 +642,7 @@ class NarrationMiddleware(Middleware):
                 _trace_narration_failure(e, str(note))
 
         # 2. DAIR gate
+        notices: list = []
         if tool_name not in DAIR_GATE_ALLOWLIST:
             should_block, reason = _gate_decision()
             # A CORRECTION of an existing finding (supersedes=<cid>) is
@@ -604,6 +651,20 @@ class NarrationMiddleware(Middleware):
             if (should_block and tool_name.endswith(("record_finding", "submit_finding"))
                     and args.get("supersedes")):
                 should_block, reason = False, "finding correction (supersedes) allowed in Report"
+            if (should_block and _report_phase()
+                    and not tool_name.endswith(("record_finding", "submit_finding"))):
+                # Report work that needs evidence goes to Collect (above Report,
+                # so a DAIR pop resumes it) instead of a refusal plus a manual
+                # dair_assess round trip.
+                try:
+                    from core.execution_log import log
+                    log.record_phase_transition("Collect", "report_follow_up", trigger=tool_name)
+                    notices.append(("phase_transition",
+                                    f"Report -> Collect: {tool_name} is evidence work. Finish it, "
+                                    f"then dair_assess with stack_action='pop' to resume Report."))
+                    should_block = False
+                except Exception as _pt:
+                    print(f"[TRUDI WARN] report->collect transition failed: {_pt}", file=sys.stderr)
             if should_block:
                 # Record the block so a blocked-then-dropped tool is auditable.
                 try:
@@ -614,7 +675,6 @@ class NarrationMiddleware(Middleware):
                 raise ToolError(f"Tool {tool_name} blocked: {reason}.")
 
         # 2b. DAIR engagement nudge (allow → notice → block; see constants above)
-        notices: list = []
         repeat_key = None
         if tool_name not in DAIR_GATE_ALLOWLIST:
             if not (tool_name.startswith(_NUDGE_SKIP_PREFIXES)
@@ -662,9 +722,9 @@ class NarrationMiddleware(Middleware):
         except Exception:
             _cur_tool, _tool_token = None, None
 
-        try:
+        async def _invoke(concurrent: bool):
             try:
-                result = await call_next(context)
+                res = await call_next(context)
             except ToolError:
                 raise
             except asyncio.CancelledError:
@@ -680,9 +740,34 @@ class NarrationMiddleware(Middleware):
                         f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
                     ) from e
                 raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
+            before = entries_before
+            if concurrent:
+                # Other calls append entries while a job runs, so trace growth
+                # cannot tell whether this tool logged itself: its own call id can.
+                payload = _result_payload(res) or {}
+                if payload.get("_trudi_call_id"):
+                    return res
+                try:
+                    from core.execution_log import log as _jl
+                    before = len(_jl._entries)
+                except Exception:
+                    before = None
+            return _stamp_call_id(res, _trace_success_baseline(
+                tool_name, round(time.perf_counter() - start, 2), before, res))
 
-            result = _stamp_call_id(result, _trace_success_baseline(
-                tool_name, round(time.perf_counter() - start, 2), entries_before, result))
+        try:
+            from core import jobs as _jobs
+            mode = _jobs.background_mode(tool_name)
+        except Exception:
+            _jobs, mode = None, ""
+        try:
+            if not mode:
+                result = await _invoke(False)
+            else:
+                handle = await _run_as_job(_jobs, mode, tool_name, args, _invoke)
+                if not (isinstance(handle, tuple) and handle[0] == "done"):
+                    return handle                      # still running: a job handle
+                result = handle[1]
         finally:
             if _cur_tool is not None and _tool_token is not None:
                 try:

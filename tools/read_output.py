@@ -46,10 +46,31 @@ def _guard(path: str):
                               "then read the produced file under analysis/exports/reports."}
     if not os.path.exists(resolved):
         corrected, _ = resolve_path_ci(resolved)
-        return None, {"success": False, "error": f"file not found: {path}",
-                      "hint": f"nearest match: {corrected}" if corrected != resolved else
-                              "check the extractor's output_dir/output_file."}
+        hint = (f"nearest match: {corrected}" if corrected != resolved else
+                "check the extractor's output_dir/output_file.")
+        m = _re.search(r"/\.tool_output/(\d+)\.txt$", resolved)
+        if m:
+            hint = _sidecar_hint(int(m.group(1))) or hint
+        return None, {"success": False, "error": f"file not found: {path}", "hint": hint}
     return resolved, None
+
+
+def _sidecar_hint(cid: int) -> str:
+    """Why .tool_output/<cid>.txt does not exist: say what call <cid> is."""
+    try:
+        from core.execution_log import log
+        e = log.index().by_call_id.get(cid)
+    except Exception:
+        return ""
+    if e is None:
+        return f"call {cid} is not in this trace."
+    if e.get("type") != "tool_call":
+        return (f"call {cid} is a {e.get('type')} entry, not a tool call - it has no stored "
+                f"output. Read the output of the tool call it refers to (its input_call_ids: "
+                f"{(e.get('input_call_ids') or [])[:5]}).")
+    if not e.get("stdout_chars"):
+        return f"call {cid} produced no stdout; its artifacts are in its output files ({e.get('output_path') or 'see its cmd'})."
+    return ""
 
 
 def _selflog(cmd: str, body: str, success: bool = True) -> int:

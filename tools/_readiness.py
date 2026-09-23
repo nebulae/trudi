@@ -1257,6 +1257,46 @@ def assess_readiness(log, include_synthesis=True):
         import sys as _sys
         print(f"[TRUDI WARN] scoping-leads check failed: {_e}", file=_sys.stderr)
 
+    # Details the reviewer could not SEE (display limit) must be verified with a
+    # targeted read, not dropped. List what was never followed by a SUPPORTED
+    # recording of the same submission family, so nothing disappears silently.
+    unshown_details: list = []
+    try:
+        import re as _re2
+        def _base(k):
+            return _re2.sub(r"-v\d+$", "", str(k or ""))
+        recorded = {_base(e.get("idempotency_key")) for e in entries
+                    if e.get("type") == "finding_submission" and e.get("status") == "recorded"}
+        for e in entries:
+            if e.get("type") == "finding_submission" and e.get("reason") == "rows_not_shown":
+                for item in e.get("unverified_items") or []:
+                    unshown_details.append({"submission": e.get("idempotency_key"),
+                                            "call_id": e.get("call_id"), "item": item,
+                                            "later_recorded": _base(e.get("idempotency_key")) in recorded})
+        if unshown_details:
+            warnings.append(
+                f"{len(unshown_details)} detail(s) the reviewer could not see were raised during "
+                f"finding review. Each should have been verified with a targeted read and cited; "
+                f"any that was instead removed from its finding is listed in the report as not "
+                f"re-checked.")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] unshown-detail audit failed: {_e}", file=_sys.stderr)
+
+    # A background job still running or queued is unexamined scope.
+    try:
+        from core.jobs import active_task_jobs
+        _aj = active_task_jobs()
+        if _aj:
+            issues.append(
+                f"{len(_aj)} background job(s) not finished: "
+                + "; ".join(f"{j['job_id']} ({j['tool']}, {j['status']}, {j['elapsed_seconds']}s)"
+                            for j in _aj[:6])
+                + ". Collect each with misc.job_status before reporting.")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] job check failed: {_e}", file=_sys.stderr)
+
     # IOC coverage — warnings only. An ATT&CK detection source left unexamined
     # for a recorded IOC is a stated blind spot in the report, never a blocker.
     ioc_inventory: dict = {"iocs": [], "coverage_counts": {}, "open": []}
@@ -1283,6 +1323,7 @@ def assess_readiness(log, include_synthesis=True):
     return {
         "ready_to_report": ready if include_synthesis else False,
         "ioc_inventory": ioc_inventory,
+        "unshown_review_details": unshown_details,
         "ready_for_synthesis": ready if not include_synthesis else None,
         "issues": issue_records(issues),
         "registry_inventory": registry_inventory,

@@ -59,18 +59,19 @@ class TestDairGateMiddleware:
             )
         assert call_next.await_count == 1
 
-    def test_non_allowlisted_tool_blocked_in_report_phase(self, tmp_path):
-        """Forensics block once DAIR moves the investigation to Report."""
+    def test_forensic_tool_in_report_phase_moves_to_collect(self, tmp_path):
+        """Evidence work found in Report goes to Collect (above Report, so a
+        pop resumes it) instead of a refusal plus a manual dair_assess."""
         from core.execution_log import ExecutionLog
         from core.middleware import NarrationMiddleware
-        from fastmcp.exceptions import ToolError
         l = ExecutionLog()
         l.configure("MW-002b", str(tmp_path / "trace.json"))
         l.record_dair_call("Analyze", "", True, "Report", "", "push", "")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            with pytest.raises(ToolError, match="Report"):
-                asyncio.run(_run_middleware(mw, "vol_psscan"))
+            _, call_next = asyncio.run(_run_middleware(mw, "vol_psscan"))
+        assert call_next.await_count == 1 and l._current_phase == "Collect"
+        assert l._phase_stack[-2]["phase"] == "Report"
 
     @pytest.mark.parametrize('correction', [False, True])
     def test_submission_in_report_requires_revision_target(self, tmp_path, correction):

@@ -262,6 +262,9 @@ async def run_with_progress(
                         try:
                             await ctx.report_progress(elapsed, float(timeout), line[:120])
                         except Exception as _progress_err:
+                            # Once the request has gone (a background job outlives
+                            # it) every later report fails: log once, then stop.
+                            ctx = None
                             # Don't let progress-reporting bugs interrupt the
                             # tool run, but surface them in the trace so
                             # they're not invisible.

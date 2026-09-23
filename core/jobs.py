@@ -195,3 +195,100 @@ def list_jobs() -> dict:
     except OSError:
         pass
     return {"success": True, "jobs": out, "count": len(out)}
+
+
+# ── In-process tool jobs (long-running MCP tools) ─────────────────────────────
+# Tools that measured > ~30 s across the recorded runs run as background tasks
+# inside the server: the whole tool call (wrapper parsing, self-logging, trace
+# identity) runs unchanged, it just no longer blocks the agent's turn. Jobs do
+# not survive a server restart; job_status then reports them as lost.
+
+# Always long (p50 over 30 s in the recorded traces): return a job_id at once.
+BACKGROUND_ALWAYS = frozenset({
+    "ewf_verify", "misc_clamscan_directory", "ez_recmd_dir",
+    "plaso_create_timeline", "plaso_create_targeted", "plaso_export_csv",
+    "plaso_export_json", "plaso_filter_incident_window",
+    "carve_bulk_extractor_scan", "carve_bulk_extractor_unallocated",
+    "carve_foremost_carve", "carve_scalpel_carve", "img_photorec_carve", "tsk_recover",
+    "yara_scan_directory", "yara_scan_memory_image",
+})
+# Long depending on input scope: run inline, become a job past INLINE_WAIT.
+BACKGROUND_IF_SLOW = frozenset({
+    "tsk_fls", "ez_evtxecmd", "ez_lecmd", "ez_jlecmd", "ez_pecmd", "ez_recmd_batch",
+    "ez_mftecmd", "ez_mftecmd_dir", "ez_sqlecmd", "misc_evtx_dump", "misc_evtx_filter",
+    "misc_chainsaw_hunt", "misc_hindsight_chrome", "misc_pff_export",
+    "misc_readpst_extract", "misc_usnparser_parse",
+})
+INLINE_WAIT = float(os.environ.get("TRUDI_JOB_INLINE_WAIT") or "30")
+MAX_CONCURRENT = int(os.environ.get("TRUDI_JOB_SLOTS") or "3")
+
+_TASK_JOBS: dict = {}
+_SLOTS = None                    # asyncio.Semaphore, created in the server loop
+
+
+def background_mode(tool_name: str) -> str:
+    """'always' | 'if_slow' | '' for a mounted tool name."""
+    if tool_name in BACKGROUND_ALWAYS:
+        return "always"
+    if tool_name in BACKGROUND_IF_SLOW or tool_name.startswith("vol_"):
+        return "if_slow"
+    return ""
+
+
+def slots():
+    import asyncio
+    global _SLOTS
+    if _SLOTS is None:
+        _SLOTS = asyncio.Semaphore(MAX_CONCURRENT)
+    return _SLOTS
+
+
+def register_task(tool: str, task, args_summary: str) -> str:
+    job_id = _new_job_id(tool)
+    _TASK_JOBS[job_id] = {"job_id": job_id, "tool": tool, "args": args_summary[:300],
+                          "task": task, "started": time.time(), "status": "running"}
+    return job_id
+
+
+def mark_state(job_id: str, status: str) -> None:
+    if job_id in _TASK_JOBS:
+        _TASK_JOBS[job_id]["status"] = status
+
+
+def task_job_status(job_id: str) -> dict | None:
+    """None when job_id is not an in-process job (file-based carve jobs are
+    handled by job_status)."""
+    j = _TASK_JOBS.get(job_id)
+    if j is None:
+        return None
+    elapsed = round(time.time() - j["started"], 1)
+    task = j["task"]
+    if not task.done():
+        return {"success": True, "status": j["status"], "job_id": job_id, "tool": j["tool"],
+                "elapsed_seconds": elapsed}
+    base = {"status": "finished", "job_id": job_id, "tool": j["tool"], "elapsed_seconds": elapsed}
+    if task.cancelled():
+        return {**base, "success": False, "status": "cancelled", "error": "job was cancelled"}
+    exc = task.exception()
+    if exc is not None:
+        return {**base, "success": False, "error": f"{type(exc).__name__}: {exc}"}
+    res = task.result()
+    payload = res if isinstance(res, dict) else getattr(res, "structured_content", None)
+    if not isinstance(payload, dict):
+        # A tool whose result has only text content: keep the text.
+        blocks = getattr(res, "content", None) or []
+        text = "".join(getattr(b, "text", "") for b in blocks)
+        try:
+            import json as _json
+            payload = _json.loads(text)
+            if not isinstance(payload, dict):
+                payload = {"result": payload}
+        except Exception:
+            payload = {"result": text or str(res)}
+    return {**payload, **base, "success": payload.get("success", True) is not False}
+
+
+def active_task_jobs() -> list:
+    return [{"job_id": j["job_id"], "tool": j["tool"], "status": j["status"],
+             "elapsed_seconds": round(time.time() - j["started"], 1)}
+            for j in _TASK_JOBS.values() if not j["task"].done()]

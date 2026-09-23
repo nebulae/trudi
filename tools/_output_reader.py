@@ -159,6 +159,20 @@ def _cited_query_terms(text: str) -> list[str]:
     return maximal
 
 
+def _looks_like_path(token: str) -> bool:
+    """A flag's value is an output path only if it looks like one.
+
+    The same short flags mean other things to other tools: Sleuth Kit's `-o` is
+    a partition OFFSET (`istat -o 1411072 image.E01 12994`) and mount's `-t` is
+    a filesystem TYPE. Read as output files, every tsk call looked like an
+    invocation log whose output had vanished and was refused as evidence.
+    """
+    t = (token or "").strip()
+    if not t or t.startswith("-"):
+        return False
+    return "/" in t or t.lower().endswith(_OUTPUT_FILE_EXTS)
+
+
 def _cmd_output_paths(cmd: str) -> list[str]:
     """Output file/dir paths named in a recorded tool cmd, best-effort."""
     if not cmd:
@@ -170,7 +184,7 @@ def _cmd_output_paths(cmd: str) -> list[str]:
         toks = cmd.split()
     out = []
     for i, t in enumerate(toks[:-1]):
-        if t in _OUTPUT_FLAGS:
+        if t in _OUTPUT_FLAGS and _looks_like_path(toks[i + 1]):
             out.append(toks[i + 1])
     return out
 
@@ -216,13 +230,17 @@ def sibling_match_counts(by_id: dict, entry: dict, terms: list, limit: int = 3) 
         if not (mine & _cmd_input_paths(str(e.get("cmd") or ""))):
             continue
         rows = 0
-        for src in entry_text_sources(e):
+        srcs = entry_text_sources(e)
+        # The excerpt is the head of the same stdout the sidecar holds in full:
+        # count it only when no sidecar was kept, or a line is counted twice.
+        has_sidecar = any(x.kind == "stdout_sidecar" for x in srcs)
+        for src in srcs:
             if src.kind in ("file", "stdout_sidecar"):
                 try:
                     rows += _scan_relevant(src.path, terms, 400).matched_rows
                 except Exception:
                     continue
-            elif src.kind == "stdout_excerpt" and src.text:
+            elif src.kind == "stdout_excerpt" and src.text and not has_sidecar:
                 rows += sum(1 for ln in src.text.splitlines()
                             if any(t in ln.lower() for t in terms))
         out.append({"call_id": int(e.get("call_id") or 0),

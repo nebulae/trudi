@@ -608,6 +608,16 @@ class ExecutionLog:
         the post-transition phase.
         """
         sa = (stack_action or "stay").lower()
+        # First-ever dair_call: before DAIR has run, the phase the agent
+        # declares is authoritative (a resumed session passes its stack), even
+        # over the Triage default a fresh or rehydrated log starts with.
+        first = not getattr(self, "_dair_seen", False)
+        self._dair_seen = True
+        if first and sa == "stay" and current_phase and current_phase != self._current_phase:
+            self._current_phase = current_phase
+            self._phase_stack = [{"phase": current_phase, "entry_reason": "initial_phase",
+                                  "depth": 0}]
+
         if sa == "push" and next_phase:
             self._phase_stack.append({
                 "phase": next_phase,
@@ -661,33 +671,52 @@ class ExecutionLog:
                     "depth": 0,
                 })
 
-        # Agent reconciliation (stay only): when the agent declares a stay but
-        # their `current_phase` differs from ours, adopt what the agent
-        # declared. push/pop already set _current_phase intentionally from
-        # next_phase / stack-top, so we don't override those.
-        if (sa == "stay" and current_phase
-                and self._current_phase != current_phase
-                and not (verification_satisfied
-                         and self._current_phase == "Collect")):
-            self._current_phase = current_phase
-            if self._phase_stack:
-                self._phase_stack[-1] = {
-                    **self._phase_stack[-1],
-                    "phase": current_phase,
-                }
-            else:
-                self._phase_stack.append({
-                    "phase": current_phase,
-                    "entry_reason": "agent_reconcile",
-                    "depth": 0,
-                })
+        # The model's echoed `current_phase` never moves the phase: only an
+        # explicit push/pop, the Triage-satisfied advance, or a recorded server
+        # transition does. (2026-09-23: an agent passing phase_stack="[]" made the
+        # model believe it was in Triage, and a `stay` adopted that over Collect.)
+
+    def _apply_server_transition(self, to_phase: str, reason: str) -> None:
+        """Push `to_phase` above the current frame (so a pop resumes it)."""
+        if not to_phase or self._current_phase == to_phase:
+            return
+        self._phase_stack.append({"phase": to_phase, "entry_reason": reason or "",
+                                  "depth": len(self._phase_stack)})
+        self._current_phase = to_phase
+
+    def record_phase_transition(self, to_phase: str, reason: str, trigger: str = "",
+                                input_call_ids: list[int] | None = None) -> int:
+        """A server-initiated phase change, recorded so rehydration replays it
+        and the agent can see it: Report work that needs evidence goes to
+        Collect instead of being refused. No-op (0) when already there."""
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"phase_transition -> {to_phase}")
+            if self._current_phase == to_phase:
+                return 0
+            from_phase = self._current_phase
+            self._apply_server_transition(to_phase, reason)
+            cid = self._next_id()
+            entry = {"call_id": cid, "type": "phase_transition", "ts": _utcnow(),
+                     "from_phase": from_phase, "to_phase": to_phase,
+                     "reason": reason, "trigger": trigger}
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            elif self._last_dair_cid:
+                entry["input_call_ids"] = [self._last_dair_cid]
+            self._append_entry(entry)
+            return cid
 
     def _rehydrate_phase_state(self) -> None:
         """Replay the dair_call history to reconstruct current phase state.
         Used after configure() rehydrates an existing trace."""
         self._current_phase = ""
         self._phase_stack = []
+        self._dair_seen = False
         for e in self._entries:
+            if e.get("type") == "phase_transition":
+                self._apply_server_transition(e.get("to_phase", ""), e.get("reason", ""))
+                continue
             if e.get("type") != "dair_call":
                 continue
             self._apply_dair_transition(
@@ -784,6 +813,7 @@ class ExecutionLog:
             # so every entry from session start should be stamped with a phase.
             # The first dair_assess will reconcile if the agent's declared
             # current_phase differs.
+            self._dair_seen = False
             self._current_phase = "Triage"
             self._phase_stack = [{
                 "phase": "Triage",
@@ -1374,7 +1404,10 @@ class ExecutionLog:
                 entry["stdout_chars"] = len(stdout_full)
                 entry["stdout_lines"] = (stdout_full.count("\n") + (
                     0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
-                if len(stdout_full) > len(entry.get("stdout_excerpt") or ""):
+                # Always kept: .tool_output/<cid>.txt is the one predictable place
+                # a call's output lives. Short outputs used to be excerpt-only and
+                # every read of them failed "file not found" (2026-09-23 runs).
+                if stdout_full:
                     self._write_stdout_sidecar(cid, stdout_full, entry)
             if output_path:
                 entry["output_path"] = str(output_path)

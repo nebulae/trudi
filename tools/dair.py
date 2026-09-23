@@ -596,6 +596,15 @@ they do not automatically add Triage frames.
   stack_action "push"  → transition to next_phase; new entry added to stack
   stack_action "pop"   → current sub-phase resolved; resume the phase beneath
   stack_action "stay"  → continue in current_phase (e.g. challenges still pending)
+Where to go when work remains: evidence that must still be gathered — from \
+Analyze, Scan or Report — is a push to Collect (pop back when done); new \
+reasoning over collected artifacts is Analyze. Push Triage from a later phase \
+ONLY when what would be triaged is new, and set triage_reason to one of: \
+new_evidence_item (another host, image or capture enters scope), \
+case_question_changed (the question itself changed, or a separate incident \
+emerged), premise_refuted (the detection that opened the case proved false). \
+A new account or identity on the same host is Analyze/Scan work, not Triage. \
+A Triage push without one of these reasons is redirected to Collect.
 
 VERIFICATION CHALLENGES (mandatory when current_phase == Triage):
 For every discrete claim in the tool results summary, emit a challenge entry:
@@ -636,8 +645,10 @@ current_phase, phase_rationale, transition_recommended (boolean), next_phase,
 transition_rationale, stack_action (push/pop/stay), investigation_focus,
 verification_satisfied (boolean), verification_challenges (array of claim,
 challenge_method, verified true/false/null, confidence_impact, notes),
-recommended_actions, and directives (priority_tools, skip_tools, focus_pids,
-focus_paths, max_depth, next_hypothesis_triggers, curiosity_budget).
+recommended_actions, triage_reason (only when pushing Triage from a later
+phase: new_evidence_item | case_question_changed | premise_refuted), and
+directives (priority_tools, skip_tools, focus_pids, focus_paths, max_depth,
+next_hypothesis_triggers, curiosity_budget).
 Include each field once. Put concise analysis in phase_rationale. No separate challenge
 or directives blocks. Use only tools from the manifest. recommended_actions is for Report.
 """ + result_instruction('{"assessment": {"current_phase": "Triage", "phase_rationale": "...", '
@@ -735,6 +746,9 @@ def missing_report_phases(entries) -> list:
            for pv in (e.get("candidate_pivots") or [])):
         required.append("Scan")
     return [ph for ph in required if ph not in entered]
+
+
+TRIAGE_REASONS = frozenset({"new_evidence_item", "case_question_changed", "premise_refuted"})
 
 
 def _ioc_coverage_block(current_phase: str, limit: int = 20) -> str:
@@ -838,6 +852,17 @@ def dair_assess(
         stack = []
 
     current = stack[-1].get("phase", "Triage") if stack else "Triage"
+    # The server owns phase state. The agent's phase_stack is only used before
+    # DAIR has ever run; afterwards the recorded stack is what the model sees
+    # (an agent passing "[]" otherwise made the model believe it was in Triage).
+    try:
+        from core.execution_log import log as _plog
+        _ran = any(e.get("type") == "dair_call" for e in (getattr(_plog, "_entries", None) or []))
+        if _ran and getattr(_plog, "_current_phase", ""):
+            current = _plog._current_phase
+            stack = [dict(f) for f in (getattr(_plog, "_phase_stack", None) or [])]
+    except Exception:
+        pass
 
     user_parts = [f"TOOL RESULTS SUMMARY:\n{summary}"]
     user_parts.append(f"\nCURRENT PHASE STACK (newest last):\n{json.dumps(stack, indent=2)}")
@@ -1285,6 +1310,23 @@ def dair_assess(
         except Exception as _e6:
             import sys as _sys6
             print(f"[TRUDI WARN] work-order advance gate failed: {_e6}", file=_sys6.stderr)
+
+    # Triage only when what would be triaged is new (see _DAIR_SYS). Anything
+    # else that needs more work is evidence gathering: Collect.
+    if (str(assessment.get("stack_action") or "") == "push"
+            and str(assessment.get("next_phase") or "") == "Triage"
+            and current not in ("", "Triage")
+            and str(assessment.get("triage_reason") or "") not in TRIAGE_REASONS):
+        assessment["next_phase"] = "Collect"
+        redirect = {"kind": "triage_redirected", "from_phase": current,
+                    "model_next_phase": "Triage",
+                    "triage_reason": assessment.get("triage_reason") or None}
+        assessment["transition_rationale"] = (
+            "Server override: Triage is re-entered only for a new evidence item, a changed "
+            "case question or a refuted premise (triage_reason). More work on the same "
+            "evidence is Collect. " + str(assessment.get("transition_rationale") or ""))
+        server_override = ({**server_override, "triage_redirected": redirect}
+                           if isinstance(server_override, dict) else redirect)
 
     tok_in  = backend_result.get("input_tokens", 0)
     tok_out = backend_result.get("output_tokens", 0)
