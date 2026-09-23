@@ -67,6 +67,16 @@ class TestToolCount:
             assert count >= 12
 
 
+    def test_trace_lifecycle_tools_are_registered(self):
+        # 2026-09-23: a helper inserted between @mcp.tool() and
+        # start_execution_log registered the helper instead, and the agent had
+        # to open its trace through Bash with the wrong checkout's code.
+        import asyncio
+        from tools import misc
+        names = {t.name for t in asyncio.run(misc.mcp.list_tools())}
+        assert {"start_execution_log", "export_execution_log", "record_finding"} <= names
+        assert not any(n.startswith("_") for n in names), sorted(n for n in names if n.startswith("_"))
+
 class TestCoreImports:
     def test_core_run_importable(self):
         from core import run

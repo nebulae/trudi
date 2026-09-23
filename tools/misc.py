@@ -797,8 +797,7 @@ def _pre_report_ready_gate() -> dict | None:
                 "missing_check": "reason_pre_report_check"}
     return None
 
-@mcp.tool()
-@output_safe
+
 def _code_identity() -> str:
     """Which server code is running: git commit, dirty flag, and a digest of
     core/ + tools/ as they were when this server process imported them. Edits
@@ -814,7 +813,7 @@ def _code_identity() -> str:
         h.update(p.read_bytes())
     def git(*args):
         try:
-            return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+            return subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args], capture_output=True,
                                   text=True, timeout=5).stdout.strip()
         except Exception:
             return ""
@@ -827,6 +826,8 @@ def _code_identity() -> str:
 _CODE_IDENTITY = _code_identity()
 
 
+@mcp.tool()
+@output_safe
 def start_execution_log(case_id: str, output_path: str,
                         launch_dashboard: bool = True,
                         case_dir: str = "",
