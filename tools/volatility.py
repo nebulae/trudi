@@ -15,9 +15,25 @@ def _vol(image: str, plugin: str, extra: list[str] | None = None,
          output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
     # -o OUTPUT_DIR is a global Volatility flag — must come before the plugin name.
     # Plugin-specific args (--pid, --dump, etc.) go in extra, after the plugin.
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)   # Volatility refuses a missing -o dir
     out_flags = ["-o", output_dir] if output_dir else []
     cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin] + (extra or [])
     return run(cmd, timeout=timeout)
+
+
+def _yara_args(yara_rules: str) -> list[str]:
+    """Volatility 2.27 takes --yara-file (a rules file) or --yara-string (a
+    pattern); there is no --yara-rules. Inline rule text goes to a temp file."""
+    if os.path.isfile(yara_rules):
+        return ["--yara-file", yara_rules]
+    if "rule " in yara_rules and "{" in yara_rules:
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix="trudi-yara-", suffix=".yar")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(yara_rules)
+        return ["--yara-file", path]
+    return ["--yara-string", yara_rules]
 
 
 def _pid_extra(pid: Optional[int] = None) -> list[str]:
@@ -33,6 +49,8 @@ def _offset_extra(offset: Optional[str] = None) -> list[str]:
 async def _vol_progress(image: str, plugin: str, ctx: Any,
                         output_dir: str | None = None, timeout: int = VOL_TIMEOUT) -> dict:
     """Async variant of _vol() with FastMCP Context progress reporting."""
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     out_flags = ["-o", output_dir] if output_dir else []
     cmd = [VOL, "-s", vol3_symbols()] + out_flags + ["-f", image, "-r", "json", plugin]
     return await run_with_progress(cmd, ctx, timeout=timeout)
@@ -339,8 +357,7 @@ def vol_vadyarascan(image: str, yara_rules: str, pid: Optional[int] = None) -> d
     YARA scan of process VAD regions directly from memory.
     yara_rules: path to a .yar file or inline rule string.
     """
-    extra = ["--yara-rules", yara_rules]
-    extra += _pid_extra(pid)
+    extra = _yara_args(yara_rules) + _pid_extra(pid)
     return _vol(image, "windows.vadyarascan", extra, timeout=VOL_TIMEOUT)
 
 
@@ -541,9 +558,9 @@ def vol_timeliner(image: str, output_dir: Optional[str] = None) -> dict:
 @output_safe
 def vol_yarascan(image: str, yara_rules: str, pid: Optional[int] = None) -> dict:
     """YARA scan across all process memory regions."""
-    extra = ["--yara-rules", yara_rules]
-    extra += _pid_extra(pid)
-    return _vol(image, "windows.yarascan", extra, timeout=VOL_TIMEOUT)
+    # The OS-independent plugin; there is no windows.yarascan in Volatility 2.27.
+    extra = _yara_args(yara_rules) + _pid_extra(pid)
+    return _vol(image, "yarascan.YaraScan", extra, timeout=VOL_TIMEOUT)
 
 
 # ── Linux plugins ─────────────────────────────────────────────────────────────

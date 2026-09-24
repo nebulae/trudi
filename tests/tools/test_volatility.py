@@ -345,7 +345,8 @@ class TestMalfindAndInjection:
         vol_vadyarascan(IMG, "rules/test.yar")
         cmd = get_cmd(mock_run)
         assert "windows.vadyarascan" in cmd
-        assert "--yara-rules" in cmd
+        # Volatility 2.27: --yara-file for rules files, --yara-string otherwise
+        assert "--yara-rules" not in cmd and ("--yara-file" in cmd or "--yara-string" in cmd)
 
     def test_vol_vadyarascan_with_pid(self, mock_run):
         from tools.volatility import vol_vadyarascan
@@ -530,8 +531,8 @@ class TestMiscWindowsPlugins:
         from tools.volatility import vol_yarascan
         vol_yarascan(IMG, "rules/test.yar")
         cmd = get_cmd(mock_run)
-        assert "windows.yarascan" in cmd
-        assert "--yara-rules" in cmd
+        assert "yarascan.YaraScan" in cmd and "windows.yarascan" not in cmd
+        assert "--yara-rules" not in cmd
 
     def test_vol_yarascan_with_pid(self, mock_run):
         from tools.volatility import vol_yarascan
@@ -598,3 +599,30 @@ class TestImageArg:
         cmd = mock_run_progress.call_args[0][0]
         assert "-r" in cmd
         assert "json" in cmd
+
+
+
+class TestYaraArgs:
+    """Volatility 2.27 YARA flags (VANKO/COBALTSTRIKE 2026-09-24 regression)."""
+
+    def test_rules_file_uses_yara_file(self, tmp_path):
+        from tools.volatility import _yara_args
+        f = tmp_path / "r.yar"
+        f.write_text("rule x { condition: true }")
+        assert _yara_args(str(f)) == ["--yara-file", str(f)]
+
+    def test_inline_rule_goes_to_a_file(self):
+        from tools.volatility import _yara_args
+        flag, path = _yara_args('rule x { strings: $a = "beacon" condition: $a }')
+        assert flag == "--yara-file" and open(path).read().startswith("rule x")
+
+    def test_plain_pattern_uses_yara_string(self):
+        from tools.volatility import _yara_args
+        assert _yara_args("MZARUH") == ["--yara-string", "MZARUH"]
+
+    def test_vol_creates_output_dir(self, tmp_path, monkeypatch):
+        import tools.volatility as V
+        monkeypatch.setattr(V, "run", lambda cmd, **kw: {"success": True, "cmd": " ".join(cmd)})
+        out = tmp_path / "exports" / "malfind"
+        V._vol("/x.mem", "windows.malfind", ["--dump"], output_dir=str(out))
+        assert out.is_dir()
