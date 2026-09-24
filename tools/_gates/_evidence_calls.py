@@ -60,6 +60,11 @@ def read_target_path(entry: dict) -> str:
     cmd = str((entry or {}).get("cmd") or "")
     if not cmd.startswith("read."):
         return ""
+    # Quoted and unquoted-with-spaces paths ('Root - Mailbox') both resolve.
+    from tools._output_reader import _cmd_output_paths
+    paths = _cmd_output_paths(cmd)
+    if paths:
+        return _norm_path(paths[0])
     m = _READ_PATH_RE.search(cmd)
     return _norm_path(m.group(1)) if m else ""
 

@@ -185,8 +185,29 @@ def _cmd_output_paths(cmd: str) -> list[str]:
     out = []
     for i, t in enumerate(toks[:-1]):
         if t in _OUTPUT_FLAGS and _looks_like_path(toks[i + 1]):
-            out.append(toks[i + 1])
+            out.append(_rejoin_spaced_path(toks, i + 1))
     return out
+
+
+_ARG_TOKEN = re.compile(r"^(?:-{1,2}\w|[A-Za-z_]\w*=)")
+
+
+def _rejoin_spaced_path(toks: list, j: int) -> str:
+    """An unquoted path containing spaces ('.../Root - Mailbox/...', as
+    pffexport writes) was split into several tokens. Take the longest run of
+    following tokens that joins into an existing path; the lone token when none
+    does (the path may not exist yet, or is not local)."""
+    import os
+    best = toks[j]
+    if os.path.exists(best) and not os.path.isdir(best):
+        return best
+    for k in range(j + 1, len(toks)):
+        if _ARG_TOKEN.match(toks[k]) and not os.path.exists(" ".join(toks[j:k + 1])):
+            break
+        cand = " ".join(toks[j:k + 1])
+        if os.path.exists(cand):
+            best = cand
+    return best
 
 
 def _cmd_input_paths(cmd: str) -> set:

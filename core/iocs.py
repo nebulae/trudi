@@ -172,9 +172,9 @@ def _reads(entries) -> list:
             continue
         cmd = str(e.get("cmd") or "")
         if _tool_name(e) in ("read_output", "read_mail") or cmd.startswith(("read.output", "read.mail")):
-            m = re.search(r"(?:--output|-o)\s+(\S+)", cmd)
-            if m:
-                out.append((m.group(1), cmd.lower()))
+            from tools._output_reader import _cmd_output_paths
+            for path in _cmd_output_paths(cmd)[:1]:
+                out.append((path, cmd.lower()))
     return out
 
 

@@ -81,6 +81,25 @@ _CONTROL_PLANE_TOOLS = frozenset({
 })
 
 
+def _item_tool(item) -> str:
+    """The tool a work-order item names. DAIR may emit a structured item
+    ({'tool': 'reason.hypothesize', 'args': {...}}); stringifying it gave the
+    signature "{'tool':", which no run or disposition can ever match — the
+    2026-09-23 run could not reach Report after running the hypothesis."""
+    if isinstance(item, dict):
+        return str(item.get("tool") or "")
+    t = str(item or "")
+    if t.lstrip().startswith("{"):
+        import ast
+        try:
+            v = ast.literal_eval(t.strip())
+            if isinstance(v, dict):
+                return str(v.get("tool") or "")
+        except (ValueError, SyntaxError):
+            pass
+    return t
+
+
 def _control_plane_tool(tool: str) -> bool:
     """record_finding / record_disposition / export … are control-plane calls;
     a phase-gate block on one is not a dropped forensic work-order item (an
@@ -166,7 +185,7 @@ def unrun_from_list(entries, tools) -> list:
     out: list = []
     seen: set = set()
     for t in tools:
-        t = str(t)
+        t = _item_tool(t)
         if _control_plane_tool(t):
             continue
         sig = _binary_sig(t)
@@ -200,7 +219,7 @@ def unrun_priority_tools(entries) -> list:
         if not isinstance(pt, list):
             continue
         for t in pt:
-            t = str(t)
+            t = _item_tool(t)
             if _control_plane_tool(t):
                 continue
             sig = _binary_sig(t)
