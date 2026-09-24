@@ -239,43 +239,13 @@ def _examined_for(views, spec: dict, tokens: set, reads: list) -> list:
     return hits
 
 
-_PCAP_EXT = (".pcap", ".pcapng", ".cap")
-_MEM_EXT = (".vmem", ".mem", ".lime", ".dmp", ".raw", ".vmss", ".vmsn", ".mddramimage")
-
-
 def _evidence_kinds(entries, case_dir: str | None = None) -> set:
-    """Evidence KINDS the case holds ("pcap", "memory"): files under the case's
-    evidence/ directory, plus any evidence a trace command touched. A
-    component only a packet capture or a memory image can show is not open
-    work on a disk-only case."""
-    kinds: set = set()
-
-    def _see(name: str) -> None:
-        n = name.lower()
-        if n.endswith(_PCAP_EXT):
-            kinds.add("pcap")
-        elif n.endswith(_MEM_EXT) or "memory" in n and n.endswith((".bin", ".img")):
-            kinds.add("memory")
-    if case_dir is None:
-        try:
-            from core.execution_log import log
-            if log._path:
-                case_dir = os.path.dirname(os.path.dirname(os.path.abspath(log._path)))
-        except Exception:
-            case_dir = None
-    if case_dir and os.path.isdir(os.path.join(case_dir, "evidence")):
-        for _root, _dirs, files in os.walk(os.path.join(case_dir, "evidence")):
-            for f in files:
-                _see(f)
-            if len(kinds) == 2:
-                break
-    for e in entries or []:
-        if isinstance(e, dict) and e.get("type") == "tool_call" and e.get("success") is True:
-            if str(e.get("mcp_tool") or "").startswith("vol_"):
-                kinds.add("memory")
-            for tok in str(e.get("cmd") or "").split():
-                _see(tok.strip("'\""))
-    return kinds
+    """Evidence KINDS the case holds (core.evidence_kinds: memory, pcap,
+    disk_image, triage, mobile, live) from the case's evidence/ and mnt/
+    directories and the trace. A component only a packet capture or a memory
+    image can show is not open work on a disk-only case."""
+    from core.evidence_kinds import evidence_kinds
+    return evidence_kinds(entries, case_dir)
 
 
 def coverage(entries, platform: str = "Windows", case_dir: str | None = None) -> dict:
