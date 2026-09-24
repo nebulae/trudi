@@ -299,11 +299,16 @@ def _bind(cases_root: str, port: int) -> tuple[socketserver.ThreadingTCPServer, 
     # port=0 → kernel picks a free port; one attempt is enough. Otherwise
     # fall through up to +19 on collision.
     candidates = [0] if port == 0 else range(port, port + 20)
+
+    class _Server(socketserver.ThreadingTCPServer):
+        # Must be set before bind: set on the instance it came too late, so a
+        # restart while the old socket sat in TIME_WAIT moved to the next port.
+        allow_reuse_address = True
+        daemon_threads = True
+
     for candidate in candidates:
         try:
-            httpd = socketserver.ThreadingTCPServer(("127.0.0.1", candidate), handler)
-            httpd.daemon_threads = True
-            httpd.allow_reuse_address = True
+            httpd = _Server(("127.0.0.1", candidate), handler)
             return httpd, httpd.server_address[1]
         except OSError as e:
             last_err = str(e)
