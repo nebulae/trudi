@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from core.readiness import digest
 
@@ -16,6 +17,18 @@ MAX_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_PACKET_CHARS = 32000
 MAX_SCAN_BYTES = 256 * 1024 * 1024
 MAX_SOURCES = 32
+# Binary output (icat of a container, a carved blob) selected as rows: JSON
+# escapes each control byte as a 6-char \u00XX, so 8k chars of binary rendered
+# as ~50k in the prompt and overflowed a 32k-context reviewer. Unprintables are
+# shown as '.' (a hexdump's text column); readable signatures survive.
+_UNPRINTABLE_RE = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd]')
+
+
+def _printable_spans(result: dict) -> dict:
+    for span in result.get('spans') or []:
+        if isinstance(span.get('text'), str):
+            span['text'] = _UNPRINTABLE_RE.sub('.', span['text'])
+    return result
 _VOLATILE = {'ts', 'elapsed_seconds', 'input_tokens', 'output_tokens', 'dair_phase', 'dair_depth'}
 
 
@@ -295,6 +308,7 @@ def build_packet(log, request, selectors=None):
                     result = _selection(raw, [], sel, max(0, remaining), path, row_limit=400)
                 else:
                     result = _selection(raw, terms, sel, max(0, remaining), path, weights=weights)
+                _printable_spans(result)
                 remaining -= result.pop('selected_chars')
                 selections.append(result)
                 if i >= 0:

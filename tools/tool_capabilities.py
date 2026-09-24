@@ -320,6 +320,32 @@ def canonical_tool_id(tool) -> str:
     return t
 
 
+# Every tool the server actually registers, as canonical ids ("ez.pecmd"),
+# set once at server start (core.normalize_names). Empty = unknown (tests,
+# scripts): nothing is treated as nonexistent.
+_REGISTERED: set[str] = set()
+
+
+def set_registered_tools(ids) -> None:
+    _REGISTERED.clear()
+    _REGISTERED.update(ids)
+
+
+def tool_exists(tool) -> bool:
+    """False only for a `<namespace>.<name>` in a namespace the server has,
+    that no registered tool matches — a backend-invented tool
+    (ez.tidh_extractor) no one can run. A family prefix (ez.recmd for
+    ez.recmd_hive) exists; loose words ("sam", "roster") and unknown
+    namespaces are not judged. Unknown registry (tests, scripts) = exists."""
+    if not _REGISTERED:
+        return True
+    t = canonical_tool_id(tool)
+    ns, _, name = t.partition(".")
+    if not name or not any(r.startswith(ns + ".") for r in _REGISTERED):
+        return True
+    return t in _REGISTERED or any(r.startswith(t + "_") for r in _REGISTERED)
+
+
 def tool_evidence_needs(tool) -> frozenset | None:
     """Evidence kinds `tool` needs (any one), or None when it is generic."""
     t = canonical_tool_id(tool)
