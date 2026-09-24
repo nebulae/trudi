@@ -1,4 +1,5 @@
 """Structured work-order items and output paths with spaces (2026-09-23 run)."""
+import json
 import shlex
 
 from core.execution_log import ExecutionLog
@@ -49,3 +50,22 @@ def test_present_unparseable_closes_a_comms_store(tmp_path):
     assert block()
     log.record_disposition("source", "telegram", "present_unparseable", evidence_call_ids=[ev])
     assert not block()
+
+
+def test_dump_only_output_dir_uses_stdout_as_evidence(tmp_path):
+    """vol -o <dir> windows.malfind --dump: the JSON result is on stdout, the
+    dir holds only binary dumps — the call is citable evidence."""
+    from core.evidence_packets import build_packet
+    from core.finding_submission import make_request
+    (tmp_path / "analysis").mkdir()
+    log = ExecutionLog()
+    log.configure("DMP", str(tmp_path / "analysis" / "t.json"), save_session=False)
+    dumps = tmp_path / "exports" / "malfind"
+    dumps.mkdir(parents=True)
+    (dumps / "pid.2588.vad.0x1-0x2.dmp").write_bytes(b"MZ\x90\x00")
+    cid = log.record_tool_call(f"/usr/local/bin/vol -o {dumps} -f x.mem -r json windows.malfind --dump",
+                               True, False, 0, 0, stdout_excerpt='[{"PID": 2588, "Protection": "PAGE_EXECUTE_READWRITE"}]',
+                               stdout_full='[{"PID": 2588, "Protection": "PAGE_EXECUTE_READWRITE"}]')
+    pk = build_packet(log, make_request("PID 2588 has an RWX private region", "SUSPECTED", [cid], {},
+                                        linked_call_id=cid))
+    assert pk["evidence"] and "2588" in json.dumps(pk["evidence"])

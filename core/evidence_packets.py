@@ -155,6 +155,23 @@ def _selection(raw, query, selector, budget, path='', weights=None, row_limit=No
             'selection_complete': len(spans) == matches, 'selected_chars': used}
 
 
+def _dump_dirs_only(out_paths, sources) -> bool:
+    """True when every output path is an existing directory holding no readable
+    text output (e.g. `vol -o dir windows.malfind --dump` writes only binary
+    .dmp files) and the call's stdout was retained: then stdout IS the result
+    (2026-09-24: malfind's 252 KB JSON was refused as 'only an invocation log')."""
+    from tools._output_reader import _OUTPUT_FILE_EXTS
+    if not any(s.kind == 'stdout_sidecar' for s in sources):
+        return False
+    for p in out_paths:
+        if not os.path.isdir(p):
+            return False
+        for _root, _dirs, files in os.walk(p):
+            if any(f.lower().endswith(_OUTPUT_FILE_EXTS) for f in files):
+                return False
+    return True
+
+
 def build_packet(log, request, selectors=None):
     from tools._output_reader import entry_text_sources, _cited_query_terms, _cmd_output_paths
     from tools._gates._evidence_calls import agent_authored_paths, authored_source_of
@@ -213,7 +230,9 @@ def build_packet(log, request, selectors=None):
                    or str(entry.get('cmd') or '').startswith(('read.output', 'read.mail')))
         read_result = [s for s in sources if s.kind == 'stdout_sidecar'] if is_read else []
         has_artifact = any(s.kind == 'file' for s in sources)
-        if not has_artifact and (entry.get('output_path') or _cmd_output_paths(entry.get('cmd') or '')):
+        out_paths = [p for p in ([entry.get('output_path')] if entry.get('output_path') else [])
+                     + _cmd_output_paths(entry.get('cmd') or '') if p]
+        if not has_artifact and out_paths and not _dump_dirs_only(out_paths, sources):
             raise PacketError(f'Call {cid} has only an invocation log; its artifact output is unavailable', 'needs-evidence')
         if has_artifact:
             # The read's own result first (the rows it returned), then the
