@@ -2504,7 +2504,15 @@ def densityscout_scan(target: str, threshold: float = 0.10) -> dict:
         return missing
     binary = optional_binary("misc.densityscout_scan", _bin_or_warn)
     cmd = [binary, "-pe", "-t", str(threshold), target]
-    return run(cmd, timeout=600)
+    result = run(cmd, timeout=600)
+    # The densityscout build on some hosts segfaults on every input (even a
+    # plain directory with no options): nothing was scanned.
+    if result.get("exit_code") in (-11, 139):
+        result.update(success=False, status="tool_unavailable", tool_unavailable=True,
+                      error="densityscout crashed (SIGSEGV) on this host — NOTHING was "
+                            "scanned. Settle with misc.record_disposition(target_kind=\"tool\", "
+                            "target_id=\"misc.densityscout_scan\", reason=\"tool_unavailable\").")
+    return result
 
 
 # ── Sigma-rule hunting on EVTX ──────────────────────────────────────────────
