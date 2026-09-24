@@ -1814,6 +1814,7 @@ class ExecutionLog:
         observed_principals: list[dict] | None = None,
         observed_hosts: list[str] | None = None,
         case_question: str = "",
+        extra: dict | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1872,6 +1873,11 @@ class ExecutionLog:
                 entry["observed_hosts"] = [str(h) for h in observed_hosts if str(h).strip()]
             if case_question:
                 entry["case_question"] = str(case_question).strip()
+            for k, v in (extra or {}).items():
+                # Server-computed audit fields (evidence_kinds,
+                # server_filtered_tools, …) — never overwrite a core field.
+                if k not in entry and v not in (None, [], {}, ""):
+                    entry[k] = v
             self._append_entry(entry)
             self._last_dair_cid = cid
             return cid

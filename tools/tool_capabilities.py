@@ -8,6 +8,7 @@ priority_tools should come from these known, phase-appropriate capabilities.
 from __future__ import annotations
 
 import copy
+import re
 import shutil
 
 
@@ -262,6 +263,93 @@ _SUBSTITUTIONS: list[dict] = [
 ]
 
 
+# Evidence kinds (core.evidence_kinds.KINDS) a tool needs — ANY one of the
+# listed kinds suffices. A tool matched by neither table is GENERIC (strings,
+# yara, hash, read, reason, dair, enrich, carve, control-plane misc.*): it runs
+# on whatever the case holds. DAIR drops a prescribed tool — or a verification
+# challenge whose challenge_method is one — when the case holds none of the
+# kinds it needs (tools/dair.py), so no round trip is spent on it and it never
+# becomes an open work-order item or challenge.
+_WINDOWS_ARTIFACTS = frozenset({"disk_image", "triage"})
+_EVIDENCE_NEEDS_PREFIX: tuple[tuple[str, frozenset], ...] = (
+    ("vol.", frozenset({"memory"})),
+    ("net.", frozenset({"pcap"})),
+    ("tsk.", frozenset({"disk_image"})),
+    ("ewf.", frozenset({"disk_image"})),
+    ("img.", frozenset({"disk_image"})),
+    ("ez.", _WINDOWS_ARTIFACTS),
+    ("af.", _WINDOWS_ARTIFACTS),           # every detector reads a disk-artifact parse
+    ("live.", frozenset({"live"})),
+    ("velo.", frozenset({"live"})),
+    ("monitor.", frozenset({"live"})),
+    ("respond.", frozenset({"live"})),
+)
+_EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
+    "ez.sqlecmd": frozenset({"disk_image", "triage", "mobile"}),   # any SQLite store
+    "correlate.process_to_file": frozenset({"memory"}),
+    "correlate.network_to_process": frozenset({"memory"}),
+    "yara.scan_memory_image": frozenset({"memory"}),
+    "yara.scan_process_memory": frozenset({"memory"}),
+    "plaso.create_timeline": frozenset({"disk_image", "triage", "mobile"}),
+    "plaso.create_targeted": frozenset({"disk_image", "triage", "mobile"}),
+    "misc.chat_db_export": frozenset({"disk_image", "triage", "mobile"}),
+    **{t: _WINDOWS_ARTIFACTS for t in (
+        "misc.evtx_filter", "misc.evtx_dump", "misc.chainsaw_hunt", "misc.regripper_hive",
+        "misc.usnparser_parse", "misc.analyzemft_parse", "misc.srum_export",
+        "misc.device_install_inventory", "misc.parse_scheduled_tasks",
+        "misc.usbdeviceforensics", "misc.hindsight_chrome")},
+}
+
+
+def canonical_tool_id(tool) -> str:
+    """'vol.pslist' for any spelling of a prescribed tool: vol_pslist,
+    vol_vol_pslist, mcp__trudi-sift__vol_pslist, 'vol.pslist(pid=4)', or a
+    structured {'tool': ...} item."""
+    if isinstance(tool, dict):
+        tool = tool.get("tool") or ""
+    t = str(tool or "").strip().split("(", 1)[0].strip()
+    t = (t.split() or [""])[0].rstrip(",").lower()
+    if t.startswith("mcp__"):
+        t = t.split("__")[-1]
+    if "." not in t and "_" in t:
+        from tools._fk import normalize_tool_name
+        t = normalize_tool_name(t).replace("_", ".", 1)
+    return t
+
+
+def tool_evidence_needs(tool) -> frozenset | None:
+    """Evidence kinds `tool` needs (any one), or None when it is generic."""
+    t = canonical_tool_id(tool)
+    if t in _EVIDENCE_NEEDS_TOOL:
+        return _EVIDENCE_NEEDS_TOOL[t]
+    for prefix, needs in _EVIDENCE_NEEDS_PREFIX:
+        if t.startswith(prefix):
+            return needs
+    return None
+
+
+def tool_fits_evidence(tool, evidence_kinds) -> bool:
+    """True unless the case's evidence kinds are KNOWN (non-empty) and hold
+    none of the kinds `tool` needs. An empty/None kind set is undetermined —
+    everything fits (fail-open)."""
+    if not evidence_kinds:
+        return True
+    needs = tool_evidence_needs(tool)
+    return needs is None or bool(needs & set(evidence_kinds))
+
+
+def challenge_method_tools(method) -> list[str]:
+    """The tool ids a challenge_method names — backends write one tool, a
+    parametrised call, or a comma-separated list ('ez.mftecmd (dir),
+    misc.usnparser_parse')."""
+    out = []
+    for part in re.split(r",(?![^()]*\))", str(method or "")):
+        t = canonical_tool_id(part)
+        if t:
+            out.append(t)
+    return out
+
+
 # Wrappers that shell out to an OPTIONAL binary (not on every SIFT build).
 # tool id -> (candidate names/paths — any one present = installed, install hint).
 # A tool whose binary is missing fails fast with a typed `tool_unavailable`
@@ -325,12 +413,13 @@ def tool_capability_manifest() -> dict:
     }
 
 
-def allowed_tool_names() -> set[str]:
-    """Return every tool ID that DAIR/reasoning may place in priority_tools."""
+def allowed_tool_names(evidence_kinds=None) -> set[str]:
+    """Return every tool ID that DAIR/reasoning may place in priority_tools —
+    only those the case's evidence can feed when `evidence_kinds` is known."""
     names: set[str] = set()
     for cap in _CAPABILITIES:
         names.update(cap.get("tools", []))
-    return names - unavailable_tools()
+    return {t for t in names - unavailable_tools() if tool_fits_evidence(t, evidence_kinds)}
 
 
 def capability_for_tool(tool_name: str) -> str:
@@ -361,16 +450,23 @@ def annotate_directives_with_manifest(directives: dict) -> dict:
     return out
 
 
-def format_tool_manifest_for_prompt(max_tools_per_capability: int = 8) -> str:
-    """Compact text block for model system prompts."""
+def format_tool_manifest_for_prompt(max_tools_per_capability: int = 8,
+                                    evidence_kinds=None) -> str:
+    """Compact text block for model system prompts. With `evidence_kinds`
+    (non-empty), tools the case's evidence cannot feed are left out, and a
+    capability left with no tool is dropped."""
     lines = [
         "TOOL CAPABILITY MANIFEST:",
         f"- version: {MANIFEST_VERSION}",
         "- Use only these tool IDs in directives.priority_tools and challenge_method.",
         "- Select by capability/evidence type, then choose the smallest executable batch.",
     ]
+    if evidence_kinds:
+        lines.append(f"- listed for the evidence this case holds: {', '.join(sorted(evidence_kinds))}")
     for cap in _CAPABILITIES:
-        installed = _installed(cap["tools"])
+        installed = [t for t in _installed(cap["tools"]) if tool_fits_evidence(t, evidence_kinds)]
+        if not installed:
+            continue
         tools = installed[:max_tools_per_capability]
         if len(installed) > max_tools_per_capability:
             tools = tools + ["..."]

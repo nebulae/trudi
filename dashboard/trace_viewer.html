@@ -1416,6 +1416,9 @@ function renderDairCall(e) {
     ${inputs.case_context ? `<h3>input — case_context</h3><pre>${escapeHtml(inputs.case_context)}</pre>` : ''}
     ${challenges.length ? renderChallenges(challenges) : ''}
     ${dirs.priority_tools && dirs.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(dirs.priority_tools, null, 2))}</pre>` : ''}
+    ${e.evidence_kinds ? `<div class="kv"><span class="k">evidence</span><span class="v">${escapeHtml((e.evidence_kinds || []).join(', ') || 'undetermined')}${e.evidence_determined ? '' : ' (not filtered)'}</span></div>` : ''}
+    ${(e.server_filtered_tools || []).length ? `<h3>server-filtered tools (need evidence the case lacks)</h3><pre>${escapeHtml(JSON.stringify(e.server_filtered_tools, null, 2))}</pre>` : ''}
+    ${(e.server_filtered_challenges || []).length ? `<h3>server-filtered challenges (need evidence the case lacks)</h3><pre>${escapeHtml(JSON.stringify(e.server_filtered_challenges, null, 2))}</pre>` : ''}
     ${rec.length ? `<h3>recommended actions (advisory)</h3><ul>${rec.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
   `;
 }

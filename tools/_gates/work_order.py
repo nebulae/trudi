@@ -201,6 +201,30 @@ def _succ_tool_ids(entries) -> list:
     return out
 
 
+def stamped_evidence_kinds(entries) -> set:
+    """Evidence kinds the SERVER recorded on the latest dair_call that carries
+    a determined inventory (dair_assess stamps evidence_kinds /
+    evidence_determined). Empty — filter nothing — for traces without the
+    stamp, an undetermined inventory, or a live-monitoring trace."""
+    from core.evidence_kinds import is_live_monitoring_trace
+    if is_live_monitoring_trace(entries):
+        return set()
+    for e in reversed(entries or []):
+        if isinstance(e, dict) and e.get("type") == "dair_call" and e.get("evidence_determined") \
+                and e.get("evidence_kinds"):
+            return {str(k) for k in e["evidence_kinds"]}
+    return set()
+
+
+def unfit_for_evidence(tool, kinds) -> bool:
+    """A prescribed tool the case's evidence cannot feed — never an unrun
+    work-order item (DAIR drops it; this covers orders recorded before)."""
+    if not kinds:
+        return False
+    from tools.tool_capabilities import tool_fits_evidence
+    return not tool_fits_evidence(tool, kinds)
+
+
 def unrun_from_list(entries, tools) -> list:
     """Which of `tools` (a single priority_tools work order) were never run
     successfully anywhere nor typed-dispositioned — display names. Control-plane /
@@ -213,11 +237,12 @@ def unrun_from_list(entries, tools) -> list:
                  if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
     succ_tools = _succ_tool_ids(entries)
     didx = index_from_entries(entries)
+    kinds = stamped_evidence_kinds(entries)
     out: list = []
     seen: set = set()
     for t in tools:
         t = _item_tool(t)
-        if _control_plane_tool(t):
+        if _control_plane_tool(t) or unfit_for_evidence(t, kinds):
             continue
         sig = _binary_sig(t)
         if len(sig) < 3 or sig in seen:
@@ -243,6 +268,7 @@ def unrun_priority_tools(entries) -> list:
     (the tool ran in an earlier phase) passes — only genuinely-skipped work is
     flagged."""
     prescribed: dict = {}          # binary sig -> display name (first seen)
+    kinds = stamped_evidence_kinds(entries)
     for e in entries or []:
         if e.get("type") != "dair_call":
             continue
@@ -251,7 +277,7 @@ def unrun_priority_tools(entries) -> list:
             continue
         for t in pt:
             t = _item_tool(t)
-            if _control_plane_tool(t):
+            if _control_plane_tool(t) or unfit_for_evidence(t, kinds):
                 continue
             sig = _binary_sig(t)
             if len(sig) < 3:
