@@ -214,3 +214,44 @@ class TestRecmdBatchPerHive:
         mock_dotnet.side_effect = None
         r = ez_recmd_batch(str(u), "/b.reb", str(tmp_path / "analysis" / "o2"), per_hive=False)
         assert "-d" in mock_dotnet.call_args.args[1]
+
+
+_SQLE_CRASH = (
+    "SQLECmd version 1.1.0.0\nMaps loaded: 92\nProcessing /x/History...\n"
+    "Unhandled exception: System.Reflection.TargetInvocationException: Exception "
+    "has been thrown by the target of an invocation.\n ---> System.DllNotFoundException: "
+    "Unable to load shared library 'SQLite.Interop.dll' or one of its dependencies.\n")
+
+
+class TestDotnetCrashGuard:
+    """SQLECmd on Linux crashes (DllNotFoundException) yet exits 0: the run must
+    be recorded as FAILED/tool_unavailable, in the result AND the trace."""
+
+    def _run(self, rc, out, tmp_path):
+        from unittest.mock import MagicMock
+        import core.executor as ex
+        from core.execution_log import log
+        from tools.eztools import ez_sqlecmd
+        proc = MagicMock(returncode=rc, stdout=out.encode(), stderr=b"")
+        db = tmp_path / "History"
+        db.write_bytes(b"SQLite format 3\x00")
+        with patch("tools.eztools.run_dotnet", ex.run_dotnet), \
+             patch("core.executor.subprocess.run", return_value=proc):
+            r = ez_sqlecmd(str(db), str(tmp_path / "out"))
+        return r, log._entries[-1]
+
+    def test_dll_not_found_exit0_is_tool_unavailable(self, tmp_path):
+        r, entry = self._run(0, _SQLE_CRASH, tmp_path)
+        assert r["success"] is False and entry["success"] is False
+        assert r["status"] == "tool_unavailable" and r["tool_unavailable"] is True
+        assert "SQLite.Interop.dll" in r["error"] and "SQLECmd.dll" in r["error"]
+        assert "NOTHING was parsed" in entry["exit_meaning"]
+
+    def test_other_unhandled_exception_is_error(self, tmp_path):
+        r, _ = self._run(0, "Unhandled exception. System.IO.IOException: boom\n", tmp_path)
+        assert r["success"] is False and r["status"] == "error"
+
+    def test_clean_run_unchanged(self, tmp_path):
+        r, entry = self._run(0, "Processing /x/History...\nMatching map found\n", tmp_path)
+        assert r["success"] is True and entry["success"] is True
+        assert "status" not in r

@@ -68,13 +68,23 @@ def strings_extract(
     }
 
 
+_ENC_FLAGS = {"ascii": [], "utf16le": ["-el"]}
+_GREP_ENCODINGS = {
+    "ascii": ["ascii"], "s": ["ascii"], "utf8": ["ascii"],
+    "utf16le": ["utf16le"], "utf16": ["utf16le"], "l": ["utf16le"],
+    "unicode": ["utf16le"], "wide": ["utf16le"],
+    "both": ["ascii", "utf16le"], "all": ["ascii", "utf16le"],
+}
+
+
 @mcp.tool()
 @output_safe
 def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensitive: bool = True,
-                 max_matches: int = 500, timeout: int = 0) -> dict:
+                 max_matches: int = 500, timeout: int = 0, encoding: str = "ascii") -> dict:
     """
     Extract strings from a file and filter by regex pattern, STREAMING.
     Useful for targeted IOC hunting: URLs, IPs, domain names, commands.
+    encoding: "ascii" (default), "utf16le" (Windows wide strings), or "both".
 
     The whole `strings` stream is filtered line by line, so the result is a
     true answer over the ENTIRE file. Contract:
@@ -115,9 +125,14 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
     except re.error as e:
         return {"success": False, "error": f"Invalid regex: {e}", "matches": []}
 
+    enc = _GREP_ENCODINGS.get(str(encoding or "ascii").strip().lower().replace("-", "").replace("_", ""))
+    if enc is None:
+        return {"success": False, "matches": [],
+                "error": f"invalid encoding {encoding!r}: use 'ascii', 'utf16le' or 'both'"}
+
     max_matches = max(1, int(max_matches))
     timeout = int(timeout) if timeout and int(timeout) > 0 else DEFAULT_TIMEOUT
-    cmd = ["strings", "-a", "-n", str(min_length), file_path]
+    cmds = [["strings", "-a", *_ENC_FLAGS[e], "-n", str(min_length), file_path] for e in enc]
     start = time.perf_counter()
 
     def _trace(success: bool, matches: list[str], stderr: str, exit_code: int,
@@ -128,7 +143,7 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
             "stderr": stderr,
             "exit_code": exit_code,
             "truncated": truncated,
-            "cmd": " ".join(cmd),
+            "cmd": " ; ".join(" ".join(c) for c in cmds),
             "retries": 0,
             "elapsed_seconds": round(time.perf_counter() - start, 1),
         }
@@ -136,59 +151,71 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
         # Echo the id inline so the result is citable without a trace lookup.
         return tc.get("_trudi_call_id", 0)
 
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace", bufsize=1,
-        )
-    except OSError as e:
-        cid = _trace(False, [], str(e), -1, False)
-        return {"success": False, "error": f"failed to spawn strings: {e}", "matches": [],
-                "_trudi_call_id": cid}
-
-    stderr_buf: list[str] = []
-
-    def _drain_err():
-        try:
-            for line in proc.stderr:
-                if len(stderr_buf) < 200:
-                    stderr_buf.append(line.rstrip())
-        except Exception:
-            pass
-
-    threading.Thread(target=_drain_err, daemon=True).start()
-
     matches: list[str] = []
     total_matches = 0
     lines_scanned = 0
     timed_out = False
+    exit_code = 0
+    stderr_all: list[str] = []
+    per_encoding: dict = {}
     deadline = start + timeout
-    try:
-        for line in proc.stdout:
-            lines_scanned += 1
-            if rx.search(line):
-                total_matches += 1
-                if len(matches) < max_matches:
-                    matches.append(line.rstrip("\n"))
-            if (lines_scanned & 0x3FFF) == 0 and time.perf_counter() > deadline:
-                timed_out = True
-                break
-    finally:
-        if timed_out:
-            try:
-                proc.kill()
-            except OSError:
-                pass
+    for e, cmd in zip(enc, cmds):
         try:
-            proc.wait(timeout=30)
-        except Exception:
-            pass
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, errors="replace", bufsize=1,
+            )
+        except OSError as err:
+            cid = _trace(False, matches, str(err), -1, False)
+            return {"success": False, "error": f"failed to spawn strings: {err}",
+                    "matches": [], "_trudi_call_id": cid}
 
-    exit_code = proc.returncode if proc.returncode is not None else -1
+        stderr_buf: list[str] = []
+
+        def _drain_err(p=proc, buf=stderr_buf):
+            try:
+                for line in p.stderr:
+                    if len(buf) < 200:
+                        buf.append(line.rstrip())
+            except Exception:
+                pass
+
+        threading.Thread(target=_drain_err, daemon=True).start()
+
+        hits = 0
+        try:
+            for line in proc.stdout:
+                lines_scanned += 1
+                if rx.search(line):
+                    hits += 1
+                    if len(matches) < max_matches:
+                        matches.append(line.rstrip("\n"))
+                if (lines_scanned & 0x3FFF) == 0 and time.perf_counter() > deadline:
+                    timed_out = True
+                    break
+        finally:
+            if timed_out:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=30)
+            except Exception:
+                pass
+        total_matches += hits
+        per_encoding[e] = hits
+        rc = proc.returncode if proc.returncode is not None else -1
+        if rc != 0 and exit_code == 0:
+            exit_code = rc
+        stderr_all.extend(stderr_buf)
+        if timed_out:
+            break
+
     complete = (not timed_out) and exit_code == 0
     cap_hit = total_matches > len(matches)
     truncated = cap_hit or not complete
-    stderr = "\n".join(stderr_buf)
+    stderr = "\n".join(stderr_all)
     if timed_out:
         stderr = (f"strings_grep scan aborted after {timeout}s "
                   f"({lines_scanned} lines scanned); " + stderr).strip("; ")
@@ -208,7 +235,10 @@ def strings_grep(file_path: str, pattern: str, min_length: int = 4, case_insensi
         "complete": complete,
         "truncated": truncated,
         "elapsed_seconds": round(time.perf_counter() - start, 1),
+        "encoding": "both" if len(enc) > 1 else enc[0],
     }
+    if len(enc) > 1:
+        result["match_count_by_encoding"] = per_encoding
     if cap_hit:
         result["note"] = (f"{total_matches} matches; only the first {max_matches} returned — "
                           f"raise max_matches or narrow the pattern")

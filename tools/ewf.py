@@ -21,7 +21,59 @@ def ewf_verify(image: str) -> dict:
     Verify E01 image integrity by recomputing and comparing MD5/SHA1 hashes.
     Must complete without errors before analysis proceeds.
     """
-    return run(["ewfverify", image], timeout=VOL_TIMEOUT*6)
+    return run(["ewfverify", image], timeout=VOL_TIMEOUT*6,
+               classify=_classify_ewfverify)
+
+
+_EWF_SECTOR_RE = re.compile(
+    r"at sector\(s\):\s*(\d+)\s*-\s*(\d+)\s*\(number:\s*(\d+)\)"
+    r"(?:\s*in segment file\(s\):\s*(.+))?")
+_EWF_HASH_RE = re.compile(
+    r"^(MD5|SHA1|SHA256) hash (stored in file|calculated over data):\s*([0-9a-fA-F]+)",
+    re.M)
+
+
+def _classify_ewfverify(result: dict, stdout: str, stderr: str) -> None:
+    """ewfverify exits 1 both when it cannot run AND when a completed
+    verification found a mismatch. The latter is a successful run with a
+    negative result — keep it citable. Only a verdict line counts as completed."""
+    verdict = re.search(r"ewfverify:\s*(SUCCESS|FAILURE)", stdout)
+    hashes = {(m.group(1).lower(), m.group(2)): m.group(3).lower()
+              for m in _EWF_HASH_RE.finditer(stdout)}
+    result["stored_md5"] = hashes.get(("md5", "stored in file"))
+    result["computed_md5"] = hashes.get(("md5", "calculated over data"))
+    sha1_stored = hashes.get(("sha1", "stored in file"))
+    if sha1_stored is None:
+        m = re.search(r"Additional hash values:.*?^SHA1:\s*([0-9a-fA-F]{40})",
+                      stdout, re.S | re.M)
+        sha1_stored = m.group(1).lower() if m else None
+    result["stored_sha1"] = sha1_stored
+    result["computed_sha1"] = hashes.get(("sha1", "calculated over data"))
+    result["sector_errors"] = [
+        {"start": int(m.group(1)), "end": int(m.group(2)),
+         "count": int(m.group(3)), "segment": (m.group(4) or "").strip()}
+        for m in _EWF_SECTOR_RE.finditer(stdout)]
+    completed = verdict is not None and "Verify completed" in stdout
+    if not completed:
+        result["verified"] = None
+        result["status"] = "error"
+        return
+    ok = verdict.group(1) == "SUCCESS"
+    result["success"] = True
+    result["verified"] = ok
+    if ok:
+        result["status"] = "verified"
+        result["exit_meaning"] = "verification completed — hashes match"
+    else:
+        md5_mismatch = (result["computed_md5"] is not None
+                        and result["computed_md5"] != result["stored_md5"])
+        result["status"] = "verification_failed"
+        why = ", ".join(filter(None, [
+            "MD5 mismatch" if md5_mismatch else "",
+            f"{len(result['sector_errors'])} sector error range(s)"
+            if result["sector_errors"] else ""]))
+        result["exit_meaning"] = ("verification completed — FAILED"
+                                  + (f" ({why})" if why else ""))
 
 
 @mcp.tool()

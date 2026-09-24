@@ -369,10 +369,24 @@ def hindsight_chrome(
         os.makedirs(output_dir, exist_ok=True)
     except OSError:
         pass
-    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir)
+    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir,
+            env=_hindsight_env())
     if isinstance(r, dict):
         r["output_format"] = fmt
     return r
+
+
+# /opt/pyhindsight is Python 3.10 but uses datetime.UTC (3.11+): the child gets
+# a TRUDI-owned sitecustomize that aliases it (the install is not modified).
+_HINDSIGHT_SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "_compat", "hindsight")
+
+
+def _hindsight_env() -> dict:
+    env = dict(os.environ)
+    prior = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = _HINDSIGHT_SHIM + (os.pathsep + prior if prior else "")
+    return env
 
 
 # ── AV scanning ──────────────────────────────────────────────────────────────
@@ -406,21 +420,76 @@ def clamscan_directory(directory: str, recursive: bool = True) -> dict:
 def usbdeviceforensics(registry_path: str, output_path: Optional[str] = None) -> dict:
     """
     Extract USB device connection history from registry hives.
-    registry_path: path to SYSTEM hive or a directory containing SYSTEM.
+    registry_path: SYSTEM hive file or the directory holding it (config dir).
     output_path: optional TSV output file.
     """
     if output_path:
         assert_output_safe(output_path)
-    # The tool takes a hive DIRECTORY via -r; a hive file means its folder.
-    hives = os.path.dirname(registry_path) if os.path.isfile(registry_path) else registry_path
+    stage, staged = _usbdf_stage(registry_path)
+    hives = stage or registry_path
     cmd = ["/usr/local/bin/usbdeviceforensics", "-r", hives]
     if output_path:
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         cmd += ["-o", output_path, "-f", "tsv"]
-    result = run(cmd, timeout=60)
+    def _stamp_inputs(r: dict, _out: str, _err: str) -> None:
+        # The -r dir is a scratch stage: record which evidence files it held
+        # in the stored output so the trace names the hives actually read.
+        head = "".join(f"Staged input: {p}\n" for p in staged)
+        r["stdout"] = head + r.get("stdout", "")
+        r["_stdout_full"] = head + r.get("_stdout_full", "")
+
+    try:
+        result = run(cmd, timeout=_USBDF_TIMEOUT,
+                     classify=_stamp_inputs if staged else None)
+    finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+    if staged:
+        result["staged_inputs"] = staged
     if output_path:
         result["output_path"] = output_path
     return result
+
+
+_USBDF_TIMEOUT = 600
+
+
+def _usbdf_stage(registry_path: str) -> tuple:
+    """usbdeviceforensics os.walk()s -r RECURSIVELY and loads every file as a
+    hive three times (COMPONENTS, RegBack, systemprofile …) — on a real config
+    dir that ran past 60 s. Stage symlinks to just SYSTEM + SOFTWARE (and the
+    Windows\\INF\\setupapi.dev.log it also reads) in a scratch dir. Returns
+    (stage_dir, source_paths), or (None, []) when no SYSTEM hive is found (the
+    path is then passed through unchanged)."""
+    import tempfile
+    src = os.path.dirname(registry_path) if os.path.isfile(registry_path) else registry_path
+    if not os.path.isdir(src):
+        return None, []
+    by_lower = {n.lower(): n for n in os.listdir(src)}
+    picks = []
+    if os.path.isfile(registry_path):
+        picks.append(registry_path)
+    elif "system" in by_lower:
+        picks.append(os.path.join(src, by_lower["system"]))
+    else:
+        return None, []
+    if "software" in by_lower:
+        picks.append(os.path.join(src, by_lower["software"]))
+    inf = os.path.normpath(os.path.join(src, "..", "..", "INF"))
+    if os.path.isdir(inf):
+        for n in os.listdir(inf):
+            if n.lower() == "setupapi.dev.log":
+                picks.append(os.path.join(inf, n))
+    stage = tempfile.mkdtemp(prefix="trudi-usbdf-")
+    names, used = [], []
+    for p in picks:
+        name = os.path.basename(p)
+        if name in names:
+            continue
+        os.symlink(os.path.abspath(p), os.path.join(stage, name))
+        names.append(name)
+        used.append(os.path.abspath(p))
+    return stage, used
 
 
 # ── SRUM (ESE database) ──────────────────────────────────────────────────────
@@ -779,7 +848,7 @@ def pdf_parser_analyze(pdf_path: str, object_id: Optional[int] = None) -> dict:
 @output_safe
 def pe_scanner(file_path: str) -> dict:
     """Scan a PE executable for suspicious characteristics using pe-scanner."""
-    return run(["/usr/local/bin/pe-scanner", file_path], timeout=30)
+    return run(["/usr/local/bin/pe-scanner", "-f", file_path], timeout=30)
 
 
 @mcp.tool()

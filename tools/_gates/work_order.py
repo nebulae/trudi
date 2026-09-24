@@ -111,11 +111,40 @@ def _control_plane_tool(tool: str) -> bool:
             or d.startswith(("reason.", "dair.", "monitor.", "accuracy.", "coverage.")))
 
 
-def tool_waived(didx, tool: str) -> bool:
+_NAMESPACES = frozenset({
+    "misc", "ez", "vol", "tsk", "ewf", "img", "plaso", "yara", "hash", "strings",
+    "carve", "net", "enrich", "live", "velo", "monitor", "respond", "read", "af",
+    "correlate",
+})
+
+
+def _tool_keys(name: str) -> set:
+    """Separator-insensitive identities of a tool/binary name, so a failed call
+    recorded by its BINARY ('/usr/local/bin/pe-scanner', 'SQLECmd.dll',
+    'ewfverify') matches the MCP spelling an agent dispositions ('misc.pe_scanner',
+    'ez.sqlecmd', 'ewf_verify'): the collapsed full name and, when the first
+    segment is a TRUDI namespace, the collapsed name without it."""
+    raw = (name or "").strip().split("(", 1)[0]
+    raw = (raw.split() or [""])[0].rsplit("/", 1)[-1].lower()
+    if raw.endswith(".dll"):
+        raw = raw[:-4]
+    n = _fk.normalize_tool_name(raw.replace(".", "_").replace("-", "_"))
+    parts = [p for p in n.split("_") if p]
+    keys = {"".join(parts)}
+    if len(parts) >= 2 and parts[0] in _NAMESPACES:
+        keys.add("".join(parts[1:]))
+    return {k for k in keys if len(k) >= 3}
+
+
+def tool_waived(didx, tool: str, aliases=()) -> bool:
     """A typed disposition settles the tool: target_kind="tool", target_id any
-    spelling of the MCP tool (ez.pecmd / ez_pecmd / ez_pecmd), reason
-    inapplicable | absent_from_evidence | out_of_scope."""
+    spelling of the MCP tool (ez.pecmd / ez_pecmd / ez_pecmd) or of its binary
+    (pe-scanner / pe_scanner), reason inapplicable | absent_from_evidence |
+    out_of_scope. `aliases`: other names of the same call (its mcp_tool stamp)."""
     sig = _binary_sig(tool)
+    keys: set = set()
+    for n in (tool, *aliases):
+        keys |= _tool_keys(n)
     table = getattr(didx, "dispositions", None) or {}
     for (kind, _norm), rows in table.items():
         if kind != "tool":
@@ -123,7 +152,8 @@ def tool_waived(didx, tool: str) -> bool:
         for d in rows:
             if str(d.get("reason") or "").lower() not in SOURCE_WAIVER_REASONS_ALL:
                 continue
-            if _binary_sig(str(d.get("target_id") or "")) == sig:
+            tid = str(d.get("target_id") or "")
+            if _binary_sig(tid) == sig or (_tool_keys(tid) & keys):
                 return True
     return False
 
@@ -149,7 +179,8 @@ def _failed_tool_items(entries) -> list:
         else:
             tool = toks[0].rsplit("/", 1)[-1]
         if tool and tool.lower() not in ("dotnet", "python3", "python", "sudo"):
-            out.append((i, {"tool": tool, "_failed": True}))
+            out.append((i, {"tool": tool, "_failed": True,
+                            "mcp_tool": str(e.get("mcp_tool") or "")}))
     return out
 
 
@@ -260,6 +291,10 @@ def unretried_blocks(entries) -> list:
                   for i, e in enumerate(entries or [])
                   if e.get("type") == "tool_call" and e.get("success") is not False
                   and e.get("cmd")]
+    later_mcp = [(i, _tool_keys(str(e.get("mcp_tool"))))
+                 for i, e in enumerate(entries or [])
+                 if e.get("type") == "tool_call" and e.get("success") is not False
+                 and e.get("mcp_tool")]
     didx = index_from_entries(entries)
 
     issues: list = []
@@ -275,15 +310,21 @@ def unretried_blocks(entries) -> list:
         # Re-run: the binary signature appears in a successful tool_call after the
         # block (a later dair_assess + retry produces exactly such a cmd).
         retried = any(j > idx and sig in cmd for j, cmd in later_cmds)
+        # A failed call carries its mcp_tool stamp: a later successful run of
+        # the same MCP tool, or a disposition naming it, settles it too.
+        aliases = (e.get("mcp_tool"),) if e.get("mcp_tool") else ()
+        akeys = set().union(*(_tool_keys(a) for a in aliases)) if aliases else set()
+        retried = retried or any(j > idx and (k & akeys) for j, k in later_mcp)
         # Waived: a typed tool disposition settles it (prose is not read).
-        waived = tool_waived(didx, tool)
+        waived = tool_waived(didx, tool, aliases)
         if not retried and not waived and e.get("_failed"):
+            shown = _display(e.get("mcp_tool") or tool)
             issues.append(
-                f"Tool {_display(tool)} FAILED and was never re-run successfully, "
+                f"Tool {shown} FAILED and was never re-run successfully, "
                 f"replaced, or dispositioned — a failed capability is an audit "
                 f"obligation, not a dead end. Retry it, run a named fallback and "
                 f"record why, or misc.record_disposition(target_kind=\"tool\", "
-                f"target_id=\"{_display(tool)}\", reason=\"tool_unavailable\" (not "
+                f"target_id=\"{shown}\", reason=\"tool_unavailable\" (not "
                 f"installed / cannot run here)|\"inapplicable\"|\"absent_from_evidence\") "
                 f"before Report."
             )

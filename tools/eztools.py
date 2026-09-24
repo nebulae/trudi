@@ -1,5 +1,6 @@
 """EZ Tools (Eric Zimmerman) — Windows artifact parsers via .NET runtime."""
 import os
+import re
 from typing import Optional
 from fastmcp import FastMCP
 from core import run_dotnet, run, output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT, PLASO_TIMEOUT
@@ -32,10 +33,36 @@ _EZ_FALLBACKS = {
 }
 
 
+def _classify_dotnet_crash(result: dict, stdout: str, stderr: str) -> None:
+    """EZ tools print an .NET 'Unhandled exception' and can still exit 0 (SQLECmd
+    without a native SQLite.Interop on Linux): the run parsed nothing, so it
+    must not be recorded as a success."""
+    text = f"{stdout}\n{stderr}"
+    if "Unhandled exception" not in text and "DllNotFoundException" not in text:
+        return
+    result["success"] = False
+    m = re.search(r"DllNotFoundException: Unable to load shared library '([^']+)'", text)
+    if m:
+        result["status"] = "tool_unavailable"
+        result["tool_unavailable"] = True
+        dll = next((t for t in str(result.get("cmd", "")).split()
+                    if t.lower().endswith(".dll")), "EZ tool")
+        result["error"] = (f"{os.path.basename(dll)} "
+                           f"crashed: native library {m.group(1)!r} is not available "
+                           f"on this host — NOTHING was parsed.")
+    else:
+        m = re.search(r"Unhandled exception[.:]?\s*([^\n]{0,200})", text)
+        result["status"] = "error"
+        result["error"] = ("EZ tool crashed with an unhandled .NET exception — "
+                           "output is incomplete: " + (m.group(1).strip() if m else ""))
+    result["exit_meaning"] = result["error"][:200]
+
+
 def _ez(dll: str, args: list[str], output_dir: Optional[str] = None, timeout: int = 300) -> dict:
     if output_dir:
         assert_output_safe(output_dir)
-    result = run_dotnet(dll, args, timeout=timeout, output_dir=output_dir)
+    result = run_dotnet(dll, args, timeout=timeout, output_dir=output_dir,
+                        classify=_classify_dotnet_crash)
     # Missing-binary detection: the .dll not being on disk is the unambiguous
     # signal (dotnet's exit 145 also fires for genuine runtime faults). Augment
     # the recorded result — the failed tool_call still lands in the trace, but
