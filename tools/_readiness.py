@@ -906,8 +906,10 @@ def assess_readiness(log, include_synthesis=True):
                     continue
                 parsed = any(_PARSE_RE.search(str(e.get("cmd") or "")) and frx.search(str(e.get("cmd") or ""))
                              for e in _ev_calls7)
-                waived7 = any(_fd7(idx_all, "source", t, reasons=("absent_from_evidence",
-                                                                  "inapplicable", "out_of_scope"))
+                # present_unparseable is the honest closure for a store that
+                # is on the image but that no available tool reads.
+                from tools._gates._dispositions import SOURCE_WAIVER_REASONS_ALL as _W7
+                waived7 = any(_fd7(idx_all, "source", t, reasons=_W7)
                               for t in (fam, f"chat_{fam}", "chat_messenger"))
                 if not parsed and not waived7:
                     issues.append(

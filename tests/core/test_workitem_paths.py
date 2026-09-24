@@ -33,3 +33,19 @@ def test_output_path_with_spaces_resolves(tmp_path):
     assert read_target_path({"cmd": quoted}).endswith("Message.txt")
     # a plain path is unchanged, and a not-yet-existing path keeps its token
     assert _cmd_output_paths("x --csv /tmp/none/out.csv") == ["/tmp/none/out.csv"]
+
+
+def test_present_unparseable_closes_a_comms_store(tmp_path):
+    from unittest.mock import patch
+    from tools._readiness import assess_readiness
+    log = ExecutionLog()
+    log.configure("CS", str(tmp_path / "t.json"), save_session=False)
+    log.record_dair_call("Triage", "", True, "Collect", "", "push", "")
+    ev = log.record_tool_call("fls -r img", True, False, 0, 0,
+                              stdout_excerpt="Users/x/AppData/Roaming/Telegram Desktop/tdata")
+    log.record_finding("data delivered", "SUSPECTED", "t",
+                       claim={"claim_kind": "positive", "category": "delivery", "act": "delivery"})
+    block = lambda: [b for b in assess_readiness(log)["blocking_issues"] if "'telegram'" in b]
+    assert block()
+    log.record_disposition("source", "telegram", "present_unparseable", evidence_call_ids=[ev])
+    assert not block()
