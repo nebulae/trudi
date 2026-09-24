@@ -148,6 +148,23 @@ def _build_handler(cases_root: str) -> type:
         def _handle_api(self, endpoint: str, qs: dict | None = None):
             if endpoint == "output":
                 return self._serve_output(qs or {})
+            if endpoint == "reports":
+                return self._send_json(list_reports(cases_root, (qs or {}).get("trace", [""])[0]))
+            if endpoint == "report":
+                q = qs or {}
+                html, err = render_report(cases_root, q.get("trace", [""])[0], q.get("name", [""])[0])
+                if html is None:
+                    self.send_error(404 if err == "not found" else 403, err)
+                    return
+                body = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if endpoint == "cases":
                 payload = {
                     "cases_root": cases_root,
@@ -162,6 +179,15 @@ def _build_handler(cases_root: str) -> type:
                 self.wfile.write(body)
                 return
             self.send_error(404, f"unknown API endpoint: {endpoint}")
+
+        def _send_json(self, payload):
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _serve_output(self, qs: dict):
             """Read-only view of one produced-output file (a tool's stdout
@@ -232,6 +258,91 @@ def _within(path: str, root: str) -> bool:
         return False
 
 
+def case_dir_for_trace(cases_root: str, trace: str) -> tuple[str | None, str]:
+    """The case directory of a trace URL path (…/<case>/analysis/*_trace.json
+    under cases_root), or (None, reason)."""
+    root = os.path.realpath(cases_root)
+    tpath = unquote(urlparse(trace or "").path or "").lstrip("/")
+    if not tpath or not TRACE_RE.match(tpath) or ".." in tpath.split("/"):
+        return None, "bad trace"
+    tfull = os.path.realpath(os.path.join(root, tpath))
+    if not _within(tfull, root) or not os.path.isfile(tfull):
+        return None, "bad trace"
+    analysis = os.path.dirname(tfull)
+    if os.path.basename(analysis) != "analysis":
+        return None, "trace is not under a case analysis/ dir"
+    return os.path.dirname(analysis), ""
+
+
+_REPORT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
+
+
+def list_reports(cases_root: str, trace: str) -> dict:
+    """Markdown reports in the trace's case reports/ dir, newest first."""
+    case_dir, err = case_dir_for_trace(cases_root, trace)
+    if not case_dir:
+        return {"reports": [], "error": err}
+    rdir = os.path.join(case_dir, "reports")
+    out = []
+    if os.path.isdir(rdir):
+        for name in os.listdir(rdir):
+            full = os.path.join(rdir, name)
+            if _REPORT_NAME.match(name) and os.path.isfile(full):
+                st = os.stat(full)
+                out.append({"name": name, "bytes": st.st_size, "mtime": int(st.st_mtime)})
+    # the final report first, then the trace export, then anything else
+    out.sort(key=lambda r: (not r["name"].endswith("_report.md"), -r["mtime"]))
+    return {"reports": out, "case": os.path.basename(case_dir)}
+
+
+# cid96 · #137 · F-137 · call 92 / calls 92 — references to trace call IDs.
+_CALL_REF = re.compile(r"(?<![\w/#&])(cid\s?|#|F-|calls?\s)(\d{1,6})\b")
+
+
+def _link_calls(html: str) -> str:
+    """Wrap call references in text (never inside tags or code) as links."""
+    parts = re.split(r"(<[^>]+>)", html)
+    in_code = 0
+    for i, part in enumerate(parts):
+        if part.startswith("<"):
+            tag = part[1:].split()[0].lower().rstrip(">") if len(part) > 2 else ""
+            if tag in ("code", "pre", "a"):
+                in_code += 1
+            elif tag in ("/code", "/pre", "/a"):
+                in_code = max(0, in_code - 1)
+            continue
+        if not in_code and part:
+            parts[i] = _CALL_REF.sub(
+                lambda m: f'<a class="cid" data-cid="{m.group(2)}" href="#">{m.group(0)}</a>', part)
+    return "".join(parts)
+
+
+def render_report(cases_root: str, trace: str, name: str) -> tuple[str | None, str]:
+    """HTML for one Markdown report of the trace's case. Raw HTML inside the
+    Markdown is not rendered (reports are model-written text)."""
+    case_dir, err = case_dir_for_trace(cases_root, trace)
+    if not case_dir:
+        return None, err
+    if not _REPORT_NAME.match(name or ""):
+        return None, "bad report name"
+    rdir = os.path.realpath(os.path.join(case_dir, "reports"))
+    full = os.path.realpath(os.path.join(rdir, name))
+    if not _within(full, rdir) or full == rdir:
+        return None, "bad report name"
+    if not os.path.isfile(full):
+        return None, "not found"
+    try:
+        from markdown_it import MarkdownIt
+        md = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table")
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(8 * 1024 * 1024)
+        return _link_calls(md.render(text)), ""
+    except ImportError:
+        import html as _h
+        with open(full, encoding="utf-8", errors="replace") as fh:
+            return f"<pre>{_h.escape(fh.read(8 * 1024 * 1024))}</pre>", ""
+
+
 def resolve_output_file(cases_root: str, trace: str, want: str) -> tuple[str | None, str]:
     """Map (trace URL path, requested file) to a real file the output endpoint
     may serve, or (None, reason).
@@ -243,17 +354,9 @@ def resolve_output_file(cases_root: str, trace: str, want: str) -> tuple[str | N
     analysis/.tool_output/ or exports/. A recorded absolute path from where
     the case used to live is re-rooted by its analysis/.tool_output/… or
     exports/… tail, so a copied or moved case still resolves."""
-    root = os.path.realpath(cases_root)
-    tpath = unquote(urlparse(trace or "").path or "").lstrip("/")
-    if not tpath or not TRACE_RE.match(tpath) or ".." in tpath.split("/"):
-        return None, "bad trace"
-    tfull = os.path.realpath(os.path.join(root, tpath))
-    if not _within(tfull, root) or not os.path.isfile(tfull):
-        return None, "bad trace"
-    analysis = os.path.dirname(tfull)
-    if os.path.basename(analysis) != "analysis":
-        return None, "trace is not under a case analysis/ dir"
-    case_dir = os.path.dirname(analysis)
+    case_dir, err = case_dir_for_trace(cases_root, trace)
+    if not case_dir:
+        return None, err
     allowed = [os.path.realpath(os.path.join(case_dir, r)) for r in OUTPUT_ROOTS]
     want = (want or "").strip()
     if not want or "\x00" in want:

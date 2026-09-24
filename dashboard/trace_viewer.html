@@ -272,6 +272,7 @@
   <span class="stat" id="last-fetch" title="last successful trace fetch"></span>
   <span class="live" id="live"><span class="live-dot"></span><span id="live-text">offline</span></span>
   <a id="graph-link" class="graph-btn" target="_blank" title="Open Investigation Chain blueprint view">Chain ↗</a>
+  <a id="report-link" class="graph-btn" target="trudi-report" title="Open the case's final report">Report ↗</a>
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
     <input type="checkbox" id="follow-tail" checked /> follow new
   </label>
@@ -1526,6 +1527,8 @@ function updateGraphLink() {
   const trace = params.get('trace');
   if (trace) link.href = `chain_view.html?trace=${encodeURIComponent(trace)}`;
   else link.href = 'chain_view.html';
+  const rlink = document.getElementById('report-link');
+  if (rlink) rlink.href = trace ? `report_view.html?trace=${encodeURIComponent(trace)}` : 'report_view.html';
 }
 
 // ── Data load ────────────────────────────────────────────────────────────────
@@ -1907,7 +1910,14 @@ function init() {
   tickClocks();
   setInterval(tickClocks, 1000);
   if (State.traceUrl) {
-    load();
+    const deep = parseInt(getQueryParam('call') || '', 10);
+    const first = load();
+    if (deep > 0) {
+      State.followTail = false;
+      const box = document.getElementById('follow-tail');
+      if (box) box.checked = false;
+      Promise.resolve(first).then(() => selectEntry(deep));
+    }
     setupRefreshTimer();
   }
 }

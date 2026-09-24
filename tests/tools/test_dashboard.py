@@ -449,3 +449,42 @@ def test_views_share_the_finding_renderer(standalone_server):
     resp = conn.getresponse()
     assert resp.status == 200 and b"TrudiRender" in resp.read()
     assert resp.getheader("Content-Type").startswith("application/javascript")
+
+
+class TestReportViewer:
+    """Report list/render endpoints behind the dashboard's report viewer."""
+
+    def _case(self, tmp_path):
+        case = tmp_path / "cases" / "c1"
+        (case / "analysis").mkdir(parents=True)
+        (case / "reports").mkdir()
+        (case / "analysis" / "C1_trace.json").write_text("{}")
+        (case / "reports" / "C1_report.md").write_text(
+            "# Report\n\nSee cid96 and F-137, call 92.\n\n| a | b |\n|---|---|\n| 1 | `cid5` |\n"
+            "\n<script>alert(1)</script>\n")
+        (case / "reports" / "C1_trace.md").write_text("# trace")
+        (case / "evidence").mkdir()
+        (case / "evidence" / "secret.md").write_text("x")
+        return str(tmp_path / "cases"), "/c1/analysis/C1_trace.json"
+
+    def test_lists_reports_final_first(self, tmp_path):
+        from dashboard.serve import list_reports
+        root, trace = self._case(tmp_path)
+        names = [r["name"] for r in list_reports(root, trace)["reports"]]
+        assert names[0] == "C1_report.md" and "C1_trace.md" in names
+
+    def test_renders_tables_links_calls_and_drops_raw_html(self, tmp_path):
+        from dashboard.serve import render_report
+        root, trace = self._case(tmp_path)
+        html, err = render_report(root, trace, "C1_report.md")
+        assert not err and "<table>" in html
+        assert 'data-cid="96"' in html and 'data-cid="137"' in html and 'data-cid="92"' in html
+        assert 'data-cid="5"' not in html                 # not inside code
+        assert "<script>" not in html
+
+    def test_refuses_other_files(self, tmp_path):
+        from dashboard.serve import render_report
+        root, trace = self._case(tmp_path)
+        for bad in ("../evidence/secret.md", "C1_report.txt", "/etc/passwd", ""):
+            assert render_report(root, trace, bad)[0] is None
+        assert render_report(root, "/c1/evidence/secret.md", "C1_report.md")[0] is None
