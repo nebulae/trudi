@@ -34,6 +34,7 @@ from tools.live import mcp as live_mcp
 from tools.velo import mcp as velo_mcp
 from tools.monitor import mcp as monitor_mcp
 from tools.respond import mcp as respond_mcp
+from tools.mobile import mcp as mobile_mcp
 
 mcp = FastMCP(
     "trudi-sift",
@@ -58,7 +59,7 @@ NAMESPACES = [
     ("correlate", correlate_mcp), ("coverage", coverage_mcp),
     ("af", antiforensics_mcp), ("attribution", attribution_mcp),
     ("live", live_mcp), ("velo", velo_mcp), ("monitor", monitor_mcp),
-    ("respond", respond_mcp),
+    ("respond", respond_mcp), ("mobile", mobile_mcp),
 ]
 for _ns, _child in NAMESPACES:
     mcp.mount(_child, namespace=_ns)

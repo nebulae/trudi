@@ -12,7 +12,7 @@ import re
 import shutil
 
 
-MANIFEST_VERSION = "2026-09-24.1"
+MANIFEST_VERSION = "2026-09-24.2"
 
 
 _CAPABILITIES: list[dict] = [
@@ -133,6 +133,21 @@ _CAPABILITIES: list[dict] = [
             "misc.readpst_extract",
             "misc.pff_export",
             "misc.chat_db_export",
+        ],
+    },
+    {
+        "id": "mobile_device",
+        "phases": ["Collect", "Analyze"],
+        "evidence": ["mobile"],
+        "purpose": ("Parse an extracted iOS filesystem or iTunes backup — MVT "
+                    "(messages, calls, contacts, Safari/WebKit, locationd, TCC, "
+                    "accounts, timeline) and mac_apt ios_apt (apps, accounts, Wi-Fi, "
+                    "networking, Safari, Notes, Screen Time, Spotlight)."),
+        "tools": [
+            "mobile.mvt_ios_check_fs",
+            "mobile.ios_apt",
+            "mobile.mvt_ios_check_backup",
+            "mobile.mvt_ios_decrypt_backup",
         ],
     },
     {
@@ -284,6 +299,7 @@ _EVIDENCE_NEEDS_PREFIX: tuple[tuple[str, frozenset], ...] = (
     ("velo.", frozenset({"live"})),
     ("monitor.", frozenset({"live"})),
     ("respond.", frozenset({"live"})),
+    ("mobile.", frozenset({"mobile"})),
 )
 _EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
     "ez.sqlecmd": frozenset({"disk_image", "triage", "mobile"}),   # any SQLite store
@@ -371,6 +387,11 @@ _OPTIONAL_BINARIES: dict[str, tuple[tuple[str, ...], str]] = {
     "misc.pff_export": (("pffexport",), "apt install pff-tools"),
     "misc.readpst_extract": (("readpst",), "sudo apt install pst-utils"),
     "misc.srum_export": (("esedbexport",), "apt install libesedb-utils"),
+    **{t: (("mvt-ios", "/usr/local/bin/mvt-ios"), "pipx install mvt (Amnesty MVT)")
+       for t in ("mobile.mvt_ios_check_fs", "mobile.mvt_ios_check_backup",
+                 "mobile.mvt_ios_decrypt_backup")},
+    "mobile.ios_apt": (("/opt/mac-apt/bin/mac_apt_git/ios_apt.py",),
+                       "install mac_apt (github.com/ydkhatri/mac_apt) under /opt/mac-apt"),
 }
 
 
