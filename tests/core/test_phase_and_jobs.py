@@ -182,3 +182,14 @@ def test_short_output_is_kept_and_read_output_explains_non_tool_ids(log):
     note = log.record_agent_message("thinking")
     with patch("core.execution_log.log", log):
         assert "not a tool call" in _sidecar_hint(note)
+
+
+def test_phase_the_server_recorded_counts_as_entered(log):
+    # 2026-09-24 COBALTSTRIKE: the move into Collect came on a dair call whose
+    # model answer was 'stay' (server-applied), so it was not a recommended
+    # push; phase coverage then refused Report as 'never entered Collect'.
+    from tools.dair import missing_report_phases
+    log.record_dair_call("Triage", "", False, "Collect", "", "stay", "")
+    log._entries[-1]["dair_phase"] = "Collect"            # as the server stamps it
+    log.record_dair_call("Collect", "", True, "Analyze", "", "push", "")
+    assert missing_report_phases(log._entries) == []

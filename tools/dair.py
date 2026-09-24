@@ -675,6 +675,15 @@ def _phases_entered(entries) -> set:
     for e in entries or []:
         if not isinstance(e, dict):
             continue
+        # The server owns the phase: the phase it stamped on a dair call after
+        # applying it (incl. a move the model answered 'stay' to, or a server
+        # override) and its own recorded transitions count. 2026-09-24: a run
+        # that spent 80 minutes in Collect was refused Report as 'never entered
+        # Collect' because the move was not a model-recommended push.
+        if e.get("type") == "dair_call" and e.get("dair_phase"):
+            out.add(str(e["dair_phase"]).strip().capitalize())
+        elif e.get("type") == "phase_transition" and (e.get("to_phase") or e.get("phase")):
+            out.add(str(e.get("to_phase") or e.get("phase")).strip().capitalize())
         if (e.get("type") == "dair_call"
                 and str(e.get("stack_action") or "") == "push"
                 and e.get("transition_recommended")):
