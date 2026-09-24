@@ -537,7 +537,10 @@ class TestMiscWindowsPlugins:
     def test_vol_yarascan_with_pid(self, mock_run):
         from tools.volatility import vol_yarascan
         vol_yarascan(IMG, "rules/test.yar", pid=555)
-        assert "--pid" in get_cmd(mock_run)
+        cmd = get_cmd(mock_run)
+        # yarascan.YaraScan has no --pid (2026-09-24 COBALTSTRIKE run): PID-scoped
+        # scans go to windows.vadyarascan
+        assert "windows.vadyarascan" in cmd and "--pid" in cmd and "yarascan.YaraScan" not in cmd
 
 
 class TestLinuxPlugins:

@@ -558,9 +558,12 @@ def vol_timeliner(image: str, output_dir: Optional[str] = None) -> dict:
 @output_safe
 def vol_yarascan(image: str, yara_rules: str, pid: Optional[int] = None) -> dict:
     """YARA scan across all process memory regions."""
-    # The OS-independent plugin; there is no windows.yarascan in Volatility 2.27.
-    extra = _yara_args(yara_rules) + _pid_extra(pid)
-    return _vol(image, "yarascan.YaraScan", extra, timeout=VOL_TIMEOUT)
+    # Volatility 2.27 has no windows.yarascan. yarascan.YaraScan scans the whole
+    # image and takes no --pid; a PID-scoped scan is windows.vadyarascan.
+    if pid:
+        return _vol(image, "windows.vadyarascan", _yara_args(yara_rules) + _pid_extra(pid),
+                    timeout=VOL_TIMEOUT)
+    return _vol(image, "yarascan.YaraScan", _yara_args(yara_rules), timeout=VOL_TIMEOUT)
 
 
 # ── Linux plugins ─────────────────────────────────────────────────────────────

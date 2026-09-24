@@ -1962,7 +1962,8 @@ def write_final_report(output_path: str, content: str) -> dict:
     # goals (never a demand that an attack exist).
     if lifecycle and "attack-lifecycle coverage" not in content.lower():
         _order = ["persistence", "privilege_escalation", "lateral_movement", "execution", "exfil"]
-        _lbl = {"established": "established", "ruled_out": "ruled out",
+        _lbl = {"established": "established", "suspected": "suspected (lead only)",
+                "ruled_out": "ruled out",
                 "examined": "examined (no verdict)", "not_examined": "NOT examined"}
         _sec = ["\n\n## Attack-lifecycle coverage",
                 "Coverage of the five DFIR goals for this investigation. A phase is covered "
