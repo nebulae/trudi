@@ -83,8 +83,15 @@ def _strip_comments(body: str) -> str:
     return "".join(out)
 
 
+# Windows paths written verbatim into a JSON string ("HKLM\SOFTWARE\Microsoft")
+# are invalid escapes (\S, \M) and fail the whole object. A backslash that does
+# not start a valid JSON escape can only have meant a literal backslash.
+_BAD_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
+
+
 def _load(body: str):
-    for text in (body, _strip_comments(body)):
+    stripped = _strip_comments(body)
+    for text in (body, stripped, _BAD_ESCAPE_RE.sub(r"\\\\", stripped)):
         try:
             return json.loads(text)
         except (json.JSONDecodeError, ValueError):
@@ -139,16 +146,21 @@ def _find_result(text: str) -> tuple[int, int, int, int] | None:
 _BLOCK_LABEL_RE = re.compile(
     r"\n\s*\**(?:EVIDENCE_REQUEST|DIRECTIVES|BLOCKERS|EVIDENCE_AUDIT|VERDICT)\**\s*:", re.IGNORECASE)
 _MAX_MISSING_CLOSERS = 3
+_BARE_RESULT_RE = re.compile(r"\{\s*\"schema_version\"")
 
 
 def _salvage_unclosed(text: str) -> tuple[int, int, dict] | None:
-    """(start, end, obj) for a headed RESULT object missing only its closers."""
-    for m in reversed(list(_RESULT_HEAD_RE.finditer(text or ""))):
-        if _balanced_object(text, m.end()) is not None:
+    """(start, end, obj) for a RESULT object missing only its closers —
+    headed, or bare (`{"schema_version"...`) when no header is present."""
+    starts = [(m.start(), m.end()) for m in _RESULT_HEAD_RE.finditer(text or "")]
+    if not starts:
+        starts = [(m.start(), m.start()) for m in _BARE_RESULT_RE.finditer(text or "")]
+    for start, body in reversed(starts):
+        if _balanced_object(text, body) is not None:
             continue
-        nxt = _BLOCK_LABEL_RE.search(text, m.end())
+        nxt = _BLOCK_LABEL_RE.search(text, body)
         stop = nxt.start() if nxt else len(text)
-        segment = text[m.end():stop].rstrip()
+        segment = text[body:stop].rstrip()
         segment = re.sub(r"\s*```\s*$", "", segment)
         stack, in_str, esc = [], False, False
         for c in segment:
@@ -171,7 +183,7 @@ def _salvage_unclosed(text: str) -> tuple[int, int, dict] | None:
         obj = _load(segment + "".join(reversed(stack)))
         if isinstance(obj, dict):
             obj.setdefault("_repaired", f"appended {len(stack)} missing closing bracket(s)")
-            return m.start(), stop, obj
+            return start, stop, obj
     return None
 
 
