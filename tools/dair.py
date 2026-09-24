@@ -672,16 +672,20 @@ def _phases_entered(entries) -> set:
     an asserted stack must never satisfy phase coverage. Every investigation
     starts in Triage."""
     out: set = {"Triage"}
+    prev_stamp = None
     for e in entries or []:
         if not isinstance(e, dict):
             continue
-        # The server owns the phase: the phase it stamped on a dair call after
-        # applying it (incl. a move the model answered 'stay' to, or a server
-        # override) and its own recorded transitions count. 2026-09-24: a run
-        # that spent 80 minutes in Collect was refused Report as 'never entered
-        # Collect' because the move was not a model-recommended push.
+        # The server owns the phase. A move it applied between dair calls
+        # counts even when the model's answer was not a recommended push
+        # (2026-09-24: 80 minutes in Collect, then Report refused as 'never
+        # entered Collect'). The FIRST dair call is excluded: its phase can be
+        # adopted from the agent's asserted stack, which must never count.
         if e.get("type") == "dair_call" and e.get("dair_phase"):
-            out.add(str(e["dair_phase"]).strip().capitalize())
+            stamp = str(e["dair_phase"]).strip().capitalize()
+            if prev_stamp is not None and stamp != prev_stamp:
+                out.add(stamp)
+            prev_stamp = stamp
         elif e.get("type") == "phase_transition" and (e.get("to_phase") or e.get("phase")):
             out.add(str(e.get("to_phase") or e.get("phase")).strip().capitalize())
         if (e.get("type") == "dair_call"

@@ -189,7 +189,8 @@ def test_phase_the_server_recorded_counts_as_entered(log):
     # model answer was 'stay' (server-applied), so it was not a recommended
     # push; phase coverage then refused Report as 'never entered Collect'.
     from tools.dair import missing_report_phases
+    log.record_dair_call("Triage", "", False, "", "", "stay", "")
     log.record_dair_call("Triage", "", False, "Collect", "", "stay", "")
-    log._entries[-1]["dair_phase"] = "Collect"            # as the server stamps it
+    log._entries[-1]["dair_phase"] = "Collect"            # the server applied the move
     log.record_dair_call("Collect", "", True, "Analyze", "", "push", "")
     assert missing_report_phases(log._entries) == []
