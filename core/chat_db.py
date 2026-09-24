@@ -128,6 +128,24 @@ def parse_skype(conn) -> dict:
         except sqlite3.DatabaseError:
             partial = True
 
+    # Store owner (the account whose main.db this is) — never a correspondent
+    # of itself.
+    owners: set[str] = set()
+    if "skypename" in _columns(conn, "Accounts"):
+        try:
+            for (v,) in conn.execute("SELECT skypename FROM Accounts"):
+                if v:
+                    owners.add(str(v))
+        except sqlite3.DatabaseError:
+            partial = True
+    # Engaged = the owner actually exchanged messages or files with them
+    # (message author / dialog partner / transfer partner). Contacts-table-only
+    # entries (auto-added service contacts such as echo123, address-book
+    # imports) are roster inventory, not engagement.
+    from core.mail_roster import is_chat_system_handle
+    engaged = {p for p in participants
+               if p not in owners and not is_chat_system_handle(p)}
+
     # Contacts/Chats widen the participant roster beyond message authors.
     for tbl, col in (("Contacts", "skypename"), ("Chats", "dialog_partner")):
         if col in _columns(conn, tbl):
@@ -144,6 +162,7 @@ def parse_skype(conn) -> dict:
     return {"success": True, "app": "skype", "partial": partial,
             "messages": msgs, "transfers": transfers,
             "participants": sorted(participants),
+            "engaged": sorted(engaged), "owners": sorted(owners),
             "message_count": len(msgs), "transfer_count": len(transfers),
             "coverage_window": cov}
 
@@ -180,9 +199,14 @@ def parse_whatsapp(conn) -> dict:
             partial = True
     ts = [m["ts_utc"] for m in msgs if m["ts_utc"]]
     cov = {"start": min(ts), "end": max(ts)} if ts else None
+    from core.mail_roster import is_chat_system_handle
     return {"success": True, "app": "whatsapp", "partial": partial,
             "messages": msgs, "transfers": [],
             "participants": sorted(participants),
+            # every WhatsApp participant is a conversation partner (jids come
+            # from the messages table only)
+            "engaged": sorted(p for p in participants if not is_chat_system_handle(p)),
+            "owners": [],
             "message_count": len(msgs), "transfer_count": 0,
             "coverage_window": cov}
 

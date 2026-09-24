@@ -561,6 +561,11 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                 participant_count=len(parts),
                 observed_correspondents=parts[:200],
                 correspondents_partial=len(parts) > 200,
+                # engagement stamp (v2): participants the store owner actually
+                # exchanged messages/files with; contacts-only / service
+                # handles and the owner's own handle are inventory.
+                chat_engaged=list(parsed.get("engaged") or [])[:200],
+                chat_owners=list(parsed.get("owners") or []),
             )
         except Exception:
             pass
@@ -1325,19 +1330,20 @@ def record_disposition(
     # or a case-roster match) cannot be settled reason="noise": "noise" asserts
     # inbound spam/clutter, and mislabelling would sweep a real recipient out of
     # the recipient-exhaustion duty. Steer to out_of_scope or excluded — this
-    # constrains the LABEL, not the conclusion. Mirrors the pre-report check's
-    # engagement predicate (wrote_to / chat / roster), so single-target and
-    # batch dispositions both inherit it.
+    # constrains the LABEL, not the conclusion. Shares the pre-report check's
+    # engagement predicate (owner wrote to it / chat / roster), so single-target and
+    # batch dispositions both inherit it (core.mail_roster.registry_record_engaged).
     if tk == "correspondent" and rs == "noise":
         from tools._gates._entities import entity_matches as _emx
         tnorm = target_id.strip().lower()
         crec = (getattr(idx, "correspondents", {}) or {}).get(tnorm) or {}
-        wrote_to = int(crec.get("to") or 0) > 0
-        chat = any("chat" in str(s) for s in (crec.get("sources") or []))
+        from core.mail_roster import registry_record_engaged as _eng
+        engaged = _eng(crec)
+        chat = bool(crec.get("chat_engaged"))
         roster = any(_emx(tnorm, t) for t in (getattr(idx, "roster", {}) or {}))
-        if wrote_to or chat or roster:
-            why = ("the subject WROTE TO this address" if wrote_to
-                   else "this is a chat participant" if chat
+        if engaged or roster:
+            why = ("this is a chat participant" if chat
+                   else "the subject WROTE TO this address" if engaged
                    else "this matches the case roster")
             return {"success": False, "gate": "typed_disposition",
                     "detail_gate": "engaged_correspondent_not_noise",
