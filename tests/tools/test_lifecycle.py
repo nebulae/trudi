@@ -9,8 +9,9 @@ def _tc(cmd):
     return {"type": "tool_call", "cmd": cmd, "success": True}
 
 
-def _find(cat="", act="", kind="positive"):
-    return {"type": "finding", "confidence": "SUSPECTED",
+def _find(cat="", act="", kind="positive", confidence="LIKELY"):
+    # a phase is established only by a CONFIRMED/LIKELY positive finding
+    return {"type": "finding", "confidence": confidence,
             "claim": normalize_claim(claim_kind=kind, category=cat, act=act)}
 
 
@@ -64,7 +65,7 @@ class TestCoverageModel:
 class TestPreReportAdvisory:
     def _log(self, tmp_path, extra_entries=()):
         l = ExecutionLog(); l.configure("LC", str(tmp_path / "t.json"), save_session=False)
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         l.record_reason_call("reason_plan", True, "p", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
@@ -103,7 +104,7 @@ class TestReportTable:
         from tools.reasoning import reason_pre_report_check
         from tools.misc import write_final_report
         l = ExecutionLog(); l.configure("LCR", str(tmp_path / "t.json"), save_session=False)
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         l.record_reason_call("reason_plan", True, "p", {})
         l.record_reason_call("reason_hypothesize", True, "h", {})
@@ -127,3 +128,31 @@ class TestReportTable:
         assert "## Attack-lifecycle coverage" in body
         assert "Persistence" in body and "Privilege Escalation" in body and "Exfiltration" in body
         assert "NOT examined" in body            # nothing was collected -> gaps shown
+
+
+class TestLifecycleTierAndSources:
+    """2026-09-24 COBALTSTRIKE: a SUSPECTED lead read as 'established', and
+    output text mentioning 'usn'/'removable' credited USB history."""
+
+    def _log(self, tmp_path):
+        from core.execution_log import ExecutionLog
+        l = ExecutionLog()
+        l.configure("LC", str(tmp_path / "t.json"), save_session=False)
+        return l
+
+    def test_suspected_positive_is_not_established(self, tmp_path):
+        from tools._gates._lifecycle import coverage
+        l = self._log(tmp_path)
+        l.record_finding("UAC prompt during beacon lifetime", "SUSPECTED", "t",
+                         claim={"claim_kind": "positive", "category": "privilege_escalation",
+                                "act": "privilege_escalation"})
+        assert coverage(l._entries)["privilege_escalation"]["status"] == "suspected"
+
+    def test_output_text_does_not_count_as_examining_a_source(self, tmp_path):
+        from tools._gates._lifecycle import coverage
+        l = self._log(tmp_path)
+        cid = l.record_tool_call("vol -f mem.raw windows.pslist", True, False, 0, 0,
+                                 stdout_excerpt="removable drive lnk usn usbstor")
+        l.index().by_call_id[cid]["mcp_tool"] = "vol_pslist"
+        l.record_tool_call("python3 -c 'b64=\"xusnq\"'", True, False, 0, 0)
+        assert "usb_history" not in coverage(l._entries)["exfil"]["sources_examined"]

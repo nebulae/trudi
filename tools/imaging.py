@@ -10,19 +10,69 @@ mcp = FastMCP("imaging")
 
 # ── Volume Shadow Copies ───────────────────────────────────────────────────────
 
+_NO_VSS_MARKER = "No Volume Shadow Snapshots found"
+
+
 @mcp.tool()
 @output_safe
 def vshadow_mount(
     image_or_device: str,
     mount_point: str,
+    offset: int = 0,
+    allow_other: bool = True,
 ) -> dict:
     """
     Mount Volume Shadow Copies (VSS) from a disk image or device using vshadowmount.
-    Exposes shadow copies as vshadow1, vshadow2, ... under mount_point.
-    Each shadow copy can then be mounted individually with mount_ntfs().
+    Exposes shadow copies as vss1, vss2, ... under mount_point (libvshadow 2024
+    naming; the returned `shadow_paths` list gives the exact paths). Each shadow
+    copy is a raw NTFS volume image: run tsk.fls / tsk.icat directly on it, or
+    mount it read-only with mount_ntfs().
+
+    offset: byte offset of the NTFS VOLUME inside a whole-disk image
+            (partition start sector x sector size — the same offset used
+            to mount the volume itself, e.g. 105906176 for a 2048-sector
+            start at 512 B/sector). REQUIRED for a full-disk E01/raw
+            image: without it vshadowmount is pointed at the MBR, finds no
+            VSS store, and exposes an EMPTY directory that looks mounted.
+            Leave 0 for a bare volume image or a partition device.
+    allow_other: pass -X allow_other so the unprivileged MCP process (and
+            tsk.fls / fsstat run without sudo) can read the FUSE mount.
+            Without it every follow-up call gets "Permission denied".
+
+    The store is probed with vshadowinfo first; if none is found at this
+    offset the call FAILS (with an offset hint) instead of leaving a silent
+    empty mount behind.
     """
     os.makedirs(mount_point, exist_ok=True)
-    return run(["vshadowmount", image_or_device, mount_point], needs_sudo=True)
+    offset_args = ["-o", str(int(offset))] if offset else []
+
+    info = run(["vshadowinfo", *offset_args, image_or_device], needs_sudo=True)
+    info_text = f"{info.get('stdout') or ''}\n{info.get('stderr') or ''}"
+    if _NO_VSS_MARKER in info_text:
+        return {
+            **info,
+            "success": False,
+            "store_count": 0,
+            "offset": int(offset),
+            "error": (
+                f"{_NO_VSS_MARKER} at offset {int(offset)}. For a whole-disk image pass "
+                "offset=<NTFS partition start in BYTES> (tsk.mmls start sector x 512); "
+                "the mount was NOT performed."
+            ),
+        }
+    store_count = sum(1 for ln in str(info.get("stdout") or "").splitlines()
+                      if ln.strip().startswith("Store:"))
+
+    fuse_args = ["-X", "allow_other"] if allow_other else []
+    result = run(["vshadowmount", *offset_args, *fuse_args, image_or_device, mount_point],
+                 needs_sudo=True)
+    result["mount_point"] = mount_point
+    result["offset"] = int(offset)
+    result["allow_other"] = bool(allow_other)
+    result["store_count"] = store_count
+    if result.get("success"):
+        result["shadow_paths"] = [f"{mount_point}/vss{i}" for i in range(1, store_count + 1)]
+    return result
 
 
 @mcp.tool()
@@ -30,7 +80,7 @@ def vshadow_mount(
 def vshadow_list(mount_point: str) -> dict:
     """
     List mounted Volume Shadow Copies after vshadow_mount.
-    Shows available vshadow1, vshadow2, etc. entries.
+    Shows available vss1, vss2, etc. entries (each a raw NTFS volume image).
     """
     return run(["ls", "-la", mount_point])
 

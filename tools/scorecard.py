@@ -25,7 +25,9 @@ below the evidence (a miss); over = recorded above it (an over-claim). Both are
 failures. The pairing is PRINTED so it can be adjudicated by hand — the Jaccard
 matcher in accuracy.py is known to mis-pair, so this stays transparent.
 """
+
 from __future__ import annotations
+from core.findings import active_findings
 
 import json
 import re
@@ -96,7 +98,7 @@ def score(trace_path: str, gt_path: str | None = None) -> dict:
     control = [e for e in entries if e.get("type") in _CONTROL_TYPES]
     disp = [e for e in entries if e.get("type") == "disposition"]
     refus = [e for e in entries if e.get("type") == "finding_refused"]
-    findings = [e for e in entries if e.get("type") == "finding"]
+    findings = active_findings(entries)
     evals = [e for e in entries if e.get("type") == "reason_call"
              and e.get("tool") == "reason_evaluate_finding"]
     rounds = [int(e.get("evidence_rounds") or 0) for e in evals]

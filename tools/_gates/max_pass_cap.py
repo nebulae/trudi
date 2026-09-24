@@ -19,7 +19,7 @@ import re
 
 from ._evidence_calls import is_evidence_tool_call
 from ._dispositions import SOURCE_WAIVER_REASONS_ALL, index_from_entries
-from .work_order import _binary_sig, tool_waived
+from .work_order import _binary_sig, tool_waived, stamped_evidence_kinds, unfit_for_evidence
 
 _UNRUNNABLE_NS = ("reason", "dair")   # not evidence tools; cannot be "run"
 
@@ -157,6 +157,7 @@ def open_challenges(entries, dair_entry: dict) -> list[dict]:
                 if isinstance(c, dict) and c.get("verified") is not None:
                     later_verified.add(_claim_key(c))
     didx = index_from_entries(later)
+    kinds = stamped_evidence_kinds(entries)
     out = []
     for c in dair_entry.get("verification_challenges") or []:
         if not isinstance(c, dict) or c.get("verified") is not None:
@@ -171,6 +172,13 @@ def open_challenges(entries, dair_entry: dict) -> list[dict]:
             continue                                   # unparseable — cannot enforce
         if _claim_key(c) in later_verified:
             continue
+        # A method the case's evidence cannot feed can never run (DAIR drops
+        # such challenges; this covers ones recorded before the stamp).
+        if kinds:
+            from tools.tool_capabilities import challenge_method_tools
+            _ms = challenge_method_tools(c.get("challenge_method"))
+            if _ms and all(unfit_for_evidence(m, kinds) for m in _ms):
+                continue
         toks = claim_tokens(c.get("claim"))
         if any(run_matches_challenge(e, sig, toks) for e in later_runs):
             continue

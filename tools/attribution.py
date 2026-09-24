@@ -23,7 +23,7 @@ def _collect_observed_tids() -> tuple[set[str], int]:
     from core.execution_log import log
     idx = log.index()
     tids: set[str] = set()
-    findings = idx.by_type.get("finding", [])
+    findings = idx.active_findings
     for f in findings:
         # Only weight CONFIRMED/LIKELY for attribution scoring — SUSPECTED
         # and UNCONFIRMED tiers introduce too much noise.

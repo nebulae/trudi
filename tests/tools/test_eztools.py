@@ -99,6 +99,54 @@ class TestParserTools:
             r = ez_pecmd("/mnt/x/Windows/Prefetch/", str(tmp_path))
         assert "tool_unavailable" not in r and "fallback" not in r
 
+    def test_pecmd_platform_refusal_falls_back_to_libscca(self, tmp_path):
+        """PECmd cannot decompress Win10 prefetch off Windows; libscca parses
+        the same .pf into PECmd-shaped rows as a self-logged, citable call."""
+        import csv
+        import datetime
+        import sys
+        from unittest.mock import MagicMock
+        from tools.eztools import ez_pecmd
+        pf_dir = tmp_path / "Prefetch"
+        pf_dir.mkdir()
+        (pf_dir / "EVIL.EXE-1A2B3C4D.pf").write_bytes(b"MAM\x04")
+        runs = [datetime.datetime(2019, 3, 20, 10, 0, 0),
+                datetime.datetime(2019, 3, 19, 9, 0, 0),
+                datetime.datetime(1601, 1, 1)]          # unused slot
+        scca = MagicMock(executable_filename="EVIL.EXE", prefetch_hash=0x1A2B3C4D,
+                         format_version=30, run_count=2, number_of_volumes=0,
+                         number_of_filenames=2)
+        def _run_time(i):                       # pyscca raises IOError past the end
+            if i >= len(runs):
+                raise IOError("invalid index")
+            return runs[i]
+        scca.get_last_run_time.side_effect = _run_time
+        scca.get_filename.side_effect = ["\\VOLUME{x}\\EVIL.EXE", "\\VOLUME{x}\\NTDLL.DLL"].__getitem__
+        fake = MagicMock()
+        fake.file.return_value = scca
+        refusal = {"success": True, "exit_code": 0, "stderr": "",
+                   "stdout": "Non-Windows platforms not supported due to the need to load "
+                             "decompression specific Windows libraries! Exiting...",
+                   "cmd": "dotnet PECmd.dll"}
+        out = tmp_path / "exports"
+        with patch("tools.eztools.run_dotnet", return_value=dict(refusal)), \
+             patch.dict(sys.modules, {"pyscca": fake}):
+            r = ez_pecmd(str(pf_dir), str(out))
+        assert r["success"] is True and r["parser"] == "libscca"
+        assert r["pecmd_unavailable"] is True and r["files_parsed"] == 1
+        assert r["_trudi_call_id"]
+        with open(r["output_path"], newline="") as fh:
+            row = next(csv.DictReader(fh))
+        assert row["ExecutableName"] == "EVIL.EXE" and row["RunCount"] == "2"
+        assert row["LastRun"].startswith("2019-03-20T10:00:00")
+        assert row["PreviousRunTimes"].startswith("2019-03-19") and "1601" not in row["PreviousRunTimes"]
+        assert row["FileCount"] == "2" and "NTDLL.DLL" in row["FilesLoaded"]
+
+    def test_pecmd_success_keeps_pecmd_output(self, mock_dotnet, tmp_path):
+        from tools.eztools import ez_pecmd
+        r = ez_pecmd("/mnt/x/Windows/Prefetch/", str(tmp_path))
+        assert r["parser"] == "PECmd"
+
     def test_jlecmd(self, mock_dotnet, tmp_path):
         from tools.eztools import ez_jlecmd
         ez_jlecmd("/mnt/wkstn01/Users/mhill/AppData/Roaming/Microsoft/Windows/Recent/AutomaticDestinations/", str(tmp_path))
@@ -113,6 +161,23 @@ class TestParserTools:
         from tools.eztools import ez_rbcmd
         ez_rbcmd("/mnt/wkstn01/$Recycle.Bin/", str(tmp_path))
         assert mock_dotnet.called
+
+
+class TestSqleCmd:
+    def test_no_csvf_flag(self, mock_dotnet, tmp_path):
+        """SQLECmd rejects --csvf ("Unrecognized command or argument")."""
+        from tools.eztools import ez_sqlecmd
+        db = tmp_path / "History"            # extension-less browser DB is a file
+        db.write_bytes(b"SQLite format 3\x00")
+        ez_sqlecmd(str(db), str(tmp_path / "out"))
+        args = mock_dotnet.call_args[0][1]
+        assert "--csvf" not in args
+        assert args[:2] == ["-f", str(db)] and "--csv" in args and "--maps" in args
+
+    def test_directory_uses_d(self, mock_dotnet, tmp_path):
+        from tools.eztools import ez_sqlecmd
+        ez_sqlecmd(str(tmp_path), str(tmp_path / "out"))
+        assert mock_dotnet.call_args[0][1][:2] == ["-d", str(tmp_path)]
 
 
 class TestRecmdBatchPerHive:
@@ -149,3 +214,44 @@ class TestRecmdBatchPerHive:
         mock_dotnet.side_effect = None
         r = ez_recmd_batch(str(u), "/b.reb", str(tmp_path / "analysis" / "o2"), per_hive=False)
         assert "-d" in mock_dotnet.call_args.args[1]
+
+
+_SQLE_CRASH = (
+    "SQLECmd version 1.1.0.0\nMaps loaded: 92\nProcessing /x/History...\n"
+    "Unhandled exception: System.Reflection.TargetInvocationException: Exception "
+    "has been thrown by the target of an invocation.\n ---> System.DllNotFoundException: "
+    "Unable to load shared library 'SQLite.Interop.dll' or one of its dependencies.\n")
+
+
+class TestDotnetCrashGuard:
+    """SQLECmd on Linux crashes (DllNotFoundException) yet exits 0: the run must
+    be recorded as FAILED/tool_unavailable, in the result AND the trace."""
+
+    def _run(self, rc, out, tmp_path):
+        from unittest.mock import MagicMock
+        import core.executor as ex
+        from core.execution_log import log
+        from tools.eztools import ez_sqlecmd
+        proc = MagicMock(returncode=rc, stdout=out.encode(), stderr=b"")
+        db = tmp_path / "History"
+        db.write_bytes(b"SQLite format 3\x00")
+        with patch("tools.eztools.run_dotnet", ex.run_dotnet), \
+             patch("core.executor.subprocess.run", return_value=proc):
+            r = ez_sqlecmd(str(db), str(tmp_path / "out"))
+        return r, log._entries[-1]
+
+    def test_dll_not_found_exit0_is_tool_unavailable(self, tmp_path):
+        r, entry = self._run(0, _SQLE_CRASH, tmp_path)
+        assert r["success"] is False and entry["success"] is False
+        assert r["status"] == "tool_unavailable" and r["tool_unavailable"] is True
+        assert "SQLite.Interop.dll" in r["error"] and "SQLECmd.dll" in r["error"]
+        assert "NOTHING was parsed" in entry["exit_meaning"]
+
+    def test_other_unhandled_exception_is_error(self, tmp_path):
+        r, _ = self._run(0, "Unhandled exception. System.IO.IOException: boom\n", tmp_path)
+        assert r["success"] is False and r["status"] == "error"
+
+    def test_clean_run_unchanged(self, tmp_path):
+        r, entry = self._run(0, "Processing /x/History...\nMatching map found\n", tmp_path)
+        assert r["success"] is True and entry["success"] is True
+        assert "status" not in r

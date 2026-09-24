@@ -107,7 +107,7 @@ class TestReadOutput:
         cid = r["_trudi_call_id"]
         assert cid and cid in live_log.index().by_call_id
         entry = live_log.index().by_call_id[cid]
-        assert entry["cmd"].startswith("read.read_output --output ")
+        assert entry["cmd"].startswith("read.output --output ")
         assert entry.get("source") != "claude_code_bash"
         # reviewer re-expansion re-reads the same file with a finding's terms
         got = _resolve_cited_output(entry["cmd"], _cited_query_terms("EID 4738 Anthony Vanko"), 6000)
@@ -165,7 +165,7 @@ class TestReadMail:
         from tools.read_output import read_mail
         r = _tool(read_mail)(str(self._mbox(exports)), query="nina")
         entry = live_log.index().by_call_id[r["_trudi_call_id"]]
-        assert entry["cmd"].startswith("read.read_mail -o ")
+        assert entry["cmd"].startswith("read.mail -o ")
 
     def test_annotates_correspondent_roster_from_all_scanned(self, live_log,
                                                              exports):

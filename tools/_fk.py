@@ -39,9 +39,12 @@ TOOL_MAP: dict[str, str] = {}
 
 
 def normalize_tool_name(tool_name: str) -> str:
-    """Collapse the namespace-DOUBLED registration name the middleware passes
-    (``ez_ez_mftecmd``, ``vol_vol_pslist``) to its single-namespace form
-    (``ez_mftecmd``, ``vol_pslist``). Idempotent on already-normal names."""
+    """Collapse a namespace-DOUBLED tool name (``ez_ez_mftecmd``,
+    ``vol_vol_pslist``) to its single-namespace form (``ez_mftecmd``,
+    ``vol_pslist``). Wire names have been single-namespace since the
+    mount-time dedup (core/normalize_names.py); this stays as the compat
+    shim for names read from OLD traces. Idempotent on already-normal
+    names."""
     parts = tool_name.split("_", 2)
     if len(parts) >= 2 and parts[0] == parts[1]:
         return tool_name[len(parts[0]) + 1:]

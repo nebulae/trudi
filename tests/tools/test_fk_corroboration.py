@@ -48,6 +48,7 @@ class TestHelpers:
 
     def test_norm_dotted_and_doubled(self):
         assert fkc._norm("ez.pecmd") == "ez_pecmd"
+        # legacy doubled wire name (pre mount-time dedup) still collapses
         assert fkc._norm("ez_ez_pecmd") == "ez_pecmd"
 
     def test_does_not_prove_gating(self):

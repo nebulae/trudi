@@ -4,6 +4,8 @@ Produces a confusion matrix (TP/FP/FN), precision/recall/F1, and a list of
 confidence downgrades — findings recorded below the ground truth's minimum tier.
 Used to populate hackathon submission Component #6 (Accuracy Report).
 """
+from core.findings import active_findings
+
 import json
 import os
 import re
@@ -81,7 +83,7 @@ def accuracy_compare(ground_truth_path: str, match_threshold: float = 0.30) -> d
     expected = gt.get("expected_findings", []) or []
 
     from core.execution_log import log
-    trace_findings = [e for e in log._entries if e.get("type") == "finding"]
+    trace_findings = active_findings(log._entries)
 
     # Greedy matching: for each ground-truth item, take the highest-scoring
     # unmatched trace finding above threshold. This is deterministic and easy

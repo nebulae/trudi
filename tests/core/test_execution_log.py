@@ -1112,19 +1112,18 @@ class TestDairPhaseStamping:
         assert l._current_phase == "Report"
         assert l._entries[-1].get("dair_phase") == "Report"
 
-    def test_stay_reconciles_with_agent_declared_phase(self, tmp_path):
-        """If the agent declares phase=Report on stay but our state drifted,
-        adopt the agent's declared phase. Mirrors trace entry #1122."""
+    def test_stay_does_not_adopt_a_declared_phase_once_dair_has_run(self, tmp_path):
+        """The server owns phase state: after the first dair_call, a declared
+        current_phase on stay never moves it (2026-09-23 run: an agent passing
+        "[]" made the model answer "Triage" and the phase went backwards).
+        Before DAIR has run, the declared phase is adopted."""
         l = ExecutionLog()
         l.configure("PHASE-009", str(tmp_path / "trace.json"))
+        l.record_dair_call("Scan", "", False, "", "", "stay", "")
+        assert l._current_phase == "Scan"                 # first call: adopted
+        l.record_dair_call("Scan", "", True, "Report", "", "push", "")
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
-        # Agent declares stay in Report even though our state thinks Collect.
-        # Adopt the agent's declaration.
-        l.record_dair_call("Report", "", False, "", "", "stay", "")
-        assert l._current_phase == "Report"
-        assert l._entries[-1].get("dair_phase") == "Report"
-        # Subsequent records inherit Report
+        assert l._current_phase == "Report"               # later echo: ignored
         l.record_tool_call("reason.synthesize", True, False, 0, 0)
         assert l._entries[-1].get("dair_phase") == "Report"
 
@@ -1262,10 +1261,11 @@ class TestToolCallSidecarFields:
         assert open(e["stdout_path"]).read() == text
         assert log.stdout_sidecar_dir() == str(tmp_path / "analysis" / ".tool_output")
 
-    def test_excerpt_only_call_records_length_no_sidecar(self, log):
+    def test_short_output_is_kept_in_a_sidecar_too(self, log):
+        # Every call's output lives at .tool_output/<cid>.txt, however short.
         log.record_tool_call("cmd", True, False, 0, 0, stdout_excerpt="short")
         e = log._entries[-1]
-        assert e["stdout_chars"] == 5 and "stdout_path" not in e
+        assert e["stdout_chars"] == 5 and open(e["stdout_path"]).read() == "short"
 
     def test_sidecar_cap_marks_partial(self, log, monkeypatch):
         import core.paths as cp

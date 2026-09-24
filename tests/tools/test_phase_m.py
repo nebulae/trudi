@@ -107,7 +107,7 @@ class TestPffExportPathAndReadMail:
         fn = getattr(M.pff_export, "fn", M.pff_export)
         r = fn("x.ost", base)
         assert r["output_path"] == exp and r["layout"] == "pffexport_items"
-        assert "read_mail" in r["read_hint"]
+        assert "read.mail" in r["read_hint"]
 
     def test_read_mail_consumes_item_tree_bodies(self, tmp_path):
         from tools.read_output import read_mail
@@ -125,7 +125,7 @@ class TestPffExportPathAndReadMail:
         assert of and "v@case.example" in of[0]["from"]
 
 
-# ── M-4: read.read_output self-log records query/columns/where ──────────────
+# ── M-4: read.output self-log records query/columns/where ──────────────
 class TestReadOutputSelflogTerms:
     def test_cmd_carries_query_columns_where(self, tmp_path):
         from tools.read_output import read_output

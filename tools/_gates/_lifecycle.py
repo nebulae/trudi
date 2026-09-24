@@ -15,7 +15,9 @@ or its sources examined (supporting either) — so it is evidence-symmetric: fin
 an attack and proving its absence both count. Windows-first; extensible to
 Linux/macOS via alt source ids (last/wtmp, cron, launchd).
 """
+
 from __future__ import annotations
+from core.findings import active_findings
 
 import re
 
@@ -100,7 +102,7 @@ LIFECYCLE: dict = {
              "DNS logs — tunnelling (high-volume subdomain requests)"),
             ("browser_upload", _rx(r"hindsight|webcache|places\.sqlite|\bhistory\b|file-?sharing|webmail|upload"),
              "browser history — file-sharing / webmail upload"),
-            ("usb_history", _rx(r"usbstor|mounteddevices|usbdevice|\blecmd\b|\blnk\b|removable|usn"),
+            ("usb_history", _rx(r"usbstor|mounteddevices|usbdevice|\blecmd\b|\blnk\b|removable|\busn\b|usnjrnl|usnparser|\$j\b"),
              "USB history (USBSTOR / MountedDevices / LNK / USN $J)"),
             ("ftp_transfer", _rx(r"\bftp\b|transfer\.log|smallftpd|srum"),
              "FTP / transfer logs"),
@@ -117,16 +119,19 @@ def _fclaim(e: dict) -> dict:
 def coverage(entries) -> dict:
     """Per-phase coverage of the attack lifecycle from the trace. Returns
     {phase_id: {label, status, sources_examined, sources_total}} where status is:
-      established  — a positive finding asserts the phase,
+      established  — a CONFIRMED/LIKELY positive finding asserts the phase,
+      suspected    — only SUSPECTED positive findings (a lead, not established),
       ruled_out    — a negative finding in the phase's category (a grounded 'no X'),
       examined     — the phase's artifact sources were touched (no verdict yet),
       not_examined — none of the above (the coverage gap to surface).
     Advisory only: this is the coverage skeleton, never a demand that attacks exist."""
-    findings = [e for e in (entries or []) if e.get("type") == "finding"]
-    # tool commands + stdout excerpts of successful tool calls (regexes run over
-    # these, never over agent prose).
+    findings = active_findings(entries or [])
+    # What was RUN: the command and the MCP tool name of successful tool calls
+    # (never agent prose, and not the tools' output text — output that merely
+    # mentions 'removable' or 'lnk' credited a memory scan with examining USB
+    # history, 2026-09-24).
     haystack = [
-        ((e.get("cmd") or "") + " " + (e.get("stdout_excerpt") or "")).lower()
+        ((e.get("cmd") or "") + " " + (e.get("mcp_tool") or "")).lower()
         for e in (entries or [])
         if e.get("type") == "tool_call" and e.get("success") is not False
     ]
@@ -134,7 +139,7 @@ def coverage(entries) -> dict:
     for pid, spec in LIFECYCLE.items():
         cats = spec["establishes"]["categories"]
         acts = spec["establishes"]["acts"]
-        established, ruled_out = False, False
+        established, suspected, ruled_out = False, False, False
         for f in findings:
             c = _fclaim(f)
             in_phase = (c.get("category") in cats) or (c.get("act") in acts)
@@ -142,11 +147,17 @@ def coverage(entries) -> dict:
                 continue
             if c.get("kind") == "negative":
                 ruled_out = True
-            else:
+            elif str(f.get("confidence") or "").upper() in ("CONFIRMED", "LIKELY"):
                 established = True
+            else:
+                # a SUSPECTED lead is not an established phase (a lone UAC prompt
+                # read as 'privilege escalation established', 2026-09-24)
+                suspected = True
         exam = [sid for (sid, rx, _hint) in spec["sources"] if any(rx.search(h) for h in haystack)]
         if established:
             status = "established"
+        elif suspected:
+            status = "suspected"
         elif ruled_out:
             status = "ruled_out"
         elif exam:

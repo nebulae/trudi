@@ -70,6 +70,16 @@ class TestStringsGrep:
         assert r["match_count"] == 1 and r["matches"] == ["http://evil.com"]
         assert r["lines_scanned"] == 2
 
+    def test_result_echoes_its_own_call_id(self, mock_run):
+        """The self-logged id is returned inline — the agent cites it without
+        grepping the trace."""
+        from tools.strings_tools import strings_grep
+        with patch("subprocess.Popen", return_value=self._popen(["http://evil.com"])):
+            r = strings_grep("/malware/sample.exe", "http")
+        from core.execution_log import log
+        cids = [e["call_id"] for e in log._entries if e.get("type") == "tool_call"]
+        assert r["_trudi_call_id"] and r["_trudi_call_id"] == cids[-1]
+
     def test_match_far_past_old_output_cap_is_found(self, mock_run):
         """Regression: the old implementation buffered all strings output
         through a 50 KB cap BEFORE filtering, so a match past the cap was
@@ -112,6 +122,42 @@ class TestStringsGrep:
         with patch("subprocess.Popen") as p:
             r = strings_grep("/img/x.bin", "(unclosed")
         assert r["success"] is False and "Invalid regex" in r["error"]
+        p.assert_not_called()
+
+    def test_encoding_utf16le_passes_el(self, mock_run):
+        from tools.strings_tools import strings_grep
+        with patch("subprocess.Popen", return_value=self._popen(["<Author>X</Author>"])) as p, \
+             patch("core.executor._log_tool"):
+            r = strings_grep("/img/task", "author", encoding="utf16le")
+        assert p.call_args[0][0][:3] == ["strings", "-a", "-el"]
+        assert r["match_count"] == 1 and r["encoding"] == "utf16le"
+
+    def test_encoding_both_runs_both_and_merges(self, mock_run):
+        from tools.strings_tools import strings_grep
+        pops = [self._popen(["http://a", "zz"]), self._popen(["http://wide", "http://w2"])]
+        with patch("subprocess.Popen", side_effect=pops) as p, \
+             patch("core.executor._log_tool") as lt:
+            r = strings_grep("/img/x.bin", "http", encoding="both")
+        argvs = [c[0][0] for c in p.call_args_list]
+        assert argvs[0][:3] == ["strings", "-a", "-n"] and argvs[1][:3] == ["strings", "-a", "-el"]
+        assert r["matches"] == ["http://a", "http://wide", "http://w2"]
+        assert r["match_count"] == 3 and r["complete"] is True and r["truncated"] is False
+        assert r["match_count_by_encoding"] == {"ascii": 1, "utf16le": 2}
+        lt.assert_called_once()
+        assert "-el" in lt.call_args[0][0]["cmd"] and "strings -a -n" in lt.call_args[0][0]["cmd"]
+
+    def test_encoding_both_failure_in_second_pass_is_incomplete(self, mock_run):
+        from tools.strings_tools import strings_grep
+        pops = [self._popen(["a"]), self._popen([], returncode=1, stderr="read error")]
+        with patch("subprocess.Popen", side_effect=pops), patch("core.executor._log_tool"):
+            r = strings_grep("/img/x.bin", "zzz", encoding="both")
+        assert r["success"] is False and r["complete"] is False and r["truncated"] is True
+
+    def test_invalid_encoding(self, mock_run):
+        from tools.strings_tools import strings_grep
+        with patch("subprocess.Popen") as p:
+            r = strings_grep("/img/x.bin", "x", encoding="ebcdic")
+        assert r["success"] is False and "encoding" in r["error"]
         p.assert_not_called()
 
     def test_spawn_failure(self, mock_run):

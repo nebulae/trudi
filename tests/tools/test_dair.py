@@ -195,12 +195,11 @@ class TestDairAssessFailure:
             r = dair_assess("some findings")
         assert r["success"] is False
 
-    def test_malformed_assessment_block_returns_defaults(self):
+    def test_malformed_assessment_fails_without_phase_defaults(self):
         r = _run(_claude_ctx, "Some analysis. DAIR_ASSESSMENT: {broken json")
-        assert r["success"] is True
-        assert r["current_phase"] == "Triage"
-        assert r["stack_action"] == "stay"
-        assert r["verification_challenges"] == []
+        assert r["success"] is False
+        assert r["gate"] == "dair_schema"
+        assert r["retryable"] is True
 
 
 # ── Stack behaviour ───────────────────────────────────────────────────────────
@@ -323,9 +322,8 @@ class TestDairDirectives:
     def test_malformed_directives_returns_empty_defaults(self):
         bad = 'DAIR_ASSESSMENT:\n{"current_phase": "Triage", "phase_rationale": "x", "transition_recommended": false, "next_phase": "", "transition_rationale": "", "stack_action": "stay", "investigation_focus": "x", "verification_challenges": [], "recommended_actions": [], "directives": "broken"}'
         r = _run(_claude_ctx, bad)
-        assert isinstance(r["directives"], dict)
-        assert "priority_tools" in r["directives"]
-        assert r["directives"]["unknown_priority_tools"] == []
+        assert r["success"] is False
+        assert r["gate"] == "dair_schema"
 
     def test_unknown_priority_tool_is_annotated(self):
         raw = (
@@ -628,12 +626,8 @@ class TestVerificationSatisfied:
             'DAIR_ASSESSMENT:\n{broken json here'
         )
         r = _run(_claude_ctx, text)
-        assert r["success"] is True
-        assert r["verification_satisfied"] is True
-        assert r["transition_recommended"] is True
-        assert r["next_phase"] == "Collect"
-        assert r["stack_action"] == "push"
-        assert len(r["verification_challenges"]) == 1
+        assert r["success"] is False
+        assert r["gate"] == "dair_schema"
 
     def test_auto_satisfaction_skipped_when_challenge_pending(self):
         text = (
@@ -643,8 +637,8 @@ class TestVerificationSatisfied:
             'DAIR_ASSESSMENT:\n{broken json'
         )
         r = _run(_claude_ctx, text)
-        assert r["verification_satisfied"] is False
-        assert r["transition_recommended"] is False
+        assert r["success"] is False
+        assert r["gate"] == "dair_schema"
 
     @pytest.mark.parametrize("ctx_fn", [_claude_ctx, _compat_ctx])
     def test_verification_satisfied_both_backends(self, ctx_fn):
@@ -671,7 +665,8 @@ class TestDairScanToTriageLoop:
             '{"current_phase": "Scan", "phase_rationale": "New pivot host found",'
             ' "transition_recommended": true, "next_phase": "Triage",'
             ' "transition_rationale": "wkstn-02 lateral movement indicators — full cycle",'
-            ' "stack_action": "push", "investigation_focus": "Triage wkstn-02",'
+            ' "stack_action": "push", "triage_reason": "new_evidence_item",'
+            ' "investigation_focus": "Triage wkstn-02",'
             ' "verification_satisfied": false,'
             ' "verification_challenges": [], "recommended_actions": [],'
             ' "directives": {"priority_tools": ["reason.plan", "strings.stat_file"],'
@@ -757,8 +752,9 @@ class TestDairInputsCaptured:
                             phase_stack="[]",
                             case_context="ctx")
         assert r["success"] is False
-        dair_entries = [e for e in inst._entries if e["type"] == "dair_call"]
-        assert dair_entries, "dair_call entry should exist even on failure"
+        assert not [e for e in inst._entries if e["type"] == "dair_call"]
+        dair_entries = [e for e in inst._entries if e.get("tool") == "dair_assess"]
+        assert dair_entries, "Failed assessment is recorded without changing phase"
         entry = dair_entries[-1]
         assert "inputs" in entry
         assert entry["inputs"]["tool_results_summary"].startswith("findings summary")
@@ -1354,7 +1350,7 @@ class TestPhaseCoverage:
         for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         l.record_finding("x present", "SUSPECTED", "t")
-        raw = ('RESULT:\n{"assessment": {"current_phase": "Analyze", '
+        raw = ('RESULT:\n{"assessment": {"phase_rationale": "Review phase", "current_phase": "Analyze", '
                '"transition_recommended": true, "next_phase": "Report", '
                '"stack_action": "push", "directives": {"priority_tools": []}}}')
         with patch("core.execution_log.log", l), \
@@ -1431,7 +1427,7 @@ class TestFix6WorkOrderAdvanceGate:
     and drops evidence-inapplicable tools from the prescription."""
 
     def _raw_advance(self, cur="Collect", nxt="Analyze"):
-        return ('RESULT:\n{"assessment": {"current_phase": "%s", '
+        return ('RESULT:\n{"assessment": {"phase_rationale": "Review phase", "current_phase": "%s", '
                 '"transition_recommended": true, "next_phase": "%s", '
                 '"stack_action": "push", "directives": {"priority_tools": ["ez.mftecmd"]}}}'
                 % (cur, nxt))
@@ -1480,7 +1476,7 @@ class TestFix6WorkOrderAdvanceGate:
         (case / "evidence" / "disk.E01").write_text("x")
         l = ExecutionLog(); l.configure("EV", str(case / "analysis" / "trace.json"), save_session=False)
         l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        raw = ('RESULT:\n{"assessment": {"current_phase": "Triage", "stack_action": "stay", '
+        raw = ('RESULT:\n{"assessment": {"phase_rationale": "Review phase", "current_phase": "Triage", "stack_action": "stay", "transition_recommended": false, '
                '"directives": {"priority_tools": ["vol.pstree", "net.tcpdump_read", "ez.mftecmd"]}}}')
         with patch("core.execution_log.log", l), \
              patch.object(D, "_ask", return_value={"success": True, "raw": raw,
@@ -1497,7 +1493,7 @@ class TestLayer3LifecycleBackfill:
     uncovered lifecycle phases, or advances when coverage is complete."""
 
     def _raw_stay(self, phase="Collect"):
-        return ('RESULT:\n{"assessment": {"current_phase": "%s", '
+        return ('RESULT:\n{"assessment": {"phase_rationale": "Review phase", "current_phase": "%s", '
                 '"transition_recommended": false, "next_phase": "", "stack_action": "stay", '
                 '"directives": {"priority_tools": []}}}' % phase)
 
@@ -1540,7 +1536,7 @@ class TestLayer3LifecycleBackfill:
         from unittest.mock import patch
         l = ExecutionLog(); l.configure("L3c", str(tmp_path / "trace.json"), save_session=False)
         l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
-        raw = ('RESULT:\n{"assessment": {"current_phase": "Collect", "stack_action": "stay", '
+        raw = ('RESULT:\n{"assessment": {"phase_rationale": "Review phase", "current_phase": "Collect", "stack_action": "stay", '
                '"transition_recommended": false, "directives": {"priority_tools": ["ez.mftecmd"]}}}')
         with patch("core.execution_log.log", l), \
              patch.object(D, "_ask", return_value={"success": True, "raw": raw,

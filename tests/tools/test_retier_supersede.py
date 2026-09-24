@@ -51,11 +51,11 @@ class TestSupersedeInLog:
         cid = l.record_finding("x", "LIKELY", "s", 1)
         assert "supersedes" not in l.index().by_call_id[cid]
 
-    def test_supersede_unknown_id_is_noop_but_records(self, tmp_path):
+    def test_supersede_unknown_id_is_refused(self, tmp_path):
         l = self._log(tmp_path)
-        cid = l.record_finding("x", "CONFIRMED", "s", 1, supersedes=999999)
-        assert l.index().by_call_id[cid]["supersedes"] == 999999   # link recorded
-        # nothing to mark; no crash
+        with pytest.raises(ValueError, match="does not exist"):
+            l.record_finding("x", "CONFIRMED", "s", 1, supersedes=999999)
+        assert not l.index().by_type.get("finding")
 
 
 class TestPreReportUnderTierAdvisory:

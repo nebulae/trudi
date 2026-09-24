@@ -59,13 +59,13 @@ class TestProducedOutputReads:
             "for m in mailbox.mbox('Inbox.mbox'): print(m['To'])\nEOF"),
             owner_env["home"])
         assert _decision(out) == "deny"
-        assert "read.read_mail" in out
+        assert "read.mail" in out
 
     def test_jq_analysis_json_denied_names_read_output(self, owner_env):
         out = _run(owner_env["payload"]("jq '.entries' analysis/foo.json"),
                    owner_env["home"])
         assert _decision(out) == "deny"
-        assert "read.read_output" in out
+        assert "read.output" in out
 
     def test_cat_report_denied(self, owner_env):
         out = _run(owner_env["payload"]("cat reports/final.md"), owner_env["home"])
@@ -84,7 +84,7 @@ class TestProducedOutputReads:
                "jq '.tasks[]?' \"$f\" | head -60")
         out = _run(owner_env["payload"](cmd), owner_env["home"])
         assert _decision(out) == "deny"
-        assert "read.read_output" in out and "tool-results" in out
+        assert "read.output" in out and "tool-results" in out
 
     def test_mcp_result_cache_python_read_denied(self, owner_env):
         cmd = ("python3 -c \"import json; d=json.load(open("
@@ -132,7 +132,7 @@ class TestForensicBinaries:
             "dotnet /opt/zimmermantools/MFTECmd.dll -f /mnt/x/$MFT --csv out"),
             owner_env["home"])
         assert _decision(out) == "deny"
-        assert "ez.ez_mftecmd" in out
+        assert "ez.mftecmd" in out
 
     def test_vol_denied(self, owner_env):
         out = _run(owner_env["payload"](
@@ -256,7 +256,7 @@ class TestReportWrites:
 
     def test_bash_read_of_reports_still_uses_rule_1_message(self, owner_env):
         out = _run(owner_env["payload"]("cat reports/final.md"), owner_env["home"])
-        assert _decision(out) == "deny" and "read.read_output" in out
+        assert _decision(out) == "deny" and "read.output" in out
 
     def test_bash_write_to_analysis_denied(self, owner_env):
         for cmd in ("echo hi > analysis/notes.md", "tee analysis/x.md", "cp a analysis/x.md"):

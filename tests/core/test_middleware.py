@@ -55,22 +55,41 @@ class TestDairGateMiddleware:
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
             result, call_next = asyncio.run(
-                _run_middleware(mw, "vol_vol_psscan")
+                _run_middleware(mw, "vol_psscan")
             )
         assert call_next.await_count == 1
 
-    def test_non_allowlisted_tool_blocked_in_report_phase(self, tmp_path):
-        """Forensics block once DAIR moves the investigation to Report."""
+    def test_forensic_tool_in_report_phase_moves_to_collect(self, tmp_path):
+        """Evidence work found in Report goes to Collect (above Report, so a
+        pop resumes it) instead of a refusal plus a manual dair_assess."""
         from core.execution_log import ExecutionLog
         from core.middleware import NarrationMiddleware
-        from fastmcp.exceptions import ToolError
         l = ExecutionLog()
         l.configure("MW-002b", str(tmp_path / "trace.json"))
         l.record_dair_call("Analyze", "", True, "Report", "", "push", "")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            with pytest.raises(ToolError, match="Report"):
-                asyncio.run(_run_middleware(mw, "vol_vol_psscan"))
+            _, call_next = asyncio.run(_run_middleware(mw, "vol_psscan"))
+        assert call_next.await_count == 1 and l._current_phase == "Collect"
+        assert l._phase_stack[-2]["phase"] == "Report"
+
+    @pytest.mark.parametrize('correction', [False, True])
+    def test_submission_in_report_requires_revision_target(self, tmp_path, correction):
+        from core.execution_log import ExecutionLog
+        from core.middleware import NarrationMiddleware
+        from fastmcp.exceptions import ToolError
+        log = ExecutionLog()
+        log.configure('SUBMISSION-REPORT', str(tmp_path / 'trace.json'), save_session=False)
+        parent = log.record_finding('Previous claim', 'SUSPECTED')
+        log.record_dair_call('Analyze', '', True, 'Report', '', 'push', '')
+        args = {'supersedes': parent} if correction else {}
+        with patch('core.execution_log.log', log):
+            if correction:
+                _, next_call = asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
+                assert next_call.await_count == 1
+            else:
+                with pytest.raises(ToolError, match='Report'):
+                    asyncio.run(_run_middleware(NarrationMiddleware(), 'misc_submit_finding', args))
 
     def test_long_collect_batch_never_blocks(self, tmp_path):
         """Regression: a long lead-following batch in a collection phase must
@@ -85,7 +104,7 @@ class TestDairGateMiddleware:
             l.record_agent_message("filler")
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
-            asyncio.run(_run_middleware(mw, "vol_vol_psscan"))  # no exception
+            asyncio.run(_run_middleware(mw, "vol_psscan"))  # no exception
 
     def test_non_allowlisted_tool_runs_after_dair(self, tmp_path):
         from core.execution_log import ExecutionLog
@@ -96,7 +115,7 @@ class TestDairGateMiddleware:
         mw = NarrationMiddleware()
         with patch("core.execution_log.log", l):
             result, call_next = asyncio.run(
-                _run_middleware(mw, "vol_vol_psscan")
+                _run_middleware(mw, "vol_psscan")
             )
         assert call_next.await_count == 1
 
@@ -104,13 +123,13 @@ class TestDairGateMiddleware:
         """The 4 pre-plan reads (per CLAUDE.md) must be on the allowlist so
         they can run before the first dair_assess at the start of a case."""
         from core.middleware import DAIR_GATE_ALLOWLIST
-        assert "ez_ez_recmd_hive" in DAIR_GATE_ALLOWLIST
+        assert "ez_recmd_hive" in DAIR_GATE_ALLOWLIST
         assert "strings_stat_file" in DAIR_GATE_ALLOWLIST
 
     def test_dair_assess_allowlisted(self):
         from core.middleware import DAIR_GATE_ALLOWLIST
         assert "dair_assess" in DAIR_GATE_ALLOWLIST
-        assert "dair_dair_assess" in DAIR_GATE_ALLOWLIST
+        assert "dair_assess" in DAIR_GATE_ALLOWLIST
 
     def test_start_execution_log_allowlisted(self):
         from core.middleware import DAIR_GATE_ALLOWLIST

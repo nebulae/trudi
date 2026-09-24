@@ -15,6 +15,10 @@ DEFAULT_TECHNIQUES_PATH = os.environ.get(
     "TRUDI_MITRE_TABLE",
     os.path.expanduser("~/cases/.common/mitre_techniques.json"),
 )
+DEFAULT_DETECTION_PATH = os.environ.get(
+    "TRUDI_MITRE_DETECTION",
+    os.path.expanduser("~/cases/.common/mitre_detection.json"),
+)
 DEFAULT_GROUPS_PATH = os.environ.get(
     "TRUDI_MITRE_GROUPS",
     os.path.expanduser("~/cases/.common/mitre_groups.json"),
@@ -110,3 +114,23 @@ def groups_for_techniques(tids: list[str], path: Optional[str] = None) -> list[d
 def cache_info() -> dict:
     """Diagnostic — returns lru_cache hits/misses for the loader."""
     return _load_json.cache_info()._asdict()
+
+
+def load_detection(path: Optional[str] = None) -> dict:
+    """{technique_id: {name, strategies, analytics, related}} from the ATT&CK
+    detection strategies (built by build_mitre_cache). Empty when absent."""
+    p = path or DEFAULT_DETECTION_PATH
+    return _read_with_mtime_key(p, {"detection": {}}).get("detection", {})
+
+
+def detection_for(tid: str, platform: str = "Windows", path: Optional[str] = None) -> dict:
+    """Detection guidance for one technique on one platform. A sub-technique
+    without its own strategy falls back to its parent."""
+    table = load_detection(path)
+    entry = table.get(tid) or table.get(tid.split(".")[0]) or {}
+    analytics = [a for a in entry.get("analytics", [])
+                 if not platform or platform in (a.get("platforms") or [])]
+    return {"technique_id": tid, "name": entry.get("name", ""),
+            "strategies": entry.get("strategies", []), "analytics": analytics,
+            "related": entry.get("related", []),
+            "inherited_from": (tid.split(".")[0] if tid not in table and entry else None)}

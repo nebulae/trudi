@@ -9,7 +9,9 @@ Usage:
 Reuses tools/accuracy.py:accuracy_compare so the scoring logic stays
 in one place. Exits non-zero on regression.
 """
+
 from __future__ import annotations
+from core.findings import active_findings
 import argparse
 import json
 import os
@@ -38,11 +40,11 @@ def _score_against_ground_truth(
     ground_truth: dict,
     match_threshold: float = 0.30,
 ) -> dict:
-    """Standalone scorer — same logic shape as tools/accuracy.accuracy_compare
+    """Standalone scorer — same logic shape as tools/accuracy.compare
     but operates on a trace file instead of the live execution log so the
     harness can run without TRUDI being live."""
     expected = ground_truth.get("expected_findings", []) or []
-    trace_findings = [e for e in trace_entries if e.get("type") == "finding"]
+    trace_findings = active_findings(trace_entries)
 
     def _norm(s: str) -> set[str]:
         import re

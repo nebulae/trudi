@@ -75,6 +75,8 @@ class GateContext:
     tier_achievable: str = ""
     artifact_classes: dict = None  # type: ignore[assignment]
     tier_rule: str = ""
+    supersedes: int = 0
+    review_call_id: int = 0
 
     def __post_init__(self):
         if self.artifact_classes is None:

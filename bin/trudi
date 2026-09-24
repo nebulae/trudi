@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# trudi — the umbrella command: agent mode (an LLM drives) or pilot mode
+# (the analyst drives). Runs pilot/cli.py from the repo root; the directory
+# you invoke it from becomes the case dir (TRUDI_INVOKE_DIR).
+#
+# Usage:
+#   cd ~/cases/m57-jean && trudi --mode pilot
+#   cd ~/cases/m57-jean && trudi --mode agent [--client claude|opencode]
+#
+# Environment:
+#   TRUDI_DIR           repo root        (default ~/trudi)
+#   TRUDI_AGENT_CLIENT  agent-mode client when --client not given
+#   VENV_PY             python to use    (default ~/.venv/bin/python3, else python3)
+
+set -euo pipefail
+
+TRUDI_DIR="${TRUDI_DIR:-$HOME/trudi}"
+VENV_PY="${VENV_PY:-$HOME/.venv/bin/python3}"
+
+if [ ! -x "$VENV_PY" ]; then
+    VENV_PY="$(command -v python3)"
+fi
+
+export TRUDI_INVOKE_DIR="$PWD"
+cd "$TRUDI_DIR"
+exec "$VENV_PY" -m pilot.cli "$@"

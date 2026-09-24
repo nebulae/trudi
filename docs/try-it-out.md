@@ -178,7 +178,7 @@ TRUDI runs autonomously — no confirmation between steps. It prints the **live 
 **5. (Optional) Score it.** For cases with a machine-readable answer key (CFReDS, DEMO-LIVE), compare automatically:
 
 ```
-Ask TRUDI: "Score this run against ground_truth.json with accuracy.accuracy_compare."
+Ask TRUDI: "Score this run against ground_truth.json with accuracy.compare."
 ```
 
 For the others, the published answer keys and TRUDI's scored results are in the [accuracy report](accuracy-report.md).

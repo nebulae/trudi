@@ -80,7 +80,9 @@ class TestMountFullImage:
         from tools.ewf import mount_full_image
         ewf_mp = str(tmp_path / "ewf")
         fs_mp = str(tmp_path / "fs")
-        side = [self._ok(), self._ok(MMLS_OUTPUT), self._ok()]
+        # ewfmount, mmls, fsstat probe of the candidate, mount
+        side = [self._ok(), self._ok(MMLS_OUTPUT),
+                self._ok("File System Type: NTFS\n"), self._ok()]
         with patch("tools.ewf.run", side_effect=side) as m:
             r = mount_full_image("/fake/image.E01", ewf_mp, fs_mp)
         assert r["success"] is True
@@ -101,13 +103,22 @@ class TestMountFullImage:
         assert r["success"] is False
 
     def test_no_ntfs_partition_detected(self, tmp_path):
+        # A real table whose only partition is not NTFS: fsstat says so, and the
+        # refusal reports what was probed instead of guessing from the label.
         from tools.ewf import mount_full_image
-        mmls_no_ntfs = "Slot  Start  End  Length  Description\n000  0  2047  2048  Linux\n"
-        side = [self._ok(), self._ok(mmls_no_ntfs)]
+        mmls_linux = MMLS_OUTPUT.replace("NTFS (0x07)", "Linux (0x83)")
+        side = [self._ok(), self._ok(mmls_linux), self._ok("File System Type: Ext4\n")]
         with patch("tools.ewf.run", side_effect=side):
             r = mount_full_image("/fake/image.E01", str(tmp_path / "ewf"), str(tmp_path / "fs"))
         assert r["success"] is False
-        assert "NTFS" in r["stderr"]
+        assert "NTFS" in r["stderr"] and "Ext4" in r["stderr"]
+
+    def test_unreadable_partition_table_is_reported(self, tmp_path):
+        from tools.ewf import mount_full_image
+        side = [self._ok(), self._ok("Slot  Start  End  Length  Description\n")]
+        with patch("tools.ewf.run", side_effect=side):
+            r = mount_full_image("/fake/image.E01", str(tmp_path / "ewf"), str(tmp_path / "fs"))
+        assert r["success"] is False and "partition" in r["stderr"].lower()
 
     def test_ewf_device_path_constructed(self, tmp_path):
         from tools.ewf import mount_full_image
@@ -118,3 +129,206 @@ class TestMountFullImage:
         # Second call (mmls) should reference ewf_mp/ewf1
         mmls_cmd = m.call_args_list[1][0][0]
         assert "ewf1" in mmls_cmd[-1]
+
+
+class TestMountOptionCompatibility:
+    """Regression: ntfs-3g spells the journal-safety option `norecover`, not
+    `norecovery`. The old spelling was rejected by the helper and surfaced as
+    'wrong fs type, bad option, bad superblock', blocking every NTFS mount."""
+
+    def test_options_use_correct_norecover_spelling(self, mock_run, tmp_path):
+        from tools.ewf import mount_ntfs
+        mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=1048576)
+        cmd = mock_run.call_args[0][0]
+        assert any("norecover" in str(x) and "norecovery" not in str(x) for x in cmd), cmd
+
+    def test_explicit_type_fallback_when_autodetect_fails(self, tmp_path):
+        """On hosts with no kernel NTFS driver (WSL2), the bare `mount` fails;
+        the helper must retry with `-t ntfs-3g`."""
+        from tools.ewf import mount_ntfs
+        ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+              "truncated": False, "cmd": ""}
+        bad = {"success": False, "stdout": "", "stderr": "wrong fs type, bad option",
+               "exit_code": 32, "truncated": False, "cmd": ""}
+        with patch("tools.ewf.run", side_effect=[bad, ok]) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=False):
+            r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=345001984)
+        assert r["success"] is True
+        assert m.call_count == 2
+        second_cmd = m.call_args_list[1][0][0]
+        assert "-t" in second_cmd and "ntfs-3g" in second_cmd
+
+
+class TestPartitionDetection:
+    """Regression (VANKO-2016-DEEPSEEK41 run 2, 2026-09-20): a GPT table names
+    no partition "NTFS", so description matching found nothing, mount_full_image
+    returned "Could not detect NTFS partition", and the agent hand-derived an
+    offset one sector off ("NTFS signature is missing")."""
+
+    GPT = """GUID Partition Table (EFI)
+Offset Sector: 0
+Units are in 512-byte sectors
+
+      Slot      Start        End          Length       Description
+000:  Meta      0000000000   0000000000   0000000001   Safety Table
+001:  -------   0000000000   0000002047   0000002048   Unallocated
+002:  Meta      0000000001   0000000001   0000000001   GPT Header
+004:  000       0000002048   0000739327   0000737280   Basic data partition
+007:  003       0001411072   0232294399   0230883328   Basic data partition
+009:  005       0233216000   0244275199   0011059200   Basic data partition
+"""
+
+    def test_parses_gpt_rows_and_skips_meta(self):
+        from tools.ewf import _mmls_partitions
+        parts = _mmls_partitions(self.GPT)
+        assert [p["start"] for p in parts][0] == 1411072      # largest first
+        assert all(p["slot"][0].isdigit() for p in parts)     # no Meta/unallocated
+        assert len(parts) == 3
+
+    def test_sector_size_is_read_not_assumed(self):
+        from tools.ewf import _mmls_sector_size
+        assert _mmls_sector_size(self.GPT) == 512
+        assert _mmls_sector_size(self.GPT.replace("512-byte", "4096-byte")) == 4096
+        assert _mmls_sector_size("no units line") == 512
+
+    def test_mount_full_image_probes_with_fsstat_and_mounts_that_offset(self, tmp_path):
+        from tools.ewf import mount_full_image
+        ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+              "truncated": False, "cmd": ""}
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "mmls":
+                return {**ok, "stdout": self.GPT}
+            if cmd[0] == "fsstat":
+                # the first (largest) candidate is the Windows volume
+                fs = "NTFS" if cmd[2] == "1411072" else "FAT32"
+                return {**ok, "stdout": f"File System Type: {fs}\n"}
+            return dict(ok)
+
+        with patch("tools.ewf.run", side_effect=fake_run):
+            r = mount_full_image("/ev/d.E01", str(tmp_path / "ewf"), str(tmp_path / "c"))
+        assert r["success"] and r["ntfs_offset_sectors"] == 1411072
+        assert r["ntfs_offset_bytes"] == 1411072 * 512
+        assert any(c[0] == "mount" and f"offset={1411072 * 512}" in " ".join(c) for c in calls)
+
+    def test_no_ntfs_anywhere_reports_what_was_probed(self, tmp_path):
+        from tools.ewf import mount_full_image
+        ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+              "truncated": False, "cmd": ""}
+
+        def fake_run(cmd, **kw):
+            if cmd[0] == "mmls":
+                return {**ok, "stdout": self.GPT}
+            if cmd[0] == "fsstat":
+                return {**ok, "stdout": "File System Type: Ext4\n"}
+            return dict(ok)
+
+        with patch("tools.ewf.run", side_effect=fake_run):
+            r = mount_full_image("/ev/d.E01", str(tmp_path / "ewf"), str(tmp_path / "c"))
+        assert r["success"] is False
+        assert "Ext4" in r["stderr"] and "1411072" in r["stderr"]
+        assert len(r["partitions"]) == 3
+
+
+class TestCaseInsensitiveMount:
+    """Regression: ntfs-3g is case-sensitive, so Windows/AppCompat/Programs/
+    Amcache.hve missed the on-disk Windows/appcompat and read as absent."""
+
+    _ok = {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+           "truncated": False, "cmd": ""}
+    _bad = {"success": False, "stdout": "", "stderr": "unknown filesystem type",
+            "exit_code": 32, "truncated": False, "cmd": ""}
+
+    def test_lowntfs_ignore_case_tried_first(self, tmp_path):
+        from tools.ewf import mount_ntfs
+        with patch("tools.ewf.run", return_value=dict(self._ok)) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=True):
+            r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=1048576)
+        assert m.call_count == 1 and r["case_insensitive"] is True
+        cmd = m.call_args[0][0]
+        assert cmd[:3] == ["mount", "-t", "lowntfs-3g"]
+        opts = cmd[cmd.index("-o") + 1].split(",")
+        assert {"ro", "loop", "norecover", "ignore_case", "offset=1048576"} <= set(opts)
+        assert m.call_args[1]["needs_sudo"] is True
+
+    def test_falls_back_to_case_sensitive_chain(self, tmp_path):
+        from tools.ewf import mount_ntfs
+        with patch("tools.ewf.run", side_effect=[dict(self._bad), dict(self._bad),
+                                                 dict(self._ok)]) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=True):
+            r = mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=0)
+        assert r["success"] is True and r["case_insensitive"] is False
+        assert "path_case_note" in r and r["lowntfs_attempt_stderr"]
+        assert m.call_args_list[2][0][0][:3] == ["mount", "-t", "ntfs-3g"]
+        assert all("ro" in c[0][0][c[0][0].index("-o") + 1].split(",")
+                   for c in m.call_args_list)
+
+    def test_lowntfs_absent_uses_current_command(self, tmp_path):
+        from tools.ewf import mount_ntfs
+        with patch("tools.ewf.run", return_value=dict(self._ok)) as m, \
+             patch("tools.ewf._lowntfs_available", return_value=False):
+            mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=0)
+        assert m.call_args[0][0][:2] == ["mount", "-o"]
+
+
+_EWFVERIFY_FAIL = (
+    "ewfverify 20140816\n\nVerify started at: Sep 23, 2026 18:10:44\n"
+    "Status: at 99%.\n\nVerify completed at: Sep 23, 2026 18:20:56\n\n"
+    "Read: 116 GiB (125069950976 bytes) in 10 minute(s).\n\n"
+    "Sector validation errors:\n\ttotal number: 1\n"
+    "\tat sector(s): 70565120 - 70565183 (number: 64) in segment file(s): "
+    "/ev/surface_physical.E10\n\n"
+    "MD5 hash stored in file:\t\t4032d556cc866c23f1e797410e95603c\n"
+    "MD5 hash calculated over data:\t\ta60c963641c86ec090169ff7beded264\n\n"
+    "Additional hash values:\nSHA1:\te0e72dfcef167dd358813726e82f6c235bc85ce7\n\n"
+    "ewfverify: FAILURE\n")
+
+
+def _proc(rc, out, err=b""):
+    from unittest.mock import MagicMock
+    m = MagicMock()
+    m.returncode, m.stdout, m.stderr = rc, out, err
+    return m
+
+
+class TestEwfVerifyClassification:
+    """ewfverify exit 1 = mismatch found (a result) OR cannot run (a failure)."""
+
+    def _run(self, rc, out, err=b""):
+        from core.execution_log import log
+        import core.executor as ex
+        from tools.ewf import ewf_verify
+        with patch("tools.ewf.run", ex.run), \
+             patch("core.executor.subprocess.run", return_value=_proc(rc, out, err)):
+            r = ewf_verify("/ev/image.E01")
+        return r, log._entries[-1]
+
+    def test_completed_mismatch_is_successful_negative_result(self):
+        r, entry = self._run(1, _EWFVERIFY_FAIL.encode(), b"Unable to verify input.")
+        assert r["success"] is True and entry["success"] is True
+        assert r["verified"] is False
+        assert r["status"] == "verification_failed"
+        assert r["stored_md5"] == "4032d556cc866c23f1e797410e95603c"
+        assert r["computed_md5"] == "a60c963641c86ec090169ff7beded264"
+        assert r["stored_sha1"] == "e0e72dfcef167dd358813726e82f6c235bc85ce7"
+        assert r["sector_errors"] == [{"start": 70565120, "end": 70565183,
+                                       "count": 64,
+                                       "segment": "/ev/surface_physical.E10"}]
+        assert "FAILED" in entry["exit_meaning"]
+        assert "ewfverify: FAILURE" in r["stdout"]
+
+    def test_success(self):
+        out = ("Verify completed at: x\n"
+               "MD5 hash stored in file:\t\tabc\nMD5 hash calculated over data:\t\tabc\n"
+               "ewfverify: SUCCESS\n")
+        r, entry = self._run(0, out.encode())
+        assert r["success"] is True and r["verified"] is True
+        assert r["status"] == "verified" and r["sector_errors"] == []
+
+    def test_cannot_open_stays_failure(self):
+        r, entry = self._run(1, b"ewfverify 20140816\n",
+                             b"Unable to open EWF file(s).")
+        assert r["success"] is False and entry["success"] is False
+        assert r["status"] == "error" and r["verified"] is None

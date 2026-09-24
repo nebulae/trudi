@@ -36,7 +36,7 @@ class TestNotice:
         msg = M._repeat_update(k, "net_ngrep_search", dict(RESULT))
         assert "2x" in msg
         assert "record_finding" in msg and "negative" in msg
-        assert "dair.dair_assess" in msg
+        assert "dair.assess" in msg
 
     def test_different_args_are_different_keys(self):
         M._repeat_update(_key(), "t", dict(RESULT))
@@ -160,7 +160,7 @@ class TestPollAdvisory:
         assert M._note_poll_and_advise(dict(self.RUNNING)) == ""   # 1
         assert M._note_poll_and_advise(dict(self.RUNNING)) == ""   # 2
         msg = M._note_poll_and_advise(dict(self.RUNNING))          # 3
-        assert "POLLING LOOP" in msg and "dair.dair_assess" in msg
+        assert "POLLING LOOP" in msg and "dair.assess" in msg
 
     def test_finished_job_never_advises(self, monkeypatch):
         self._reset(monkeypatch)

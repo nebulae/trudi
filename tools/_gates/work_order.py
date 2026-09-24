@@ -37,6 +37,10 @@ _BINARY_ALIASES = {
     "plaso_export_json":            "psort",
     "plaso_filter_incident_window": "psort",
     "plaso_info":                   "pinfo",
+    # strings.grep / strings.extract execute `strings -a -n N <file>` — the
+    # cmd never contains 'grep'/'extract' (entries without the mcp_tool stamp).
+    "strings_grep":                 "strings -a",
+    "strings_extract":              "strings -a",
 }
 
 
@@ -47,7 +51,7 @@ def _binary_sig(tool: str) -> str:
     whose wrapped binary is named differently, an explicit alias maps to the
     keyword the command actually contains (misc_regripper_hive→'rip.pl',
     plaso_create_timeline→'log2timeline'). Handles the namespace-doubled form the
-    middleware passes ('ez_ez_sbecmd').
+    middleware passes ('ez_sbecmd').
 
     A verbose model may append call arguments to the tool name
     (`tsk.fls(input_path=..., depth=2)`); the arguments are not part of the
@@ -60,6 +64,12 @@ def _binary_sig(tool: str) -> str:
     n = _fk.normalize_tool_name(raw.lower().replace(".", "_"))
     if n in _BINARY_ALIASES:
         return _BINARY_ALIASES[n]
+    # Every yara.* tool's first segment is 'scan', which also sits inside
+    # psscan/netscan/filescan: one yara disposition or any *scan run settled
+    # them all (VANKO trace, 2026-09-24). Use the full tool name; the MCP
+    # tool stamp on each call matches it exactly.
+    if n.startswith("yara_"):
+        return n
     parts = [p for p in n.split("_") if p]
     if len(parts) >= 2:
         return parts[1]
@@ -73,8 +83,27 @@ def _display(tool: str) -> str:
 
 _CONTROL_PLANE_TOOLS = frozenset({
     "misc.start_execution_log", "misc.export_execution_log", "misc.write_final_report",
-    "misc.serve_dashboard", "misc.clear_case_run",
+    "misc.serve_dashboard", "misc.clear_case_run", "misc.retract_finding", "misc.submit_finding",
 })
+
+
+def _item_tool(item) -> str:
+    """The tool a work-order item names. DAIR may emit a structured item
+    ({'tool': 'reason.hypothesize', 'args': {...}}); stringifying it gave the
+    signature "{'tool':", which no run or disposition can ever match — the
+    2026-09-23 run could not reach Report after running the hypothesis."""
+    if isinstance(item, dict):
+        return str(item.get("tool") or "")
+    t = str(item or "")
+    if t.lstrip().startswith("{"):
+        import ast
+        try:
+            v = ast.literal_eval(t.strip())
+            if isinstance(v, dict):
+                return str(v.get("tool") or "")
+        except (ValueError, SyntaxError):
+            pass
+    return t
 
 
 def _control_plane_tool(tool: str) -> bool:
@@ -88,11 +117,40 @@ def _control_plane_tool(tool: str) -> bool:
             or d.startswith(("reason.", "dair.", "monitor.", "accuracy.", "coverage.")))
 
 
-def tool_waived(didx, tool: str) -> bool:
+_NAMESPACES = frozenset({
+    "misc", "ez", "vol", "tsk", "ewf", "img", "plaso", "yara", "hash", "strings",
+    "carve", "net", "enrich", "live", "velo", "monitor", "respond", "read", "af",
+    "correlate",
+})
+
+
+def _tool_keys(name: str) -> set:
+    """Separator-insensitive identities of a tool/binary name, so a failed call
+    recorded by its BINARY ('/usr/local/bin/pe-scanner', 'SQLECmd.dll',
+    'ewfverify') matches the MCP spelling an agent dispositions ('misc.pe_scanner',
+    'ez.sqlecmd', 'ewf_verify'): the collapsed full name and, when the first
+    segment is a TRUDI namespace, the collapsed name without it."""
+    raw = (name or "").strip().split("(", 1)[0]
+    raw = (raw.split() or [""])[0].rsplit("/", 1)[-1].lower()
+    if raw.endswith(".dll"):
+        raw = raw[:-4]
+    n = _fk.normalize_tool_name(raw.replace(".", "_").replace("-", "_"))
+    parts = [p for p in n.split("_") if p]
+    keys = {"".join(parts)}
+    if len(parts) >= 2 and parts[0] in _NAMESPACES:
+        keys.add("".join(parts[1:]))
+    return {k for k in keys if len(k) >= 3}
+
+
+def tool_waived(didx, tool: str, aliases=()) -> bool:
     """A typed disposition settles the tool: target_kind="tool", target_id any
-    spelling of the MCP tool (ez.pecmd / ez_pecmd / ez_ez_pecmd), reason
-    inapplicable | absent_from_evidence | out_of_scope."""
+    spelling of the MCP tool (ez.pecmd / ez_pecmd / ez_pecmd) or of its binary
+    (pe-scanner / pe_scanner), reason inapplicable | absent_from_evidence |
+    out_of_scope. `aliases`: other names of the same call (its mcp_tool stamp)."""
     sig = _binary_sig(tool)
+    keys: set = set()
+    for n in (tool, *aliases):
+        keys |= _tool_keys(n)
     table = getattr(didx, "dispositions", None) or {}
     for (kind, _norm), rows in table.items():
         if kind != "tool":
@@ -100,7 +158,8 @@ def tool_waived(didx, tool: str) -> bool:
         for d in rows:
             if str(d.get("reason") or "").lower() not in SOURCE_WAIVER_REASONS_ALL:
                 continue
-            if _binary_sig(str(d.get("target_id") or "")) == sig:
+            tid = str(d.get("target_id") or "")
+            if _binary_sig(tid) == sig or (_tool_keys(tid) & keys):
                 return True
     return False
 
@@ -126,8 +185,50 @@ def _failed_tool_items(entries) -> list:
         else:
             tool = toks[0].rsplit("/", 1)[-1]
         if tool and tool.lower() not in ("dotnet", "python3", "python", "sudo"):
-            out.append((i, {"tool": tool, "_failed": True}))
+            out.append((i, {"tool": tool, "_failed": True,
+                            "mcp_tool": str(e.get("mcp_tool") or "")}))
     return out
+
+
+def _succ_tool_ids(entries) -> list:
+    """Tool identities of successful calls: the reason/tool entry's `tool` and
+    the `mcp_tool` stamp record_tool_call adds. A subprocess tool's cmd is the
+    binary line ('strings -a -n 4 …' for strings.grep) and may share no keyword
+    with the tool name, so matching on cmd alone reads a tool that DID run as
+    never-run and stalls the phase on it forever."""
+    out = []
+    for e in entries or []:
+        if e.get("type") not in ("reason_call", "tool_call") or e.get("success") is False:
+            continue
+        for k in ("tool", "mcp_tool"):
+            v = str(e.get(k) or "")
+            if v:
+                out.append(_fk.normalize_tool_name(v.lower().replace(".", "_")))
+    return out
+
+
+def stamped_evidence_kinds(entries) -> set:
+    """Evidence kinds the SERVER recorded on the latest dair_call that carries
+    a determined inventory (dair_assess stamps evidence_kinds /
+    evidence_determined). Empty — filter nothing — for traces without the
+    stamp, an undetermined inventory, or a live-monitoring trace."""
+    from core.evidence_kinds import is_live_monitoring_trace
+    if is_live_monitoring_trace(entries):
+        return set()
+    for e in reversed(entries or []):
+        if isinstance(e, dict) and e.get("type") == "dair_call" and e.get("evidence_determined") \
+                and e.get("evidence_kinds"):
+            return {str(k) for k in e["evidence_kinds"]}
+    return set()
+
+
+def unfit_for_evidence(tool, kinds) -> bool:
+    """A prescribed tool the case's evidence cannot feed — never an unrun
+    work-order item (DAIR drops it; this covers orders recorded before)."""
+    if not kinds:
+        return False
+    from tools.tool_capabilities import tool_fits_evidence
+    return not tool_fits_evidence(tool, kinds)
 
 
 def unrun_from_list(entries, tools) -> list:
@@ -140,14 +241,14 @@ def unrun_from_list(entries, tools) -> list:
         return []
     succ_cmds = [(e.get("cmd") or "").lower() for e in entries
                  if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
-    succ_tools = [str(e.get("tool") or "").lower().replace(".", "_") for e in entries
-                  if e.get("type") in ("reason_call", "tool_call") and e.get("success") is not False]
+    succ_tools = _succ_tool_ids(entries)
     didx = index_from_entries(entries)
+    kinds = stamped_evidence_kinds(entries)
     out: list = []
     seen: set = set()
     for t in tools:
-        t = str(t)
-        if _control_plane_tool(t):
+        t = _item_tool(t)
+        if _control_plane_tool(t) or unfit_for_evidence(t, kinds):
             continue
         sig = _binary_sig(t)
         if len(sig) < 3 or sig in seen:
@@ -173,6 +274,7 @@ def unrun_priority_tools(entries) -> list:
     (the tool ran in an earlier phase) passes — only genuinely-skipped work is
     flagged."""
     prescribed: dict = {}          # binary sig -> display name (first seen)
+    kinds = stamped_evidence_kinds(entries)
     for e in entries or []:
         if e.get("type") != "dair_call":
             continue
@@ -180,8 +282,8 @@ def unrun_priority_tools(entries) -> list:
         if not isinstance(pt, list):
             continue
         for t in pt:
-            t = str(t)
-            if _control_plane_tool(t):
+            t = _item_tool(t)
+            if _control_plane_tool(t) or unfit_for_evidence(t, kinds):
                 continue
             sig = _binary_sig(t)
             if len(sig) < 3:
@@ -191,10 +293,9 @@ def unrun_priority_tools(entries) -> list:
         return []
     succ_cmds = [(e.get("cmd") or "").lower() for e in entries
                  if e.get("type") == "tool_call" and e.get("success") is not False and e.get("cmd")]
-    succ_tools = [str(e.get("tool") or "").lower().replace(".", "_") for e in entries
-                  if e.get("type") in ("reason_call", "tool_call") and e.get("success") is not False]
+    succ_tools = _succ_tool_ids(entries)
     didx = index_from_entries(entries)
-    missing = [disp for sig, disp in sorted(prescribed.items())
+    missing =[disp for sig, disp in sorted(prescribed.items())
                if not (any(sig in c for c in succ_cmds) or any(sig in t for t in succ_tools)
                        or tool_waived(didx, disp))]
     if not missing:
@@ -222,6 +323,10 @@ def unretried_blocks(entries) -> list:
                   for i, e in enumerate(entries or [])
                   if e.get("type") == "tool_call" and e.get("success") is not False
                   and e.get("cmd")]
+    later_mcp = [(i, _tool_keys(str(e.get("mcp_tool"))))
+                 for i, e in enumerate(entries or [])
+                 if e.get("type") == "tool_call" and e.get("success") is not False
+                 and e.get("mcp_tool")]
     didx = index_from_entries(entries)
 
     issues: list = []
@@ -237,16 +342,23 @@ def unretried_blocks(entries) -> list:
         # Re-run: the binary signature appears in a successful tool_call after the
         # block (a later dair_assess + retry produces exactly such a cmd).
         retried = any(j > idx and sig in cmd for j, cmd in later_cmds)
+        # A failed call carries its mcp_tool stamp: a later successful run of
+        # the same MCP tool, or a disposition naming it, settles it too.
+        aliases = (e.get("mcp_tool"),) if e.get("mcp_tool") else ()
+        akeys = set().union(*(_tool_keys(a) for a in aliases)) if aliases else set()
+        retried = retried or any(j > idx and (k & akeys) for j, k in later_mcp)
         # Waived: a typed tool disposition settles it (prose is not read).
-        waived = tool_waived(didx, tool)
+        waived = tool_waived(didx, tool, aliases)
         if not retried and not waived and e.get("_failed"):
+            shown = _display(e.get("mcp_tool") or tool)
             issues.append(
-                f"Tool {_display(tool)} FAILED and was never re-run successfully, "
+                f"Tool {shown} FAILED and was never re-run successfully, "
                 f"replaced, or dispositioned — a failed capability is an audit "
                 f"obligation, not a dead end. Retry it, run a named fallback and "
                 f"record why, or misc.record_disposition(target_kind=\"tool\", "
-                f"target_id=\"{_display(tool)}\", reason=\"inapplicable\"|"
-                f"\"absent_from_evidence\") before Report."
+                f"target_id=\"{shown}\", reason=\"tool_unavailable\" (not "
+                f"installed / cannot run here)|\"inapplicable\"|\"absent_from_evidence\") "
+                f"before Report."
             )
             continue
         if not retried and not waived:

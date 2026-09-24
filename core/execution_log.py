@@ -1,4 +1,5 @@
 """Execution trace log — records tool calls, reason calls, and findings per case."""
+import contextvars
 import fcntl
 import json
 import os
@@ -8,13 +9,16 @@ import tempfile
 import threading
 import datetime
 from contextlib import contextmanager
+from functools import wraps
 from dataclasses import dataclass, field
 from typing import Optional
+
+from core.paths import trudi_cache_dir
 
 # Shared lock file with the PostToolUse hook. Both writers acquire this
 # exclusive lock around their read-merge-write cycles so they never lose
 # each other's entries to a race.
-_TRACE_LOCK_FILE = os.path.expanduser("~/.cache/trudi/hook.lock")
+_TRACE_LOCK_FILE = os.path.join(trudi_cache_dir(), "hook.lock")
 # Durability knob: every flush fsyncs the trace (a crash must not lose an
 # entry — the audit trail is the product). Tests patch this False: on WSL2 an
 # fsync costs ~80 ms and the suite writes ~100k entries (the whole 11-minute
@@ -22,7 +26,21 @@ _TRACE_LOCK_FILE = os.path.expanduser("~/.cache/trudi/hook.lock")
 _TRACE_FSYNC = os.environ.get("TRUDI_TRACE_FSYNC", "1") != "0"
 # Shared call_id counter — single monotonic sequence across MCP server + hook
 # so call_ids are dense and reflect global write order.
-_CALL_ID_COUNTER_FILE = os.path.expanduser("~/.cache/trudi/call_id.counter")
+_CALL_ID_COUNTER_FILE = os.path.join(trudi_cache_dir(), "call_id.counter")
+# Inline excerpt kept on each reason_evidence_fetch request; the full text
+# returned to the reviewer lives in the result_path sidecar.
+FETCH_RESULT_EXCERPT_CHARS = 300
+
+# The MCP tool whose handler is running (set by core.middleware around each
+# call). record_tool_call stamps it on the entry as `mcp_tool`, because a
+# subprocess tool's `cmd` is the executed binary line ('strings -a -n 4 …',
+# 'dotnet EvtxECmd.dll …'), which often shares no keyword with the tool name.
+# Gates that ask "did tool X run?" or "what artifact class is this?" need the
+# tool identity, not a guess from the command line.
+_flock_local = threading.local()
+
+current_mcp_tool: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "trudi_current_mcp_tool", default="")
 
 
 @contextmanager
@@ -31,17 +49,31 @@ def _hook_flock():
     call-id counter or trace must hold it — the MCP server here, the
     claude/hooks scripts on their side — so concurrent sessions can't rewind
     the counter or trample each other's writes."""
+    if getattr(_flock_local, "depth", 0):
+        yield
+        return
     os.makedirs(os.path.dirname(_TRACE_LOCK_FILE), exist_ok=True)
     fp = open(_TRACE_LOCK_FILE, "w")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+        _flock_local.depth = 1
         yield
     finally:
+        _flock_local.depth = 0
         try:
             fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
         except OSError:
             pass
         fp.close()
+
+
+def trace_transaction(fn):
+    """Serialize a short local operation with trace writers in other processes."""
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with log.transaction():
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _scan_trace_max_cid(trace_path: str) -> int:
@@ -99,7 +131,7 @@ def _next_shared_call_id(trace_path: Optional[str] = None, in_memory_seq: int = 
         return n
 
 # Written on every configure() so the singleton can auto-recover after a server restart.
-_SESSION_FILE = os.path.expanduser("~/.cache/trudi/session.json")
+_SESSION_FILE = os.path.join(trudi_cache_dir(), "session.json")
 
 
 def _utcnow() -> str:
@@ -156,6 +188,12 @@ def _render_entries(case_id: str | None, entries: list[dict]) -> str:
                 f"- [{blk['phase']}](#{blk['anchor']}) — entries #{blk['start_cid']}–#{blk['end_cid']}"
             )
         lines.append("")
+
+    from core.findings import finding_view
+    view = finding_view(entries)
+    active_ids = {e['call_id'] for e in view.active}
+    if view.anomalies:
+        lines.append(f"Lifecycle anomalies require adjudication: {view.anomalies}\n")
 
     # Markdown navigability: lookup table for evidence-chain rendering on
     # finding entries.
@@ -282,7 +320,8 @@ def _render_entries(case_id: str | None, entries: list[dict]) -> str:
             conf = e.get("confidence", "").upper()
             linked = e.get("linked_call_id", 0)
             link_str = f" ← tool call #{linked}" if linked else ""
-            lines.append(f"- `{ts}` {prefix}**FINDING** [{conf}] {e.get('description', '')}{link_str}")
+            lifecycle = "current" if cid in active_ids else "retired revision"
+            lines.append(f"- `{ts}` {prefix}**FINDING** [{conf}] [{lifecycle}] {e.get('description', '')}{link_str}")
             if e.get("source"):
                 lines.append(f"  - source: {e['source']}")
             if e.get("tested_hypothesis_id"):
@@ -344,6 +383,8 @@ class LogIndex:
     by_call_id: dict[int, dict] = field(default_factory=dict)
     by_type: dict[str, list[dict]] = field(default_factory=dict)
     by_tool: dict[str, list[dict]] = field(default_factory=dict)
+    active_findings: list[dict] = field(default_factory=list)
+    finding_anomalies: list[dict] = field(default_factory=list)
     findings_by_linked: dict[int, list[dict]] = field(default_factory=dict)
     hypotheses_by_id: dict[str, dict] = field(default_factory=dict)
     # Evidence registries — built from server-stamped annotate_tool_call
@@ -360,6 +401,12 @@ class LogIndex:
     # The pre-report exhaustion checks treat a registry identity that matches
     # a roster term as mandatory; everything else is report inventory.
     roster: dict[str, dict] = field(default_factory=dict)
+    # Mail stores whose only registry stamps predate owner-direction counts
+    # (no `correspondent_direction` marker) — the pre-report check falls back
+    # to a conservative two-way rule for them and asks for a re-stamp.
+    correspondent_legacy_stores: set = field(default_factory=set)
+    # Mailbox / chat-store owner identities derived from the stores.
+    correspondent_owners: set = field(default_factory=set)
     # Typed dispositions keyed (target_kind, target_norm) → [entries, oldest first].
     dispositions: dict[tuple, list] = field(default_factory=dict)
 
@@ -375,6 +422,114 @@ _IDENTITY_NOISE_RE = re.compile(
     r"mailer-daemon|postmaster|no-?reply|do-?not-?reply|undisclosed[- ]recipients"
     r"|notifications?@|newsletters?@|bounce|feedback@|automated@",
     re.IGNORECASE)
+
+
+def _mail_store_of(e: dict) -> str:
+    """The store path of a read.mail stamp (`read.mail -o <path> mode=...`)."""
+    cmd = str(e.get("cmd") or "")
+    m = re.match(r"read\.mail -o (.+?) mode=", cmd)
+    if not m:
+        return ""
+    p = m.group(1).strip()
+    if len(p) >= 2 and p[0] == p[-1] == "'":
+        p = p[1:-1]
+    return p
+
+
+def _chat_store_owner_from_cmd(cmd: str) -> str:
+    """Skype stores live at .../Skype/<account>/main.db — '#3a' is ':'."""
+    m = re.search(r"[\\/]Skype[\\/]([^\\/]+)[\\/]main\.db", cmd or "", re.IGNORECASE)
+    return m.group(1).replace("#3a", ":").lower() if m else ""
+
+
+def _add_correspondent_stamp(idx: "LogIndex", e: dict, cid, v2_stores: set) -> None:
+    """Fold one feeder's observed_correspondents stamp into idx.correspondents.
+
+    Only valid correspondents enter the registry: e-mail addresses for mail
+    stores, whitespace-free handles for chat stores (header labels such as
+    "address type" / "recipient type" from older pffexport parses are field
+    names, not people). Engagement data per record:
+      owner_to      — the mailbox owner wrote to it (v2 read.mail stamps)
+      chat_engaged  — exchanged messages/files in a chat store
+      legacy_from/legacy_to — direction counts from a pre-v2 stamp whose store
+                      was never re-stamped (conservative two-way fallback)
+    """
+    from core.mail_roster import (is_valid_email, is_valid_chat_handle,
+                                  is_chat_system_handle, unwrap_tracking)
+    oc = e.get("observed_correspondents")
+    if not (isinstance(oc, list) and oc):
+        return
+    cmd = str(e.get("cmd") or "")
+    src = cmd.split()[0] if cmd else ""
+    is_chat = bool(e.get("chat_db_export")) or "chat" in src
+    stats = e.get("observed_correspondent_stats")
+    stats = stats if isinstance(stats, dict) else {}
+    # RFC bulk-header senders (List-Unsubscribe / List-Id / Precedence: bulk)
+    # — flagged bulk so inbound volume is never read as engagement.
+    bulk_set = e.get("observed_correspondent_bulk")
+    bulk_set = {str(a).strip().lower()
+                for a in bulk_set} if isinstance(bulk_set, list) else set()
+    direction = bool(e.get("correspondent_direction"))
+    store = "" if is_chat else _mail_store_of(e)
+    legacy = (not is_chat) and not direction and store not in v2_stores
+    superseded = (not is_chat) and not direction and store in v2_stores
+    if legacy and store:
+        idx.correspondent_legacy_stores.add(store)
+    for o in (e.get("mailbox_owners") or []):
+        idx.correspondent_owners.add(str(o).strip().lower())
+    chat_owners: set = set()
+    chat_engaged = None
+    if is_chat:
+        chat_owners = {str(o).strip().lower() for o in (e.get("chat_owners") or [])}
+        po = _chat_store_owner_from_cmd(cmd)
+        if po:
+            chat_owners.add(po)
+        idx.correspondent_owners.update(chat_owners)
+        ce = e.get("chat_engaged")
+        if isinstance(ce, list):
+            chat_engaged = {str(x).strip().lower() for x in ce}
+    for raw in oc:
+        v = str(raw).strip().lower()
+        if not v:
+            continue
+        if is_chat:
+            if not (is_valid_email(v) or is_valid_chat_handle(v)):
+                continue
+        else:
+            v = unwrap_tracking(v)
+            if not is_valid_email(v):
+                continue
+        rec = idx.correspondents.setdefault(v, {"first_cid": cid, "sources": []})
+        if _IDENTITY_NOISE_RE.search(v) or v in bulk_set:
+            # kept and FLAGGED, never dropped: a bulk-class address (bounce
+            # daemons included) can carry decisive evidence — it is
+            # inventoried, just never a mandatory disposition.
+            rec["bulk"] = True
+        if src and src not in rec["sources"]:
+            rec["sources"].append(src)
+        if is_chat:
+            if v in chat_owners:
+                rec["store_owner"] = True
+            elif chat_engaged is not None:
+                if v in chat_engaged:
+                    rec["chat_engaged"] = True
+            elif not is_chat_system_handle(v):
+                # legacy chat stamp: every non-system, non-owner participant
+                rec["chat_engaged"] = True
+            continue
+        st = stats.get(str(raw).strip().lower()) or stats.get(v)
+        if not isinstance(st, dict) or superseded:
+            continue
+        rec["from"] = rec.get("from", 0) + int(st.get("from") or 0)
+        rec["to"] = rec.get("to", 0) + int(st.get("to") or 0)
+        if direction:
+            rec["owner_to"] = rec.get("owner_to", 0) + int(st.get("owner_to") or 0)
+            rec["direction_known"] = True
+        else:
+            rec["legacy_from"] = rec.get("legacy_from", 0) + int(st.get("from") or 0)
+            rec["legacy_to"] = rec.get("legacy_to", 0) + int(st.get("to") or 0)
+    if e.get("correspondents_partial"):
+        idx.correspondents_complete = False
 
 
 def _extract_tool_from_entry(entry: dict) -> str:
@@ -420,6 +575,23 @@ class ExecutionLog:
         self._flush_count: int = 0
         self._trace_missing_noted: bool = False
 
+    @contextmanager
+    def transaction(self):
+        """Refresh under the shared cross-process lock, then commit atomically.
+
+        No network/model calls belong in this critical section.
+        """
+        with self._lock, _hook_flock():
+            if self._path and os.path.exists(self._path):
+                with open(self._path) as f:
+                    disk = json.load(f).get("entries", [])
+                anonymous = [e for e in self._entries if e.get("call_id") is None]
+                merged = {e["call_id"]: e for e in self._entries if e.get("call_id") is not None}
+                merged.update({e["call_id"]: e for e in disk if e.get("call_id") is not None})
+                self._entries = sorted(merged.values(), key=lambda e: e["call_id"]) + anonymous
+                self._index_version += 1
+            yield
+
     def _next_id(self) -> int:
         # Shared counter across MCP server + PostToolUse hook so call_ids form
         # a single dense monotonic sequence. _next_shared_call_id validates the
@@ -455,6 +627,11 @@ class ExecutionLog:
             if self._cached_index is not None and self._cached_index[0] == self._index_version:
                 return self._cached_index[1]
             idx = LogIndex()
+            # Mail stores that carry at least one owner-direction (v2) roster
+            # stamp: their legacy stamps are superseded, not merged.
+            _v2_stores = {_mail_store_of(e) for e in self._entries
+                          if e.get("type") == "tool_call"
+                          and e.get("correspondent_direction")}
             for e in self._entries:
                 cid = e.get("call_id")
                 if cid is not None:
@@ -479,42 +656,7 @@ class ExecutionLog:
                     idx.dispositions.setdefault(key, []).append(e)
                 if t == "tool_call":
                     # Evidence registries from annotate_tool_call markers.
-                    oc = e.get("observed_correspondents")
-                    if isinstance(oc, list) and oc:
-                        src = ""
-                        if e.get("cmd"):
-                            src = str(e["cmd"]).split()[0]
-                        stats = e.get("observed_correspondent_stats")
-                        stats = stats if isinstance(stats, dict) else {}
-                        # RFC bulk-header senders (List-Unsubscribe / List-Id /
-                        # Precedence: bulk) — flagged bulk so inbound volume is
-                        # never read as engagement.
-                        bulk_set = e.get("observed_correspondent_bulk")
-                        bulk_set = {str(a).strip().lower()
-                                    for a in bulk_set} if isinstance(bulk_set, list) else set()
-                        for v in oc:
-                            v = str(v).strip().lower()
-                            if not v:
-                                continue
-                            rec = idx.correspondents.setdefault(
-                                v, {"first_cid": cid, "sources": []})
-                            if _IDENTITY_NOISE_RE.search(v) or v in bulk_set:
-                                # kept and FLAGGED, never dropped: a bulk-class
-                                # address (bounce daemons included) can carry
-                                # decisive evidence — it is inventoried, just
-                                # never a mandatory disposition.
-                                rec["bulk"] = True
-                            if src and src not in rec["sources"]:
-                                rec["sources"].append(src)
-                            # Direction counts only when the feeder stamped
-                            # them — a registry without stats stays conservative
-                            # (every leftover blocks) in the pre-report check.
-                            st = stats.get(v)
-                            if isinstance(st, dict):
-                                rec["from"] = rec.get("from", 0) + int(st.get("from") or 0)
-                                rec["to"] = rec.get("to", 0) + int(st.get("to") or 0)
-                        if e.get("correspondents_partial"):
-                            idx.correspondents_complete = False
+                    _add_correspondent_stamp(idx, e, cid, _v2_stores)
                     kr = e.get("knowns_roster")
                     if isinstance(kr, list):
                         for v in kr:
@@ -530,6 +672,10 @@ class ExecutionLog:
                             irec = idx.identities.setdefault(v, {"first_cid": cid})
                             if _IDENTITY_NOISE_RE.search(v):
                                 irec["bulk"] = True
+            from core.findings import finding_view
+            view = finding_view(self._entries)
+            idx.active_findings = view.active
+            idx.finding_anomalies = view.anomalies
             self._cached_index = (self._index_version, idx)
             return idx
 
@@ -551,6 +697,16 @@ class ExecutionLog:
         the post-transition phase.
         """
         sa = (stack_action or "stay").lower()
+        # First-ever dair_call: before DAIR has run, the phase the agent
+        # declares is authoritative (a resumed session passes its stack), even
+        # over the Triage default a fresh or rehydrated log starts with.
+        first = not getattr(self, "_dair_seen", False)
+        self._dair_seen = True
+        if first and sa == "stay" and current_phase and current_phase != self._current_phase:
+            self._current_phase = current_phase
+            self._phase_stack = [{"phase": current_phase, "entry_reason": "initial_phase",
+                                  "depth": 0}]
+
         if sa == "push" and next_phase:
             self._phase_stack.append({
                 "phase": next_phase,
@@ -604,33 +760,52 @@ class ExecutionLog:
                     "depth": 0,
                 })
 
-        # Agent reconciliation (stay only): when the agent declares a stay but
-        # their `current_phase` differs from ours, adopt what the agent
-        # declared. push/pop already set _current_phase intentionally from
-        # next_phase / stack-top, so we don't override those.
-        if (sa == "stay" and current_phase
-                and self._current_phase != current_phase
-                and not (verification_satisfied
-                         and self._current_phase == "Collect")):
-            self._current_phase = current_phase
-            if self._phase_stack:
-                self._phase_stack[-1] = {
-                    **self._phase_stack[-1],
-                    "phase": current_phase,
-                }
-            else:
-                self._phase_stack.append({
-                    "phase": current_phase,
-                    "entry_reason": "agent_reconcile",
-                    "depth": 0,
-                })
+        # The model's echoed `current_phase` never moves the phase: only an
+        # explicit push/pop, the Triage-satisfied advance, or a recorded server
+        # transition does. (2026-09-23: an agent passing phase_stack="[]" made the
+        # model believe it was in Triage, and a `stay` adopted that over Collect.)
+
+    def _apply_server_transition(self, to_phase: str, reason: str) -> None:
+        """Push `to_phase` above the current frame (so a pop resumes it)."""
+        if not to_phase or self._current_phase == to_phase:
+            return
+        self._phase_stack.append({"phase": to_phase, "entry_reason": reason or "",
+                                  "depth": len(self._phase_stack)})
+        self._current_phase = to_phase
+
+    def record_phase_transition(self, to_phase: str, reason: str, trigger: str = "",
+                                input_call_ids: list[int] | None = None) -> int:
+        """A server-initiated phase change, recorded so rehydration replays it
+        and the agent can see it: Report work that needs evidence goes to
+        Collect instead of being refused. No-op (0) when already there."""
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"phase_transition -> {to_phase}")
+            if self._current_phase == to_phase:
+                return 0
+            from_phase = self._current_phase
+            self._apply_server_transition(to_phase, reason)
+            cid = self._next_id()
+            entry = {"call_id": cid, "type": "phase_transition", "ts": _utcnow(),
+                     "from_phase": from_phase, "to_phase": to_phase,
+                     "reason": reason, "trigger": trigger}
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            elif self._last_dair_cid:
+                entry["input_call_ids"] = [self._last_dair_cid]
+            self._append_entry(entry)
+            return cid
 
     def _rehydrate_phase_state(self) -> None:
         """Replay the dair_call history to reconstruct current phase state.
         Used after configure() rehydrates an existing trace."""
         self._current_phase = ""
         self._phase_stack = []
+        self._dair_seen = False
         for e in self._entries:
+            if e.get("type") == "phase_transition":
+                self._apply_server_transition(e.get("to_phase", ""), e.get("reason", ""))
+                continue
             if e.get("type") != "dair_call":
                 continue
             self._apply_dair_transition(
@@ -727,6 +902,7 @@ class ExecutionLog:
             # so every entry from session start should be stamped with a phase.
             # The first dair_assess will reconcile if the agent's declared
             # current_phase differs.
+            self._dair_seen = False
             self._current_phase = "Triage"
             self._phase_stack = [{
                 "phase": "Triage",
@@ -897,18 +1073,7 @@ class ExecutionLog:
         if not self._path:
             return
 
-        # Acquire the shared lock with the hook. Best-effort: if we can't
-        # open the lock file (cache dir missing, etc.) skip the lock and
-        # accept the small race window rather than dropping the flush.
-        lock_fp = None
-        try:
-            os.makedirs(os.path.dirname(_TRACE_LOCK_FILE), exist_ok=True)
-            lock_fp = open(_TRACE_LOCK_FILE, "w")
-            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            lock_fp = None
-
-        try:
+        with _hook_flock():
             # 1) Read what's currently on disk and pull out hook entries that
             # the MCP server doesn't own.
             disk_entries: list[dict] = []
@@ -957,8 +1122,7 @@ class ExecutionLog:
             our_ids = {e.get("call_id") for e in self._entries}
             hook_entries = [
                 e for e in disk_entries
-                if (e.get("_source_tool_use_id") or e.get("_source_uuid"))
-                and e.get("call_id") not in our_ids
+                if e.get("call_id") not in our_ids
             ]
 
             # 2) Merge: our in-memory entries + hook entries on disk we don't
@@ -1009,14 +1173,6 @@ class ExecutionLog:
                 # (record_*, _log_tool, middleware) can surface a clear
                 # ToolError instead of silently losing the entry.
                 raise
-        finally:
-            if lock_fp is not None:
-                try:
-                    fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-                lock_fp.close()
-
     # ── Record methods ────────────────────────────────────────────────────────
 
     def _require_configured(self, kind: str) -> None:
@@ -1029,6 +1185,17 @@ class ExecutionLog:
                 f"misc.start_execution_log(case_id, output_path) at the start "
                 f"of the investigation before any forensic tools."
             )
+
+    def record_run_profile(self, code_identity: str) -> int:
+        """Which server code produced this trace (commit, dirty flag, digest of
+        the loaded core/ + tools/). One entry per start_execution_log."""
+        with self._lock:
+            if self._path is None:
+                return 0
+            cid = self._next_id()
+            self._append_entry({"call_id": cid, "type": "run_profile", "ts": _utcnow(),
+                                "code_identity": code_identity})
+            return cid
 
     def record_system_error(
         self,
@@ -1106,11 +1273,17 @@ class ExecutionLog:
         reason_call_id: int,
         requests: list[dict],
         input_call_ids: list[int] | None = None,
+        results: list[str] | None = None,
     ) -> int:
         """One entry per EVIDENCE_REQUEST round: what the reviewer asked for and
         what came back (call_id, query, columns, file, rows_returned,
         total_rows, status). This is the grounding record behind a verdict —
         "CHALLENGED after inspecting the 4720 rows" vs "on a 600-char excerpt".
+
+        `results[i]` is the text returned to the reviewer for `requests[i]`.
+        It is persisted as a sidecar (`.tool_output/fetch-<cid>-<n>.txt`,
+        `result_path` on the request) with a short inline `result_excerpt`,
+        so the entry stays small and the dashboard can show the exact rows.
         Fail-open: never breaks a reviewer call."""
         try:
             with self._lock:
@@ -1132,6 +1305,21 @@ class ExecutionLog:
                         for r in (requests or []) if isinstance(r, dict)
                     ],
                 }
+                texts = list(results or [])
+                for i, req in enumerate(entry["requests"]):
+                    text = texts[i] if i < len(texts) else ""
+                    if not isinstance(text, str) or not text:
+                        continue
+                    req["result_excerpt"] = text[:FETCH_RESULT_EXCERPT_CHARS]
+                    req["result_chars"] = len(text)
+                    path, partial, err = self._write_sidecar_text(
+                        f"fetch-{cid}-{i + 1}.txt", text)
+                    if path:
+                        req["result_path"] = path
+                        if partial:
+                            req["result_partial"] = True
+                    elif err:
+                        req["result_sidecar_error"] = err
                 if input_call_ids:
                     entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
                 elif self._last_dair_cid:
@@ -1176,6 +1364,33 @@ class ExecutionLog:
                 entry["note"] = str(note)[:500]
             if window:
                 entry["window"] = dict(window)
+            if input_call_ids:
+                entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
+            elif self._last_dair_cid:
+                entry["input_call_ids"] = [self._last_dair_cid]
+            self._append_entry(entry)
+            return cid
+
+    def record_ioc(self, ioc_type: str, value: str, normalized: str, status: str,
+                   techniques: list[str], evidence_call_ids: list[int], note: str = "",
+                   input_call_ids: list[int] | None = None,
+                   aliases: list[str] | None = None) -> int:
+        """A typed indicator of compromise (`ioc`). Validated in the MCP tool;
+        repeated records of the same (type, normalized value) merge in
+        core.iocs.ioc_state."""
+        with self._lock:
+            self._auto_recover()
+            self._require_configured(f"ioc: {ioc_type}:{value}")
+            cid = self._next_id()
+            entry: dict = {"call_id": cid, "type": "ioc", "ts": _utcnow(),
+                           "ioc_type": ioc_type, "value": str(value)[:500],
+                           "normalized": str(normalized)[:500], "status": status,
+                           "techniques": list(techniques or []),
+                           "evidence_call_ids": sorted({int(c) for c in evidence_call_ids if c})}
+            if note:
+                entry["note"] = str(note)[:500]
+            if aliases:
+                entry["aliases"] = [str(a)[:200] for a in aliases if str(a).strip()][:20]
             if input_call_ids:
                 entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
             elif self._last_dair_cid:
@@ -1284,6 +1499,9 @@ class ExecutionLog:
                 "elapsed_seconds": elapsed_seconds,
                 "stderr": stderr[:512] if stderr else "",
             }
+            _mcp_tool = current_mcp_tool.get()
+            if _mcp_tool:
+                entry["mcp_tool"] = _mcp_tool
             if timed_out:
                 entry["timed_out"] = True
             if stdout_excerpt:
@@ -1296,7 +1514,10 @@ class ExecutionLog:
                 entry["stdout_chars"] = len(stdout_full)
                 entry["stdout_lines"] = (stdout_full.count("\n") + (
                     0 if stdout_full.endswith("\n") else 1)) if stdout_full else 0
-                if len(stdout_full) > len(entry.get("stdout_excerpt") or ""):
+                # Always kept: .tool_output/<cid>.txt is the one predictable place
+                # a call's output lives. Short outputs used to be excerpt-only and
+                # every read of them failed "file not found" (2026-09-23 runs).
+                if stdout_full:
                     self._write_stdout_sidecar(cid, stdout_full, entry)
             if output_path:
                 entry["output_path"] = str(output_path)
@@ -1331,20 +1552,33 @@ class ExecutionLog:
         write and the filename is unique per cid, so the _flush re-entrancy
         hazard does not apply. Never raises: a failed sidecar is recorded on
         the entry (`stdout_sidecar_error`) and the entry is still written."""
+        final, partial, err = self._write_sidecar_text(f"{cid}.txt", text)
+        if final:
+            entry["stdout_path"] = final
+            if partial:
+                entry["stdout_partial"] = True
+        elif err:
+            _warn(f"stdout sidecar for call {cid} failed: {err}")
+            entry["stdout_sidecar_error"] = err
+
+    def _write_sidecar_text(self, name: str, text: str) -> tuple[str | None, bool, str]:
+        """Atomically write `text` to `.tool_output/<name>` (capped at
+        STDOUT_SIDECAR_CAP). Returns (path, partial, error); never raises."""
         try:
             from core.paths import STDOUT_SIDECAR_CAP
             d = self.stdout_sidecar_dir()
             if not d:
-                return
+                return None, False, ""
             os.makedirs(d, exist_ok=True)
             partial = len(text) > STDOUT_SIDECAR_CAP
             body = text[:STDOUT_SIDECAR_CAP]
             import tempfile
-            fd, tmp = tempfile.mkstemp(prefix=f".{cid}-", suffix=".tmp", dir=d)
+            stem = os.path.splitext(name)[0]
+            fd, tmp = tempfile.mkstemp(prefix=f".{stem}-", suffix=".tmp", dir=d)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
                     fh.write(body)
-                final = os.path.join(d, f"{cid}.txt")
+                final = os.path.join(d, name)
                 os.replace(tmp, final)
             except Exception:
                 try:
@@ -1352,12 +1586,9 @@ class ExecutionLog:
                 except OSError:
                     pass
                 raise
-            entry["stdout_path"] = final
-            if partial:
-                entry["stdout_partial"] = True
+            return final, partial, ""
         except Exception as e:
-            _warn(f"stdout sidecar for call {cid} failed: {e}")
-            entry["stdout_sidecar_error"] = str(e)[:200]
+            return None, False, str(e)[:200]
 
     def record_reason_call(
         self,
@@ -1583,6 +1814,7 @@ class ExecutionLog:
         observed_principals: list[dict] | None = None,
         observed_hosts: list[str] | None = None,
         case_question: str = "",
+        extra: dict | None = None,
     ) -> int:
         with self._lock:
             self._auto_recover()
@@ -1641,6 +1873,11 @@ class ExecutionLog:
                 entry["observed_hosts"] = [str(h) for h in observed_hosts if str(h).strip()]
             if case_question:
                 entry["case_question"] = str(case_question).strip()
+            for k, v in (extra or {}).items():
+                # Server-computed audit fields (evidence_kinds,
+                # server_filtered_tools, …) — never overwrite a core field.
+                if k not in entry and v not in (None, [], {}, ""):
+                    entry[k] = v
             self._append_entry(entry)
             self._last_dair_cid = cid
             return cid
@@ -1669,12 +1906,23 @@ class ExecutionLog:
         the final tier. Used to re-tier a finding upward once new evidence earns
         a SUPPORTED evaluate.
         """
-        with self._lock:
+        with self.transaction():
             self._auto_recover()
             self._require_configured(f"finding: {description[:60]}")
+            from core.findings import validate_revision
+            parent = validate_revision(self._entries, supersedes, claim)
             cid = self._next_id()
+            root, depth = parent, 1
+            by_id = {e['call_id']: e for e in self._entries if e.get('type') == 'finding'}
+            visited = set()
+            while root and root.get('supersedes') in by_id and root['call_id'] not in visited:
+                visited.add(root['call_id'])
+                root = by_id[root['supersedes']]
+                depth += 1
             entry: dict = {
                 "call_id": cid,
+                "finding_id": (parent.get("finding_id") or f"F-{root['call_id']}") if parent else f"F-{cid}",
+                "revision": int(parent.get("revision", depth)) + 1 if parent else 1,
                 "type": "finding",
                 "ts": _utcnow(),
                 "description": description,

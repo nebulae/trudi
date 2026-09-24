@@ -10,3 +10,4 @@ flare-floss>=3.0.0     # obfuscated/stacked string extraction
 
 # Office document forensics (phishing initial access)
 oletools>=0.60         # olevba, mraptor — Office macro detection
+

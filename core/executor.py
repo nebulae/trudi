@@ -5,7 +5,7 @@ import subprocess
 import shlex
 import time
 import asyncio
-from typing import Any
+from typing import Any, Callable
 from .paths import (OUTPUT_CAP, MAX_TOOL_OUTPUT_LINES, STDOUT_SIDECAR_CAP,
                     assert_output_safe, DEFAULT_TIMEOUT, VOL_TIMEOUT)
 
@@ -112,9 +112,16 @@ def run(
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
     success_codes: frozenset[int] | None = None,
     exit_meanings: dict[int, str] | None = None,
+    classify: Callable[[dict, str, str], None] | None = None,
 ) -> dict[str, Any]:
     """
     Execute a forensic tool command safely.
+
+    classify: optional ``(result, full_stdout, raw_stderr) -> None`` hook run
+    after the exit policy and BEFORE the trace entry is written, for binaries
+    whose exit code alone misstates the outcome (ewfverify exits 1 on a
+    completed verification that found a mismatch; a dotnet tool can crash
+    with exit 0). It may set ``success`` / ``exit_meaning`` / typed fields.
 
     success_codes / exit_meanings: the wrapper's exit-code policy (see
     tools/_exit_codes.py) for binaries whose non-zero exit is a result
@@ -180,6 +187,11 @@ def run(
 
         result["stdout"] = stdout
         result["stderr"], result["progress_lines"] = _parse_stderr(stderr_raw)
+        if classify is not None:
+            try:
+                classify(result, result["_stdout_full"], stderr_raw)
+            except Exception as e:  # a parser bug must not lose the run
+                result["classify_error"] = f"{type(e).__name__}: {e}"
 
     except subprocess.TimeoutExpired:
         result["stderr"] = f"Command timed out after {timeout}s: {' '.join(cmd)}"
@@ -240,6 +252,10 @@ async def run_with_progress(
         )
 
         async def _drain_stderr() -> None:
+            # `ctx` is cleared below once progress reporting fails; without
+            # nonlocal that assignment made it local here, so the first stderr
+            # line raised UnboundLocalError and every vol.* call failed.
+            nonlocal ctx
             # Read in chunks and split on \r or \n — Volatility writes progress
             # with \r (carriage return), not \n, so line-based iteration misses them.
             buf = b""
@@ -262,6 +278,9 @@ async def run_with_progress(
                         try:
                             await ctx.report_progress(elapsed, float(timeout), line[:120])
                         except Exception as _progress_err:
+                            # Once the request has gone (a background job outlives
+                            # it) every later report fails: log once, then stop.
+                            ctx = None
                             # Don't let progress-reporting bugs interrupt the
                             # tool run, but surface them in the trace so
                             # they're not invisible.
@@ -338,10 +357,11 @@ def run_dotnet(
     *,
     timeout: int = DEFAULT_TIMEOUT,
     output_dir: str | None = None,
+    classify: Callable[[dict, str, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run an EZ Tools .NET binary via dotnet runtime."""
     cmd = ["dotnet", dll_path] + args
-    return run(cmd, timeout=timeout, output_dir=output_dir)
+    return run(cmd, timeout=timeout, output_dir=output_dir, classify=classify)
 
 
 def run_with_output_file(

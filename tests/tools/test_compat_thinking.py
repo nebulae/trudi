@@ -305,15 +305,15 @@ class TestThinkingBudget:
         assert http.call_count == 1
         assert _sent_max_tokens(http) == MAX_TOKENS_HYPOTHESIZE
 
-    def test_truncated_answer_is_flagged_not_failed(self, trace_log):
+    def test_truncated_answer_fails_after_one_format_repair(self, trace_log):
         from tools.reasoning import reason_hypothesize
         http = MagicMock(return_value=_resp(content="Partial answer that hit the cap",
                                             finish_reason="length"))
         with patch("httpx.post", http):
             r = reason_hypothesize("who sent the mail?")
-        assert r["success"] is True
+        assert r["success"] is False
         assert r["truncated"] is True
-        assert http.call_count == 1
+        assert http.call_count == 2
 
 
 # ── Inline <think> (server without a reasoning parser) ───────────────────────
@@ -598,6 +598,29 @@ class TestPerToolThinking:
         assert "chat_template_kwargs" not in body
         assert body["messages"][1]["content"].endswith("/no_think")
 
+    def test_mode_effort_ollama(self, trace_log):
+        """`effort` sends reasoning={"effort":"none"} (the only switch Ollama
+        honours) and neither of the Qwen switches."""
+        import tools.reasoning as R
+        from tools.reasoning import reason_cite_check
+        http = MagicMock(return_value=_resp(content="ALL_CITED"))
+        with patch.object(R, "COMPAT_NO_THINK_MODE", "effort"), patch("httpx.post", http):
+            reason_cite_check("finding text", "evidence text")
+        body = http.call_args[1]["json"]
+        assert body["reasoning"] == {"effort": "none"}
+        assert "chat_template_kwargs" not in body
+        assert not body["messages"][1]["content"].endswith("/no_think")
+
+    def test_mode_effort_not_sent_on_thinking_surface(self, trace_log):
+        """A thinking surface (hypothesize) must not carry the effort=none switch."""
+        import tools.reasoning as R
+        from tools.reasoning import reason_hypothesize
+        http = MagicMock(return_value=_resp(content="CONCLUSION: x"))
+        with patch.object(R, "COMPAT_NO_THINK_MODE", "effort"), patch("httpx.post", http):
+            reason_hypothesize("observation text")
+        body = http.call_args[1]["json"]
+        assert "reasoning" not in body
+
     def test_kwargs_merge_with_extra_body(self, trace_log):
         import tools.reasoning as R
         from tools.reasoning import reason_cite_check
@@ -663,7 +686,8 @@ class TestDairCompat:
         assert r["success"] is False
         assert "finish_reason=length" in r["error"]
         trace_log["abandoned"].assert_called_once()
-        logged = trace_log["dair_call"].call_args[1]
+        trace_log["dair_call"].assert_not_called()
+        logged = trace_log["reason_call"].call_args[1]
         assert "finish_reason=length" in logged["error"]
         assert logged["backend_meta"]["attempts"] == 2
         assert logged["output_tokens"] == 2048

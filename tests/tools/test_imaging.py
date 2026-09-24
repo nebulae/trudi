@@ -15,6 +15,51 @@ class TestVshadow:
         vshadow_mount("/dev/sda1", str(tmp_path / "vss"))
         assert "vshadowmount" in mock_run.call_args[0][0]
 
+    def test_vshadow_mount_probes_store_first(self, mock_run, tmp_path):
+        from tools.imaging import vshadow_mount
+        vshadow_mount("/dev/sda1", str(tmp_path / "vss"))
+        first, last = mock_run.call_args_list[0][0][0], mock_run.call_args_list[-1][0][0]
+        assert first[0] == "vshadowinfo"
+        assert last[0] == "vshadowmount"
+
+    def test_vshadow_mount_offset_and_allow_other(self, mock_run, tmp_path):
+        """A whole-disk image needs -o <bytes>; the FUSE mount needs allow_other
+        or every unprivileged follow-up (fls/fsstat/ls) gets Permission denied."""
+        from tools.imaging import vshadow_mount
+        r = vshadow_mount("/mnt/ewf_pc/ewf1", str(tmp_path / "vss"), offset=105906176)
+        info_cmd = mock_run.call_args_list[0][0][0]
+        mount_cmd = mock_run.call_args_list[-1][0][0]
+        assert info_cmd[:3] == ["vshadowinfo", "-o", "105906176"]
+        assert mount_cmd[:5] == ["vshadowmount", "-o", "105906176", "-X", "allow_other"]
+        assert mount_cmd[-2:] == ["/mnt/ewf_pc/ewf1", str(tmp_path / "vss")]
+        assert r["offset"] == 105906176 and r["allow_other"] is True
+
+    def test_vshadow_mount_no_offset_no_allow_other(self, mock_run, tmp_path):
+        from tools.imaging import vshadow_mount
+        vshadow_mount("/dev/sda1", str(tmp_path / "vss"), allow_other=False)
+        mount_cmd = mock_run.call_args_list[-1][0][0]
+        assert "-o" not in mount_cmd and "-X" not in mount_cmd
+
+    def test_vshadow_mount_refuses_silent_empty_mount(self, run_ok, tmp_path):
+        """vshadowinfo reporting no store must FAIL the call with an offset hint —
+        never leave an empty FUSE dir that looks mounted (cfreds-deepseek 2026-09-12)."""
+        from tools.imaging import vshadow_mount
+        no_store = {**run_ok, "stdout": "vshadowinfo 20240229\n\nNo Volume Shadow Snapshots found.\n"}
+        with patch("tools.imaging.run", return_value=no_store) as m:
+            r = vshadow_mount("/mnt/ewf_pc/ewf1", str(tmp_path / "vss"))
+        assert r["success"] is False
+        assert r["store_count"] == 0
+        assert "offset=" in r["error"]
+        assert all(c[0][0][0] != "vshadowmount" for c in m.call_args_list)
+
+    def test_vshadow_mount_counts_stores(self, run_ok, tmp_path):
+        from tools.imaging import vshadow_mount
+        two = {**run_ok, "stdout": "Number of stores:\t2\n\nStore: 1\n\tCreation time: x\n\nStore: 2\n\tCreation time: y\n"}
+        with patch("tools.imaging.run", return_value=two):
+            r = vshadow_mount("/dev/sda1", str(tmp_path / "vss"))
+        assert r["store_count"] == 2
+        assert r["shadow_paths"] == [f"{tmp_path / 'vss'}/vss1", f"{tmp_path / 'vss'}/vss2"]
+
     def test_vshadow_list(self, mock_run, tmp_path):
         from tools.imaging import vshadow_list
         vshadow_list(str(tmp_path))

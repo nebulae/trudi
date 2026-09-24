@@ -57,10 +57,10 @@ case opened
     ├─ reason.plan                         ← prioritized Triage plan
     │
     └─ DAIR loop ── repeats until next_phase = Report ───────────────┐
-         ├─ dair.dair_assess              ← phase decision + priority_tools work order
+         ├─ dair.assess              ← phase decision + priority_tools work order
          ├─ [tool batch — disk, memory, artifacts, network, …]       │  (+ optional curiosity probes)
          │      └─ reason.hypothesize     ← per suspicious artifact   │
-         └─ dair.dair_assess (results) ──────────────────────────────┘
+         └─ dair.assess (results) ──────────────────────────────┘
     │
     (before any CONFIRMED/LIKELY finding)
     ├─ reason.evaluate_finding / confidence_score / cite_check
@@ -239,6 +239,27 @@ once at double the budget (capped at the ceiling). Chain-of-thought in `reasonin
 never promoted to the answer. Failed calls record their cause on the `reason_call` / `dair_call`
 entry plus a `call_abandoned` entry. Set `TRUDI_COMPAT_THINKING_BUDGET=0` for non-thinking chat
 models (e.g. GPT-class) to use the legacy single-attempt path.
+
+**Ollama (local daemon or Ollama Cloud)** — Ollama's OpenAI-compatible endpoint works with the
+same `openai-compat` backend, with two Ollama-specific points:
+
+```bash
+REASON_BACKEND=openai-compat
+REASON_URL=http://localhost:11434    # the daemon (no /v1 suffix), or https://ollama.com + REASON_API_KEY for Ollama Cloud direct
+REASON_MODEL=deepseek-v4-flash:cloud # a `:cloud` tag is proxied to ollama.com by a signed-in daemon (`ollama signin`)
+DAIR_BACKEND=openai-compat
+DAIR_URL=http://localhost:11434
+DAIR_MODEL=deepseek-v4-flash:cloud
+TRUDI_COMPAT_NO_THINK_MODE=effort    # REQUIRED — see below
+```
+
+Ollama ignores both Qwen no-think switches (`chat_template_kwargs.enable_thinking` and `/no_think`),
+so under the default mode DAIR and the mechanical checks think anyway and can burn their entire
+budget on chain-of-thought (`finish_reason=length`, empty answer, no retry). The `effort` mode sends
+`reasoning: {"effort": "none"}` instead, which Ollama honours. Pin `REASON_MODEL` / `DAIR_MODEL`:
+a daemon usually serves several models and auto-discovery takes the first one. From WSL, a
+Windows-side daemon must bind all interfaces (`OLLAMA_HOST=0.0.0.0:11434`) and is reached at the
+WSL default gateway (`ip route | awk '/default/ {print $3}'`) unless WSL networking is mirrored.
 
 ---
 

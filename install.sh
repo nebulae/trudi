@@ -160,6 +160,27 @@ else
 fi
 
 
+# ── 1cd. trudi umbrella command ──────────────────────────────────────────────
+
+step "Installing trudi umbrella command"
+
+TRUDI_BIN_SRC="$TRUDI_DIR/bin/trudi"
+TRUDI_BIN_DEST="/usr/local/bin/trudi"
+
+if [ -f "$TRUDI_BIN_SRC" ]; then
+    if [ -L "$TRUDI_BIN_DEST" ] || [ -f "$TRUDI_BIN_DEST" ]; then
+        ok "trudi already installed at $TRUDI_BIN_DEST"
+    else
+        sudo install -m 0755 "$TRUDI_BIN_SRC" "$TRUDI_BIN_DEST" 2>/dev/null \
+            && ok "Installed trudi → $TRUDI_BIN_DEST" \
+            || warn "Could not install $TRUDI_BIN_DEST (sudo needed); use $TRUDI_BIN_SRC directly"
+    fi
+    echo "    Agent mode:       cd <case dir> && trudi --mode agent"
+    echo "    Pilot mode:       cd <case dir> && trudi --mode pilot"
+else
+    warn "trudi wrapper missing at $TRUDI_BIN_SRC"
+fi
+
 # ── 1d. MITRE ATT&CK reference table ─────────────────────────────────────────
 
 step "Installing MITRE ATT&CK reference table"
@@ -254,6 +275,22 @@ warn "Installing Python dependencies — this can take several minutes (flare-ca
 "$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements.txt"
 "$VENV_DIR/bin/pip" install -r "$TRUDI_DIR/requirements-dev.txt"
 ok "Dependencies installed (fastmcp, httpx, anthropic, yara-python, flare-capa, flare-floss, oletools, pytest)"
+
+# vera (optional — pilot mode's record + UI) goes into the SAME venv the
+# bin/trudi launcher uses. Library needs >=3.10; vera's own CLI needs
+# python3.12 (PEP 701 f-strings) — the pilot mirror works either way.
+if [ -d "$HOME/vera" ]; then
+    if "$VENV_DIR/bin/python3" -c "import vera" 2>/dev/null; then
+        ok "vera importable in venv (pilot mirror available)"
+    else
+        "$VENV_DIR/bin/pip" install --quiet -e "$HOME/vera" \
+            && ok "Installed vera (editable) from ~/vera into venv" \
+            || warn "vera present at ~/vera but pip install failed"
+    fi
+else
+    echo "    vera not found at ~/vera — pilot mode runs without the .vera mirror."
+    echo "    To enable: git clone https://github.com/nebulae/vera ~/vera && rerun install.sh"
+fi
 
 # ── 4. Environment file ───────────────────────────────────────────────────────
 

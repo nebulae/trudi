@@ -24,34 +24,41 @@ DAIR_GATE_ALLOWLIST = frozenset({
     # Typed dispositions are bookkeeping, not evidence: legal in Report, where
     # pre_report_check surfaces the leads/sources/tools that need settling.
     "misc_record_disposition", "record_disposition",
+    "misc_record_ioc", "record_ioc", "misc_list_iocs", "list_iocs",
     "misc_serve_dashboard",
     # Phase director itself
     "dair_assess",
-    "dair_dair_assess",
     # Adversarial-review + scoring META tools (they reason ABOUT findings, they
     # don't execute forensics), exempt so they never require a fresh dair_assess.
     # record_finding still carries the dair_required gate, keeping the
-    # investigation DAIR-directed. Bare and namespace-doubled forms both listed.
-    "reason_plan", "reason_reason_plan",
-    "reason_hypothesize", "reason_reason_hypothesize",
-    "reason_evaluate_finding", "reason_reason_evaluate_finding",
-    "reason_confidence_score", "reason_reason_confidence_score",
-    "reason_cite_check", "reason_reason_cite_check",
-    "reason_audit_findings", "reason_reason_audit_findings",
-    "reason_synthesize", "reason_reason_synthesize",
-    "reason_pre_report_check", "reason_reason_pre_report_check",
-    "accuracy_compare", "accuracy_accuracy_compare",
-    "accuracy_export_report", "accuracy_accuracy_export_report",
-    "correlate_mitre_validate", "correlate_correlate_mitre_validate",
+    # investigation DAIR-directed. Wire names are single-namespace since the
+    # mount-time dedup (core/normalize_names.py).
+    "reason_plan",
+    "reason_hypothesize",
+    "reason_evaluate_finding",
+    "reason_confidence_score",
+    "reason_cite_check",
+    "reason_audit_findings",
+    # Task→command drafting and free-form advice are assistance, not
+    # forensics — usable any time (whatever gets run passes every gate).
+    "reason_draft_command",
+    "reason_advise",
+    "reason_extract_case",
+    "reason_synthesize",
+    "reason_pre_report_check",
+    "reason_readiness_status",
+    "misc_retract_finding",
+    "accuracy_compare",
+    "accuracy_export_report",
+    "correlate_mitre_validate",
     # Produced-output readers — they read parsed output only (never evidence),
     # so they are phase-free: legal in Report to ground citations while writing.
-    "read_output", "read_read_output",
-    "read_mail", "read_read_mail",
+    "read_output",
+    "read_mail",
     # Pre-flight reads that run before the first dair_assess
     "hash_verify_evidence_hash",
     "vol_symbol_check",
-    "vol_vol_symbol_check",
-    "ez_ez_recmd_hive",
+    "ez_recmd_hive",
     "strings_stat_file",
 })
 
@@ -101,7 +108,7 @@ _NUDGE_SKIP_SUFFIXES = ("job_status", "job_list")
 _FINDING_NOTICE_INTERVAL_S = 60.0   # advisory throttle, wall-clock (not a counter)
 
 _DAIR_CALL_SHAPE = (
-    "dair.dair_assess(tool_results_summary=\"<3-5 sentences: what this batch "
+    "dair.assess(tool_results_summary=\"<3-5 sentences: what this batch "
     "found>\", phase_stack='[]' (or the current stack), case_context=\"<case id "
     "+ confirmed IOCs>\", input_call_ids=[<recent cids>])"
 )
@@ -267,7 +274,7 @@ def _repeat_precheck(key: str, tool_name: str) -> str:
             f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", "
             f"category=..., act=..., scope=[...], linked_call_id=<the prior "
             f"call's cid>, input_call_ids=[...]) and run a DIFFERENT query, or "
-            f"call dair.dair_assess for the next work order."
+            f"call dair.assess for the next work order."
         )
     return ""
 
@@ -292,7 +299,7 @@ def _repeat_update(key: str, tool_name: str, payload: dict) -> str:
             f"result — re-running it cannot produce new evidence. If it is a "
             f"negative, record it once (misc.record_finding, "
             f"confidence=\"UNCONFIRMED\", claim_kind=\"negative\", with "
-            f"scope) and move to a DIFFERENT query, or call dair.dair_assess "
+            f"scope) and move to a DIFFERENT query, or call dair.assess "
             f"for the next work order."
         )
     except Exception:
@@ -330,8 +337,8 @@ def _note_poll_and_advise(payload: dict) -> str:
             f"other work — the carve is still running ({secs}s, {files} files) "
             f"and polling does not speed it up. Do OTHER analysis NOW (query "
             f"the http_session_inventory / ngrep patterns you have not tried, "
-            f"read.read_output on produced files, record findings, or call "
-            f"dair.dair_assess); poll job_status again only AFTER a real step. "
+            f"read.output on produced files, record findings, or call "
+            f"dair.assess); poll job_status again only AFTER a real step. "
             f"The finished result will be waiting."
         )
     except Exception:
@@ -357,6 +364,14 @@ from core.forensic_binaries import (  # noqa: F401
 )
 
 # ── Gate helpers ──────────────────────────────────────────────────────────────
+
+def _report_phase() -> bool:
+    try:
+        from core.execution_log import log
+        return (getattr(log, "_current_phase", "") or "") == "Report"
+    except Exception:
+        return False
+
 
 def _gate_decision() -> tuple[bool, str]:
     """Return (should_block, reason). Fail-open on gate errors, but log them."""
@@ -484,7 +499,7 @@ def _result_payload(result) -> dict | None:
 
 
 def _trace_success_baseline(tool_name: str, elapsed: float,
-                             entries_before: int | None, result=None) -> None:
+                             entries_before: int | None, result=None) -> int:
     """Write a baseline tool_call entry if the tool didn't self-log.
 
     Subprocess tools self-log via core.executor._log_tool. reason_*/dair_*
@@ -498,14 +513,37 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
     refusal must never read as a successful run in the audit trail.
     """
     if entries_before is None:
-        return
+        return 0
     try:
         from core.execution_log import log
-        if len(log._entries) == entries_before:
+        # Self-logged = the call wrote a real record. A `call_initiated`
+        # progress entry (long in-process tools like hash_directory write one
+        # up front) is not a completion record: counting it as self-logging
+        # left those tools with no tool_call at all — uncitable, and read as
+        # never-run by the work-order gate.
+        new_entries = log._entries[entries_before:]
+        self_logged = any(isinstance(e, dict) and e.get("type") != "call_initiated"
+                          for e in new_entries)
+        if self_logged:
+            # A self-logging wrapper that rebuilt its result dict dropped the
+            # id _log_tool stamped: hand back its own (last) tool_call id so
+            # _stamp_call_id can echo it — never another tool's entry.
+            own = [e for e in new_entries if isinstance(e, dict)
+                   and e.get("type") == "tool_call"
+                   and e.get("mcp_tool", tool_name) == tool_name]
+            return int(own[-1].get("call_id") or 0) if own else 0
+        if not self_logged:
             payload = _result_payload(result) or {}
             ok = payload.get("success", True) is not False
             err = "" if ok else str(payload.get("error") or "")[:512]
-            log.record_tool_call(
+            # A successful pure-Python tool's result IS its output: retain it
+            # so the call can be cited and its rows reviewed like any other.
+            try:
+                import json as _json
+                body = _json.dumps(payload, default=str) if ok and payload else ""
+            except Exception:
+                body = ""
+            return log.record_tool_call(
                 cmd=f"<py>:{tool_name}",
                 success=ok,
                 truncated=False,
@@ -515,10 +553,67 @@ def _trace_success_baseline(tool_name: str, elapsed: float,
                 elapsed_seconds=elapsed,
                 input_call_ids=_parent_cids(),
                 gate=str(payload.get("gate") or "") if not ok else "",
-            )
+                **({"stdout_full": body, "stdout_excerpt": body[:600]} if body else {}),
+            ) or 0
     except Exception as err:
         print(f"[TRUDI WARN] success-baseline log failed for {tool_name}: "
               f"{err!r}", file=sys.stderr)
+    return 0
+
+
+def _stamp_call_id(result, cid: int):
+    """Return the baseline call id to the agent, as self-logging tools do, so
+    the result can be cited. Never overwrites an id the tool set itself."""
+    if not cid:
+        return result
+    if isinstance(result, dict):
+        result.setdefault("_trudi_call_id", cid)
+        return result
+    sc = getattr(result, "structured_content", None)
+    if isinstance(sc, dict) and "_trudi_call_id" not in sc:
+        try:
+            return result.model_copy(update={"structured_content": {**sc, "_trudi_call_id": cid}})
+        except Exception:
+            return result
+    return result
+
+
+async def _run_as_job(jobs, mode: str, tool_name: str, args: dict, invoke):
+    """Run a long tool as an in-process background task. Returns ("done",
+    result) when it finishes within the inline wait (a short run stays a
+    normal call), else a job handle. The task is created while this call's
+    context (tool identity) is set, so it logs exactly as a synchronous run."""
+    started = {"flag": False}
+    job_id = {"id": None}
+
+    async def body():
+        async with jobs.slots():
+            started["flag"] = True
+            if job_id["id"]:
+                jobs.mark_state(job_id["id"], "running")
+            return await invoke(True)
+
+    task = asyncio.create_task(body())
+    wait = 0 if mode == "always" else jobs.INLINE_WAIT
+    if wait > 0:
+        await asyncio.wait({task}, timeout=wait)
+    if task.done():
+        return ("done", task.result())          # re-raises a ToolError as before
+    jid = jobs.register_task(tool_name, task, _arg_shapes(args))
+    job_id["id"] = jid
+    status = "running" if started["flag"] else "queued"
+    jobs.mark_state(jid, status)
+    handle = {"success": True, "status": status, "job_id": jid, "tool": tool_name,
+              "hint": (f"BACKGROUND JOB {jid} ({status}): {tool_name} is still running and "
+                       f"no longer blocks this turn. Continue with other work and poll "
+                       f"misc.job_status(job_id='{jid}'); the finished result carries the "
+                       f"citable _trudi_call_id. Up to {jobs.MAX_CONCURRENT} jobs run at once.")}
+    # Middleware must hand FastMCP a ToolResult, not a bare dict.
+    import json as _json
+    from fastmcp.tools.tool import ToolResult
+    from mcp.types import TextContent
+    return ToolResult(content=[TextContent(type="text", text=_json.dumps(handle))],
+                      structured_content=handle)
 
 
 # ── Middleware ────────────────────────────────────────────────────────────────
@@ -555,14 +650,29 @@ class NarrationMiddleware(Middleware):
                 _trace_narration_failure(e, str(note))
 
         # 2. DAIR gate
+        notices: list = []
         if tool_name not in DAIR_GATE_ALLOWLIST:
             should_block, reason = _gate_decision()
             # A CORRECTION of an existing finding (supersedes=<cid>) is
             # report-phase work — re-tiering, dropping an unprovable field —
             # and must not be refused in Report; only NEW findings are.
-            if (should_block and tool_name.endswith("record_finding")
+            if (should_block and tool_name.endswith(("record_finding", "submit_finding"))
                     and args.get("supersedes")):
                 should_block, reason = False, "finding correction (supersedes) allowed in Report"
+            if (should_block and _report_phase()
+                    and not tool_name.endswith(("record_finding", "submit_finding"))):
+                # Report work that needs evidence goes to Collect (above Report,
+                # so a DAIR pop resumes it) instead of a refusal plus a manual
+                # dair_assess round trip.
+                try:
+                    from core.execution_log import log
+                    log.record_phase_transition("Collect", "report_follow_up", trigger=tool_name)
+                    notices.append(("phase_transition",
+                                    f"Report -> Collect: {tool_name} is evidence work. Finish it, "
+                                    f"then dair_assess with stack_action='pop' to resume Report."))
+                    should_block = False
+                except Exception as _pt:
+                    print(f"[TRUDI WARN] report->collect transition failed: {_pt}", file=sys.stderr)
             if should_block:
                 # Record the block so a blocked-then-dropped tool is auditable.
                 try:
@@ -573,7 +683,6 @@ class NarrationMiddleware(Middleware):
                 raise ToolError(f"Tool {tool_name} blocked: {reason}.")
 
         # 2b. DAIR engagement nudge (allow → notice → block; see constants above)
-        notices: list = []
         repeat_key = None
         if tool_name not in DAIR_GATE_ALLOWLIST:
             if not (tool_name.startswith(_NUDGE_SKIP_PREFIXES)
@@ -614,26 +723,65 @@ class NarrationMiddleware(Middleware):
 
         start = time.perf_counter()
 
+        # Tool identity for the trace: record_tool_call stamps it as mcp_tool.
         try:
-            result = await call_next(context)
-        except ToolError:
-            raise
-        except asyncio.CancelledError:
-            _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
-            raise
-        except Exception as e:
-            _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
-            if _is_input_validation(e):
-                # A typed refusal shape, like the gates: name the fields so the
-                # agent fixes the kwarg instead of guessing from a 500.
-                raise ToolError(
-                    f"{tool_name} rejected its input (gate: input_validation): "
-                    f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
-                ) from e
-            raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
+            from core.execution_log import current_mcp_tool as _cur_tool
+            _tool_token = _cur_tool.set(tool_name)
+        except Exception:
+            _cur_tool, _tool_token = None, None
 
-        _trace_success_baseline(tool_name, round(time.perf_counter() - start, 2),
-                                entries_before, result)
+        async def _invoke(concurrent: bool):
+            try:
+                res = await call_next(context)
+            except ToolError:
+                raise
+            except asyncio.CancelledError:
+                _trace_cancelled(tool_name, round(time.perf_counter() - start, 2))
+                raise
+            except Exception as e:
+                _trace_exception(tool_name, e, round(time.perf_counter() - start, 2), args)
+                if _is_input_validation(e):
+                    # A typed refusal shape, like the gates: name the fields so the
+                    # agent fixes the kwarg instead of guessing from a 500.
+                    raise ToolError(
+                        f"{tool_name} rejected its input (gate: input_validation): "
+                        f"{str(e)[:600]} | args received: {_arg_shapes(args)}"
+                    ) from e
+                raise ToolError(f"{tool_name} raised {type(e).__name__}: {e}") from e
+            before = entries_before
+            if concurrent:
+                # Other calls append entries while a job runs, so trace growth
+                # cannot tell whether this tool logged itself: its own call id can.
+                payload = _result_payload(res) or {}
+                if payload.get("_trudi_call_id"):
+                    return res
+                try:
+                    from core.execution_log import log as _jl
+                    before = len(_jl._entries)
+                except Exception:
+                    before = None
+            return _stamp_call_id(res, _trace_success_baseline(
+                tool_name, round(time.perf_counter() - start, 2), before, res))
+
+        try:
+            from core import jobs as _jobs
+            mode = _jobs.background_mode(tool_name)
+        except Exception:
+            _jobs, mode = None, ""
+        try:
+            if not mode:
+                result = await _invoke(False)
+            else:
+                handle = await _run_as_job(_jobs, mode, tool_name, args, _invoke)
+                if not (isinstance(handle, tuple) and handle[0] == "done"):
+                    return handle                      # still running: a job handle
+                result = handle[1]
+        finally:
+            if _cur_tool is not None and _tool_token is not None:
+                try:
+                    _cur_tool.reset(_tool_token)
+                except Exception:
+                    pass
 
         # 4. Forensic-knowledge enrichment — adds interpretive context to the
         #    result (caveats, does_not_prove, field/exit-code meanings, generic

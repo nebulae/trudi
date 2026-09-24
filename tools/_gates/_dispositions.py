@@ -14,18 +14,27 @@ from __future__ import annotations
 from ._entities import norm_entity
 
 TARGET_KINDS = ("source", "tool", "challenge", "principal", "correspondent",
-                "device", "hypothesis", "host", "destruction_scope")
+                "device", "hypothesis", "host", "destruction_scope", "coverage")
 
 REASONS = ("absent_from_evidence", "inapplicable", "out_of_scope", "noise",
            "excluded", "not_a_principal", "controller_unknown",
            "evidence_unavailable", "ruled_out", "refuted", "undetermined",
-           "same_as")
+           "same_as", "verified", "tool_unavailable", "present_unparseable")
 
 # Which reasons make sense for which target.
 ALLOWED: dict[str, frozenset] = {
-    "source":            frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),
-    "tool":              frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),
-    "challenge":         frozenset({"absent_from_evidence", "inapplicable", "out_of_scope"}),
+    # present_unparseable: the source IS in the evidence but no available tool
+    # parses it — honest, and different from "absent".
+    "source":            frozenset({"absent_from_evidence", "inapplicable", "out_of_scope",
+                                    "present_unparseable"}),
+    # tool_unavailable: the tool failed because it is not installed / cannot
+    # run here — says nothing about the evidence.
+    "tool":              frozenset({"absent_from_evidence", "inapplicable", "out_of_scope",
+                                    "tool_unavailable"}),
+    # verified: the challenged claim was confirmed by a different tool than
+    # the challenge_method — cite the run that verified it.
+    "challenge":         frozenset({"absent_from_evidence", "inapplicable", "out_of_scope",
+                                    "verified"}),
     "principal":         frozenset({"excluded", "not_a_principal", "controller_unknown",
                                     "evidence_unavailable", "refuted", "out_of_scope",
                                     "same_as"}),
@@ -34,10 +43,14 @@ ALLOWED: dict[str, frozenset] = {
     "hypothesis":        frozenset({"refuted", "excluded", "evidence_unavailable"}),
     "host":              frozenset({"out_of_scope", "evidence_unavailable", "excluded"}),
     "destruction_scope": frozenset({"undetermined"}),
+    # "<technique>:<data component>" from the IOC coverage table (a warning, never a blocker).
+    "coverage":          frozenset({"absent_from_evidence", "inapplicable", "out_of_scope",
+                                    "present_unparseable"}),
 }
 
 # Reasons that settle a manifest source / tool / challenge without running it.
-SOURCE_WAIVER_REASONS_ALL = ("absent_from_evidence", "inapplicable", "out_of_scope")
+SOURCE_WAIVER_REASONS_ALL = ("absent_from_evidence", "inapplicable", "out_of_scope",
+                             "verified", "tool_unavailable", "present_unparseable")
 
 # Reasons that assert a fact about the evidence and therefore need it cited.
 EVIDENCE_REQUIRED = frozenset({"excluded", "ruled_out", "refuted", "not_a_principal",
@@ -46,6 +59,23 @@ EVIDENCE_REQUIRED = frozenset({"excluded", "ruled_out", "refuted", "not_a_princi
 # established principal (an alias, a registered-owner string, the account the
 # prime subject uses) — not a second actor. Cite the artifacts that tie them.
 # It is the honest vocabulary where "refuted" would be backwards.
+
+# (target_kind, reason) pairs that also assert a fact about the evidence.
+# "Absent from evidence" for a source or coverage row is a claim about what
+# the image holds (a 2026-09-23 run declared Telegram absent while its data
+# sat in the profile) — cite the listing / search that shows it absent.
+EVIDENCE_REQUIRED_FOR = frozenset({
+    ("source", "absent_from_evidence"), ("coverage", "absent_from_evidence"),
+    ("source", "present_unparseable"), ("coverage", "present_unparseable"),
+    ("challenge", "verified"),
+})
+
+
+def evidence_required(target_kind: str, reason: str) -> bool:
+    tk = (target_kind or "").strip().lower()
+    rs = (reason or "").strip().lower()
+    return rs in EVIDENCE_REQUIRED or (tk, rs) in EVIDENCE_REQUIRED_FOR
+
 
 # Reasons that PARK a principal (it stays unresolved but is honestly declared).
 PARKING = frozenset({"controller_unknown", "evidence_unavailable"})

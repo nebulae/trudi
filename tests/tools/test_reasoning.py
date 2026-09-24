@@ -296,7 +296,7 @@ class TestReasonSynthesize:
         from tools.reasoning import reason_synthesize
         l = _seed_report_phase(tmp_path)
         with patch("core.execution_log.log", l), \
-             patch("httpx.post", return_value=_http_resp("Gap: initial access unknown.")), \
+             patch("httpx.post", return_value=_http_resp("Gap: initial access unknown.\nBLOCKERS: []")), \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("1. Keylogger\n2. BITS exfil")
@@ -306,7 +306,7 @@ class TestReasonSynthesize:
         from tools.reasoning import reason_synthesize
         l = _seed_report_phase(tmp_path)
         with patch("core.execution_log.log", l), \
-             patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("httpx.post", return_value=_http_resp("ok\nBLOCKERS: []")) as m, \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             reason_synthesize("finding 1\nfinding 2", investigation_summary="ran psscan, netscan")
@@ -317,7 +317,7 @@ class TestReasonSynthesize:
         from tools.reasoning import reason_synthesize
         l = _seed_report_phase(tmp_path)
         with patch("core.execution_log.log", l), \
-             patch("httpx.post", return_value=_http_resp("ok")) as m, \
+             patch("httpx.post", return_value=_http_resp("ok\nBLOCKERS: []")) as m, \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             reason_synthesize("findings")
@@ -370,7 +370,7 @@ class TestSynthesizeGate:
         from tools.reasoning import reason_synthesize
         l = _seed_report_phase(tmp_path)
         with patch("core.execution_log.log", l), \
-             patch("httpx.post", return_value=_http_resp("ok")), \
+             patch("httpx.post", return_value=_http_resp("ok\nBLOCKERS: []")), \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("findings")
@@ -382,11 +382,11 @@ class TestSynthesizeGate:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST", str(tmp_path / "trace.json"))
-        l.record_dair_call("Triage", "", False, "", "", "stay", "")
-        l.record_dair_call("Collect", "", False, "", "", "stay", "")
-        l.record_dair_call("Report", "", False, "", "", "stay", "")
+        # the phase is the server's record of transitions, not the model's echo
+        l.record_dair_call("Triage", "", True, "Collect", "", "push", "")
+        l.record_dair_call("Collect", "", True, "Report", "", "push", "")
         with patch("core.execution_log.log", l), \
-             patch("httpx.post", return_value=_http_resp("ok")), \
+             patch("httpx.post", return_value=_http_resp("ok\nBLOCKERS: []")), \
              patch("tools.reasoning.REASON_URL", "http://localhost:8000"), \
              patch("tools.reasoning.REASON_BACKEND", "openai-compat"):
             r = reason_synthesize("findings")
@@ -660,7 +660,7 @@ class TestReasonPreReportCheck:
         # K-1 phase coverage: these tests exercise the OTHER pre-report checks;
         # give the trace a transited Collect/Analyze history so the (separately
         # tested) phase_coverage blocker stays out of the way.
-        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze")):
+        for cur, nxt in (("Triage", "Collect"), ("Collect", "Analyze"), ("Analyze", "Report")):
             l.record_dair_call(cur, "", True, nxt, "", "push", "")
         return l
 
@@ -754,7 +754,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example",
@@ -777,7 +777,7 @@ class TestReasonPreReportCheck:
         # subject WROTE TO (or roster/chat) block; inbound volume alone does not.
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
-        cid = configured_log.record_tool_call("read.read_mail -o /x/mail", True, False, 0, 0)
+        cid = configured_log.record_tool_call("read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid,
             observed_correspondents=["contact-a@ext.example", "handler-b@far.example",
@@ -805,7 +805,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid, observed_correspondents=["handler-b@far.example"],
             correspondents_partial=True)
@@ -818,13 +818,13 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid, observed_correspondents=["handler-b@far.example"],
             correspondents_partial=False)
         configured_log.record_finding(
             "handler correspondence assessed as an unrelated vendor thread",
-            "UNCONFIRMED", "read.read_mail",
+            "UNCONFIRMED", "read.mail",
             claim=_normc(claim_kind="negative", category="other", act="presence",
                          entities=["Handler-B@far.example"]))
         with patch("core.execution_log.log", configured_log):
@@ -835,7 +835,7 @@ class TestReasonPreReportCheck:
         from tools.reasoning import reason_pre_report_check
         self._recipient_trace(configured_log)
         cid = configured_log.record_tool_call(
-            "read.read_mail -o /x/mail", True, False, 0, 0)
+            "read.mail -o /x/mail", True, False, 0, 0)
         configured_log.annotate_tool_call(
             cid, observed_correspondents=["handler-b@far.example"],
             correspondents_partial=False)
@@ -1570,23 +1570,18 @@ class TestReasonAuditFindings:
 class TestPreReportCheckSurfacesAuditWarnings:
     """reason.pre_report_check folds audit_findings results into warnings."""
 
-    def test_warning_added_when_candidates(self, tmp_path):
+    def test_persisted_audit_warning_without_model_call(self, tmp_path):
         from core.execution_log import ExecutionLog
         from tools.reasoning import reason_pre_report_check
         inst = ExecutionLog()
         inst.configure("PRC-A1", str(tmp_path / "trace.json"))
-        # Minimal trace that passes the major blocking checks:
-        inst.record_dair_call("Triage", "", False, "", "", "stay", "")
-        inst.record_reason_call("reason_plan", True, "ok", {})
-        inst.record_reason_call("reason_hypothesize", True, "ok", {})
-        inst.record_reason_call("reason_synthesize", True, "ok", {})
-        # A narration that the audit will flag
-        inst.record_agent_message("ngentask.exe is CS beacon")
-        with patch("core.execution_log.log", inst), _compat_ctx(_AUDIT_TWO_CANDIDATES):
+        inst.record_reason_call("reason_audit_findings", True, "audit", {},
+            extra={"audit_result": {"candidates": [{"narration_call_id": 1}],
+                                    "summary": {"candidate_count": 1}}})
+        with patch("core.execution_log.log", inst), patch("tools.reasoning._ask") as ask:
             r = reason_pre_report_check()
-        # Audit count surfaces in warnings; we don't care about other warnings
-        assert any("aren't recorded as structured" in w for w in r["warnings"])
-        assert r["audit_summary"]["candidate_count"] == 2
+        ask.assert_not_called()
+        assert any("audit candidate" in w for w in r["warnings"])
 
 
 class TestPreReportStructuralIntegrity:
@@ -1599,7 +1594,8 @@ class TestPreReportStructuralIntegrity:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-STRUCT", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         l.record_reason_call("reason_hypothesize", True, "hyp", {})
@@ -1676,7 +1672,7 @@ class TestPreReportStructuralIntegrity:
         base_log.record_finding("research exfiltrated to buyer", "CONFIRMED", "ost",
                                 claim=_normc(claim_kind="positive", category="delivery", act="delivery",
                                              recipients=["buyer@evil.example"]))
-        base_log.record_tool_call("read.read_mail --output /x/mail", True, False, 0, 0)
+        base_log.record_tool_call("read.mail --output /x/mail", True, False, 0, 0)
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert not any("roster" in w.lower() for w in r["warnings"])
@@ -1693,7 +1689,8 @@ class TestPreReportHypothesisLedger:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-HYP", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         return l
@@ -1793,7 +1790,8 @@ class TestPreReportAttributionClosure:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-CLOSURE", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         l.record_reason_call("reason_hypothesize", True, "hyp", {})
@@ -1960,7 +1958,8 @@ class TestPreReportHypothesisExhaustion:
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
         l.configure("TEST-EXHAUST", str(tmp_path / "trace.json"))
-        l.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        # pre_report_check runs in the server-recorded Report phase
+        l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_plan", True, "plan", {})
         l.record_reason_call("reason_synthesize", True, "ok", {})
         # J-3 relevance model: a principal only the REVIEWER listed is
@@ -2041,6 +2040,8 @@ class TestPreReportHypothesisExhaustion:
         base_log.record_finding("Guest logged on interactively", "SUSPECTED", "ez.evtxecmd",
                                 claim=_normc(claim_kind="positive", category="logon_auth", act="logon",
                                              entities=["Guest"]))
+        # a not-ready check returns the trace to Collect; DAIR brings it back
+        base_log.record_phase_transition("Report", "follow_up_done", trigger="test")
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert any("guest" in i for i in r["blocking_issues"])
@@ -2083,58 +2084,39 @@ class TestPreReportHypothesisExhaustion:
         ])
         assert kept == [] and len(tiers) == 3
 
-    def test_synthesize_depth_gate_and_typed_findings_block(self, base_log, monkeypatch):
-        # H-6: third synthesize without new evidence is refused; the reviewer
-        # is shown the RECORDED findings (typed tiers), not only the narrative.
+    def test_synthesize_cached_until_semantic_state_changes(self, base_log, monkeypatch):
         import tools.reasoning as R
-        seen = {}
-
-        def _fake_ask(system, user, **kw):
-            seen["user"] = user
-            return {"success": True, "conclusion": "ok", "blockers": ["Verification of X needed"],
-                    "_trudi_call_id": 0}
-        monkeypatch.setattr(R, "_ask", _fake_ask)
+        calls = []
+        def fake(system, user, **kw):
+            calls.append(user)
+            cid = base_log.record_reason_call("reason_synthesize", True, "ok", {}, blockers=[])
+            return {"success": True, "conclusion": "ok", "blockers": [], "_trudi_call_id": cid}
+        monkeypatch.setattr(R, "_ask", fake)
         base_log.record_dair_call("Report", "", False, "", "", "stay", "")
-        base_log.record_finding("defaultprinter created 2016-06-18", "LIKELY", "ez.evtxecmd",
-                                claim=_normc(claim_kind="positive", category="persistence",
-                                             act="account_creation", principal="defaultprinter"))
+        base_log.record_finding("account observed", "LIKELY", "ez.evtxecmd")
         with patch("core.execution_log.log", base_log):
-            r1 = R.reason_synthesize("F1 CONFIRMED: defaultprinter created")   # round 1
-            base_log.record_reason_call("reason_synthesize", True, "ok", {}, blockers=["Verification of X needed"])
-            r2 = R.reason_synthesize("F1 …")                                    # round 2 (logged above as #1)
-            base_log.record_reason_call("reason_synthesize", True, "ok", {}, blockers=["still"])
-            r3 = R.reason_synthesize("F1 …")                                    # round 3 → refused
-        assert r1["success"] is True and "RECORDED FINDINGS" in seen["user"]
-        assert "[LIKELY] cid" in seen["user"] and "positive|persistence|account_creation" in seen["user"]
-        assert r3["success"] is False and r3["gate"] == "synthesize_depth_limit"
-        assert any(e.get("trigger") == "synthesize_depth_gate" for e in base_log._entries
-                   if e.get("type") == "self_correction")
-        # New evidence resets the counter.
-        base_log.record_tool_call("dotnet EvtxECmd.dll -f Security.evtx", True, False, 0, 0)
-        with patch("core.execution_log.log", base_log):
-            r4 = R.reason_synthesize("F1 …")
-        assert r4["success"] is True
+            first = R.reason_synthesize("account observed")
+            second = R.reason_synthesize("same account")
+            assert first["success"] and second["cached"] and len(calls) == 1
+            assert "[LIKELY] cid" in calls[0]
+            # A tool call alone changes no claim: the recorded review still holds.
+            base_log.record_tool_call("new evidence", True, False, 0, 0)
+            assert R.reason_synthesize("account observed")["cached"] and len(calls) == 1
+            # A new finding is a changed claim: review again.
+            base_log.record_finding("second account observed", "LIKELY", "ez.evtxecmd")
+            assert R.reason_synthesize("account observed")["success"]
+            assert len(calls) == 2
 
-    def test_pre_report_demotes_synthesize_blockers_after_round_two(self, base_log):
-        # H-6 (c): round 2+ with no evidence in between → blockers become
-        # warnings stamped synthesize_blockers_unresolved; write_final_report
-        # appends them as 'Reviewer limitations'.
+    def test_pre_report_keeps_real_blockers_after_repeated_reviews(self, base_log):
         from tools.reasoning import reason_pre_report_check
-        # base_log already holds one synthesize; evidence work resets the round count.
-        base_log.record_tool_call("dotnet EvtxECmd.dll -f Security.evtx", True, False, 0, 0)
-        base_log.record_reason_call("reason_synthesize", True, "ok", {},
-                                    blockers=["Verification of the UserAssist entry is needed"])
+        for _ in range(3):
+            base_log.record_reason_call("reason_synthesize", True, "ok", {},
+                                        blockers=["Verification of the UserAssist entry is needed"])
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert any("unresolved BLOCKERS" in i for i in r["blocking_issues"])
-        base_log.record_reason_call("reason_synthesize", True, "ok", {},
-                                    blockers=["Verification of the UserAssist entry is needed"])
-        with patch("core.execution_log.log", base_log):
-            r = reason_pre_report_check()
-        assert not any("unresolved BLOCKERS" in i for i in r["blocking_issues"])
-        assert any("Reviewer limitations" in w for w in r["warnings"])
-        pre = [e for e in base_log._entries if e.get("tool") == "reason_pre_report_check"][-1]
-        assert pre["synthesize_blockers_unresolved"] == ["Verification of the UserAssist entry is needed"]
+        assert not r["ready_to_report"]
+        assert not r["synthesize_blockers_unresolved"]
 
     def test_synthesize_accepts_the_report_push(self, base_log, monkeypatch):
         # G-13: DAIR's transition INTO Report is the Report entry.
@@ -2146,7 +2128,7 @@ class TestPreReportHypothesisExhaustion:
         with patch("core.execution_log.log", base_log):
             r = R.reason_synthesize("F1 …")
         assert r["success"] is True and r["blockers"] == [] and r["tier_blockers_demoted"]
-        base_log.record_dair_call("Analyze", "", False, "", "", "stay", "")
+        base_log.record_phase_transition("Collect", "report_follow_up", trigger="test")
         with patch("core.execution_log.log", base_log):
             r = R.reason_synthesize("F1 …")
         assert r["success"] is False and "only callable in Report" in r["error"]
@@ -2185,6 +2167,7 @@ class TestPreReportHypothesisExhaustion:
             r = reason_pre_report_check()
         assert any("helpsvc" in i for i in r["blocking_issues"])        # park alone: still blocks
         base_log.record_disposition("source", "security_logon", "absent_from_evidence")
+        base_log.record_phase_transition("Report", "follow_up_done", trigger="test")
         with patch("core.execution_log.log", base_log):
             r = reason_pre_report_check()
         assert not any("helpsvc" in i for i in r["blocking_issues"])

@@ -255,6 +255,9 @@ def _parse_dair_assessment(raw: str) -> dict:
     text = re.sub(r"\s*//[^\n]*", "", match.group(1))
     try:
         parsed = json.loads(text)
+        if not isinstance(parsed, dict) or not all(k in parsed for k in (
+                'current_phase', 'stack_action', 'transition_recommended')):
+            return _EMPTY_ASSESSMENT.copy()
         return {**_EMPTY_ASSESSMENT, **parsed}
     except (json.JSONDecodeError, ValueError):
         return _EMPTY_ASSESSMENT.copy()
@@ -310,6 +313,7 @@ def _ask_claude(system: str, user: str, max_tokens: int = 2048) -> dict:
         return {
             "success": True,
             "raw": raw,
+            "truncated": getattr(resp, "stop_reason", None) == "max_tokens",
             "input_tokens": getattr(resp.usage, "input_tokens", 0),
             "output_tokens": getattr(resp.usage, "output_tokens", 0),
         }
@@ -350,6 +354,7 @@ def _ask_openai_compat(system: str, user: str, max_tokens: int = 2048) -> dict:
     return {
         "success": True,
         "raw": chat["text"],
+        "truncated": bool(chat["meta"].get("truncated")),
         "input_tokens": chat["prompt_tokens"],
         "output_tokens": chat["completion_tokens"],
         "backend_meta": chat["meta"],
@@ -373,9 +378,18 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
               server_override: dict | None = None,
               observed_principals: list[dict] | None = None,
               observed_hosts: list[str] | None = None,
-              case_question: str = "") -> int:
+              case_question: str = "",
+              raw_answer: str = "",
+              extra: dict | None = None) -> int:
     try:
         from core.execution_log import log
+        if error:
+            return log.record_reason_call("dair_assess", False, error, {},
+                                          input_tokens=input_tokens, output_tokens=output_tokens,
+                                          inputs=inputs, input_call_ids=input_call_ids,
+                                          error=error, backend_meta=backend_meta,
+                                          extra={"schema_error": parse_path == PARSE_NONE,
+                                                 **({"raw_answer": raw_answer} if raw_answer else {})})
         return log.record_dair_call(
             current_phase=assessment.get("current_phase", ""),
             phase_rationale=assessment.get("phase_rationale", ""),
@@ -401,6 +415,7 @@ def _log_dair(assessment: dict, input_tokens: int, output_tokens: int,
             observed_principals=observed_principals,
             observed_hosts=observed_hosts,
             case_question=case_question,
+            extra=extra,
         )
     except Exception as e:
         import sys
@@ -426,6 +441,20 @@ Nothing outside that list will be run.
 - Report phase only: priority_tools is empty; populate recommended_actions instead.
 - priority_tools is the complete work order — not a priority ranking. List every \
   tool needed to answer investigation_focus. The investigator runs them all.
+- List the WHOLE work order for the phase in ONE response. The server refuses to \
+  leave a phase while any tool prescribed in it is unrun and re-issues all of them, \
+  so a tool held back for a later round costs a full round trip. Never drip-feed \
+  one tool per round.
+
+EVIDENCE FIT: the user message states EVIDENCE AVAILABLE (the evidence kinds the \
+case holds). Never prescribe a tool — and never issue a verification challenge — \
+that needs a kind the case lacks: memory → vol.*, correlate.process_to_file, \
+correlate.network_to_process, yara.scan_memory_image; pcap → net.*; disk_image → \
+tsk.*, ewf.*, img.*; disk_image or triage → ez.*, af.*, EVTX / registry / Prefetch / \
+Amcache / $MFT / USN / SRUM / setupapi parsers; live → live.*. Never state that such \
+artifacts were collected, parsed or confirmed when the case cannot hold them, and \
+never mark a claim confirmed by a tool that has not run. The server drops any \
+prescription or challenge that needs a missing kind.
 
 CURIOSITY BUDGET (directives.curiosity_budget):
 priority_tools is a convergent work order; on its own it drives single-actor \
@@ -475,7 +504,7 @@ addresses the case question's key entities.
 KNOWNS-DRIVEN HUNTING: When case_context includes a reference set (suspect \
 list, asset inventory, allowlist, baseline, hash list), include \
 misc.knowns_pattern_generate followed by a knowns-IOC sweep \
-(net.ngrep_search / strings.strings_grep / yara.scan_strings against the \
+(net.ngrep_search / strings.grep / yara.scan_strings against the \
 returned pattern) in the FIRST Triage batch — before generic enumeration.
 
   Triage   — confirm the initial IOC/alert AND actively challenge your own findings \
@@ -507,9 +536,9 @@ You do not infer pivots from summary prose. When a returned candidate matters to
 case question, prescribe explicit evidence-gathering tools for it; never mutate the \
 phase stack merely because a candidate exists. \
 ALSO run anti-forensics detectors here when the relevant input artifacts exist: \
-af.af_timestomp_drift (after ez.mftecmd CSV), af.af_event_log_clear (after \
-ez.evtxecmd), af.af_sysmon_evasion (after ez.recmd_hive SYSTEM), af.af_usn_gaps \
-(after misc.usnparser_parse), af.af_prefetch_deletion (after ez.pecmd + \
+af.timestomp_drift (after ez.mftecmd CSV), af.event_log_clear (after \
+ez.evtxecmd), af.sysmon_evasion (after ez.recmd_hive SYSTEM), af.usn_gaps \
+(after misc.usnparser_parse), af.prefetch_deletion (after ez.pecmd + \
 ez.appcompatcacheparser/amcacheparser).
 
 INAPPLICABLE TOOL SUBSTITUTION: If a priority_tools entry names a tool that \
@@ -534,12 +563,12 @@ is a required Analyze step, not optional enrichment.
 LIVE ENDPOINT CASES: When case_context names a live endpoint (the agent will \
 mention 'live=true' or supply an endpoint_host like 'ubuntu-endpoint' in case \
 context), include live.* tools in priority_tools as appropriate:
-  Triage   — live.live_processes, live.live_network_connections, live.live_recent_logins
-  Collect  — live.live_persistence_audit, live.live_services, live.live_scheduled_tasks
-  Analyze  — live.live_process_details(pid) and live.live_open_files(pid) for \
-suspicious PIDs; live.live_event_log_tail(unit) for services of interest; \
-live.live_read_file for small config artifacts (max 64KB cap)
-  Scan     — live.live_yara_scan(rules_path, target_dir) for cross-host hunting
+  Triage   — live.processes, live.network_connections, live.recent_logins
+  Collect  — live.persistence_audit, live.services, live.scheduled_tasks
+  Analyze  — live.process_details(pid) and live.open_files(pid) for \
+suspicious PIDs; live.event_log_tail(unit) for services of interest; \
+live.read_file for small config artifacts (max 64KB cap)
+  Scan     — live.yara_scan(rules_path, target_dir) for cross-host hunting
 The live.* tools route through SSH with fixed argv (no remote shell parsing); \
 findings can use their _trudi_call_id as linked_call_id like any other tool.
   Scan     — SCOPING: pursue every newly-discovered IOC to depth. Scoping has \
@@ -567,7 +596,7 @@ or next_phase="Analyze" (whichever is the smallest phase that can gather or \
 reason over the missing artifact), and put the concrete missing tools in \
 directives.priority_tools. Only stay in Report for wording/citation cleanup when \
 no missing-evidence blocker remains. BEFORE reason.synthesize, call BOTH \
-coverage.coverage_report (TTP coverage checklist) AND attribution.attribute_actors \
+coverage.report (TTP coverage checklist) AND attribution.attribute_actors \
 (adversary attribution from observed T-IDs) so the final synthesis input has the \
 complete picture. When findings span multiple hosts, ALSO call \
 correlate.process_to_file and correlate.network_to_process (with no PID/IP/path \
@@ -583,6 +612,15 @@ they do not automatically add Triage frames.
   stack_action "push"  → transition to next_phase; new entry added to stack
   stack_action "pop"   → current sub-phase resolved; resume the phase beneath
   stack_action "stay"  → continue in current_phase (e.g. challenges still pending)
+Where to go when work remains: evidence that must still be gathered — from \
+Analyze, Scan or Report — is a push to Collect (pop back when done); new \
+reasoning over collected artifacts is Analyze. Push Triage from a later phase \
+ONLY when what would be triaged is new, and set triage_reason to one of: \
+new_evidence_item (another host, image or capture enters scope), \
+case_question_changed (the question itself changed, or a separate incident \
+emerged), premise_refuted (the detection that opened the case proved false). \
+A new account or identity on the same host is Analyze/Scan work, not Triage. \
+A Triage push without one of these reasons is redirected to Collect.
 
 VERIFICATION CHALLENGES (mandatory when current_phase == Triage):
 For every discrete claim in the tool results summary, emit a challenge entry:
@@ -618,57 +656,32 @@ Triage indefinitely — acceptable residual uncertainty is normal.
 
 
 OUTPUT FORMAT:
-Write your analysis first. Then output the structured blocks in this order:
+Return one RESULT object with schema_version=1 and assessment. The assessment contains:
+current_phase, phase_rationale, transition_recommended (boolean), next_phase,
+transition_rationale, stack_action (push/pop/stay), investigation_focus,
+verification_satisfied (boolean), verification_challenges (array of claim,
+challenge_method, verified true/false/null, confidence_impact, notes),
+recommended_actions, triage_reason (only when pushing Triage from a later
+phase: new_evidence_item | case_question_changed | premise_refuted), and
+directives (priority_tools, skip_tools, focus_pids, focus_paths, max_depth,
+next_hypothesis_triggers, curiosity_budget).
+Include each field once. Put concise analysis in phase_rationale. No separate challenge
+or directives blocks. Use only tools from the manifest. recommended_actions is for Report.
+""" + result_instruction('{"assessment": {"current_phase": "Triage", "phase_rationale": "...", '
+    '"transition_recommended": false, "next_phase": "", "transition_rationale": "", '
+    '"stack_action": "stay", "investigation_focus": "...", "verification_satisfied": false, '
+    '"verification_challenges": [], "recommended_actions": [], "directives": {"priority_tools": []}}}')
 
-If current_phase is Triage, output VERIFICATION_CHALLENGES first:
-VERIFICATION_CHALLENGES:
-[
-  {
-    "claim": "...",
-    "challenge_method": "strings.stat_file",
-    "verified": null,
-    "confidence_impact": "—",
-    "notes": ""
-  }
-]
+_DAIR_SYS_BASE = _DAIR_SYS
+_DAIR_SYS = _DAIR_SYS_BASE + "\n\n" + format_tool_manifest_for_prompt()
 
-Then always output DAIR_ASSESSMENT (no markdown bold, no code fences, no // comments):
-DAIR_ASSESSMENT:
-{
-  "current_phase": "Triage",
-  "phase_rationale": "...",
-  "transition_recommended": false,
-  "next_phase": "",
-  "transition_rationale": "",
-  "stack_action": "stay",
-  "investigation_focus": "...",
-  "verification_satisfied": false,
-  "verification_challenges": [],
-  "recommended_actions": [],
-  "directives": {
-    "priority_tools": [],
-    "skip_tools": [],
-    "focus_pids": [],
-    "focus_paths": [],
-    "max_depth": "",
-    "next_hypothesis_triggers": [],
-    "curiosity_budget": 0
-  }
-}
 
-verification_challenges in DAIR_ASSESSMENT must mirror VERIFICATION_CHALLENGES block \
-exactly when in Triage phase. recommended_actions is populated ONLY when \
-transitioning to Report — list specific Improve & Response actions for the IR team. \
-Tool names in directives must use TRUDI MCP format: namespace.tool and must \
-come from the Tool Capability Manifest below. \
-Remember: priority_tools is the investigator's complete work order for this batch. \
-Make it specific and executable — every entry will be run before you see results.\
-""" + result_instruction(
-    '{"assessment": { … the DAIR_ASSESSMENT object … }, "challenges": [ … the '
-    'VERIFICATION_CHALLENGES array (Triage only) … ], "directives": { … the DIRECTIVES object … }}'
-)
-
-_DAIR_SYS = _DAIR_SYS + "\n\n" + format_tool_manifest_for_prompt()
+def _dair_system(kinds) -> str:
+    """System prompt whose tool manifest lists only tools the case's evidence
+    can feed (the full manifest when the evidence inventory is undetermined)."""
+    if not kinds:
+        return _DAIR_SYS
+    return _DAIR_SYS_BASE + "\n\n" + format_tool_manifest_for_prompt(evidence_kinds=kinds)
 
 
 # ── MCP tool ──────────────────────────────────────────────────────────────────
@@ -684,9 +697,22 @@ def _phases_entered(entries) -> set:
     an asserted stack must never satisfy phase coverage. Every investigation
     starts in Triage."""
     out: set = {"Triage"}
+    prev_stamp = None
     for e in entries or []:
         if not isinstance(e, dict):
             continue
+        # The server owns the phase. A move it applied between dair calls
+        # counts even when the model's answer was not a recommended push
+        # (2026-09-24: 80 minutes in Collect, then Report refused as 'never
+        # entered Collect'). The FIRST dair call is excluded: its phase can be
+        # adopted from the agent's asserted stack, which must never count.
+        if e.get("type") == "dair_call" and e.get("dair_phase"):
+            stamp = str(e["dair_phase"]).strip().capitalize()
+            if prev_stamp is not None and stamp != prev_stamp:
+                out.add(stamp)
+            prev_stamp = stamp
+        elif e.get("type") == "phase_transition" and (e.get("to_phase") or e.get("phase")):
+            out.add(str(e.get("to_phase") or e.get("phase")).strip().capitalize())
         if (e.get("type") == "dair_call"
                 and str(e.get("stack_action") or "") == "push"
                 and e.get("transition_recommended")):
@@ -704,44 +730,105 @@ def _is_live_monitoring_trace(entries) -> bool:
     monitor.start_investigation — the call itself refuses outside a
     baselined live-monitoring case) run a compressed alert-response loop,
     not the full static-case DAIR cycle."""
-    return any(isinstance(e, dict)
-               and "monitor_start_investigation" in str(e.get("cmd") or "")
-               and e.get("success") is not False
-               for e in entries or [])
+    from core.evidence_kinds import is_live_monitoring_trace
+    return is_live_monitoring_trace(entries)
 
 
-_MEM_EXT_RE = re.compile(r"\.(mem|dmp|vmem|lime|crash|hpak|aff4)$", re.IGNORECASE)
-_PCAP_EXT_RE = re.compile(r"\.(pcap|pcapng|cap)$", re.IGNORECASE)
-_DISK_EVIDENCE_RE = re.compile(r"\.(e01|dd|img|001|vhdx?|vmdk|ex01)$|cylr", re.IGNORECASE)
-
-
-def _evidence_types(trace_path) -> tuple:
-    """(memory_present, pcap_present) from the case evidence/ dir — each True or
-    False, or None when undeterminable (fail-open). Conservative on the RISKY
-    direction: only report an evidence type ABSENT when disk/other evidence is
-    present AND no file of that type (and, for memory, no ambiguous .raw) exists —
-    so vol.*/net.* are dropped only when we're confident the case cannot run them."""
-    if not trace_path:
-        return (None, None)
+def _evidence_profile(case_context: str = "") -> dict:
+    """core.evidence_kinds profile of the active case (fail-open: undetermined
+    on any error)."""
     try:
-        from pathlib import Path as _P
-        evd = _P(trace_path).resolve().parent.parent / "evidence"
-        if not evd.is_dir():
-            return (None, None)
-        names, n = [], 0
-        for p in evd.rglob("*"):
-            names.append(p.name); n += 1
-            if n > 20000:
-                break
-        disk = any(_DISK_EVIDENCE_RE.search(x) for x in names)
-        mem_files = any(_MEM_EXT_RE.search(x) for x in names)
-        raw_amb = any(x.lower().endswith(".raw") for x in names)   # .raw: disk OR memory — ambiguous
-        pcap_files = any(_PCAP_EXT_RE.search(x) for x in names)
-        mem = True if mem_files else (False if (disk and not raw_amb) else None)
-        pcap = True if pcap_files else (False if disk else None)
-        return (mem, pcap)
+        from core.execution_log import log as _elog
+        from core.evidence_kinds import evidence_profile
+        return evidence_profile(getattr(_elog, "_entries", None) or [], None, case_context)
     except Exception:
-        return (None, None)
+        return {"kinds": [], "determined": False, "live_monitoring": False}
+
+
+def _evidence_line(kinds) -> str:
+    """The EVIDENCE AVAILABLE line of the user message ('' when undetermined)."""
+    if not kinds:
+        return ""
+    from core.evidence_kinds import KINDS
+    missing = [k for k in KINDS if k not in kinds]
+    line = f"\nEVIDENCE AVAILABLE: {', '.join(k for k in KINDS if k in kinds)}"
+    if missing:
+        line += (f" — do not prescribe tools or verification challenges that need "
+                 f"{', '.join(missing)} evidence; the case holds none")
+    return line
+
+
+def _filter_tools(tools, kinds) -> tuple[list, list]:
+    """(kept, dropped) — dropped items {tool, needs} need an evidence kind the
+    case lacks. Nothing is dropped when `kinds` is empty (undetermined)."""
+    from tools.tool_capabilities import tool_fits_evidence, tool_evidence_needs, canonical_tool_id
+    kept, dropped = [], []
+    for t in tools or []:
+        if kinds and not tool_fits_evidence(t, kinds):
+            dropped.append({"tool": canonical_tool_id(t),
+                            "needs": sorted(tool_evidence_needs(t) or [])})
+        else:
+            kept.append(t)
+    return kept, dropped
+
+
+def _filter_challenges(challenges, kinds) -> tuple[list, list]:
+    """(kept, dropped). A challenge whose challenge_method tools ALL need a
+    missing evidence kind is dropped — it could never be run, so it must never
+    become an open challenge that blocks Report. A multi-tool method keeps
+    only its runnable tools."""
+    from tools.tool_capabilities import (tool_fits_evidence, tool_evidence_needs,
+                                         challenge_method_tools)
+    if not kinds:
+        return list(challenges or []), []
+    kept, dropped = [], []
+    for c in challenges or []:
+        if not isinstance(c, dict):
+            kept.append(c)
+            continue
+        methods = challenge_method_tools(c.get("challenge_method"))
+        fit = [m for m in methods if tool_fits_evidence(m, kinds)]
+        if methods and not fit:
+            dropped.append({"claim": str(c.get("claim") or "")[:200],
+                            "challenge_method": str(c.get("challenge_method") or ""),
+                            "needs": sorted({k for m in methods
+                                             for k in (tool_evidence_needs(m) or [])})})
+            continue
+        if methods and len(fit) < len(methods):
+            dropped.append({"claim": str(c.get("claim") or "")[:200],
+                            "challenge_method": str(c.get("challenge_method") or ""),
+                            "removed_methods": [m for m in methods if m not in fit]})
+            c = {**c, "challenge_method": ", ".join(fit)}
+        kept.append(c)
+    return kept, dropped
+
+
+def _phase_work_order(entries, phase: str) -> list:
+    """Every priority_tools item DAIR prescribed while the investigation was in
+    `phase` (the trailing run of dair_calls stamped with it), in order; the
+    latest dair_call's list when the phase has no such run."""
+    run: list = []
+    dairs = [e for e in entries or [] if isinstance(e, dict) and e.get("type") == "dair_call"]
+    for e in reversed(dairs):
+        if not phase or str(e.get("dair_phase") or "") != phase:
+            break
+        run.insert(0, e)
+    if not run and dairs:
+        run = [dairs[-1]]
+    out: list = []
+    for e in run:
+        for t in ((e.get("directives") or {}).get("priority_tools") or []):
+            if t not in out:
+                out.append(t)
+    return out
+
+
+def _unrun_phase_tools(entries, phase: str, kinds) -> list:
+    """Display names of the phase's prescribed tools never run nor
+    dispositioned — minus any the case's evidence cannot feed."""
+    from tools._gates.work_order import unrun_from_list
+    out = unrun_from_list(entries, _phase_work_order(entries, phase))
+    return _filter_tools(out, kinds)[0]
 
 
 def missing_report_phases(entries) -> list:
@@ -758,6 +845,42 @@ def missing_report_phases(entries) -> list:
            for pv in (e.get("candidate_pivots") or [])):
         required.append("Scan")
     return [ph for ph in required if ph not in entered]
+
+
+TRIAGE_REASONS = frozenset({"new_evidence_item", "case_question_changed", "premise_refuted"})
+
+
+def _ioc_coverage_block(current_phase: str, limit: int = 20) -> str:
+    """Open ATT&CK coverage items for the recorded IOCs, as Scan leads. Only
+    from Analyze on: before then the IOC set is still forming. Advisory — the
+    items are warnings, never a transition gate."""
+    if current_phase not in ("Analyze", "Scan", "Report"):
+        return ""
+    try:
+        from core.execution_log import log
+        from core.iocs import coverage
+        cov = coverage(getattr(log, "_entries", None) or [])
+    except Exception:
+        return ""
+    if not cov["open"] and not any(i["status"] == "advisory" for i in cov["items"]):
+        return ""
+    lines = ["\nIOC COVERAGE LEADS (ATT&CK detection strategies for the recorded IOCs; "
+             "each open item is a data source that could confirm or scope the technique "
+             "and has not been examined — prescribe the listed tools in Scan, or settle "
+             "with misc.record_disposition(target_kind=\"coverage\", "
+             "target_id=\"<technique>:<component>\")):"]
+    for it in cov["open"][:limit]:
+        lines.append(f"- {it['technique']} {it['technique_name']} / {it['component']} "
+                     f"[{', '.join(it['iocs'][:3])}] — {it.get('artifacts', '')}; "
+                     f"tools: {', '.join(it.get('examine_with', [])[:5])}")
+    if len(cov["open"]) > limit:
+        lines.append(f"- … {len(cov['open']) - limit} more (misc.list_iocs)")
+    adv = [i for i in cov["items"] if i["status"] == "advisory"][:8]
+    if adv:
+        lines.append("RELATED TECHNIQUES (co-used by the same groups/software — hypotheses "
+                     "worth testing, not requirements):")
+        lines += [f"- {i['technique']} → {', '.join(i['related_techniques'])}" for i in adv]
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -828,12 +951,44 @@ def dair_assess(
         stack = []
 
     current = stack[-1].get("phase", "Triage") if stack else "Triage"
+    # The server owns phase state. The agent's phase_stack is only used before
+    # DAIR has ever run; afterwards the recorded stack is what the model sees
+    # (an agent passing "[]" otherwise made the model believe it was in Triage).
+    try:
+        from core.execution_log import log as _plog
+        _ran = any(e.get("type") == "dair_call" for e in (getattr(_plog, "_entries", None) or []))
+        if _ran and getattr(_plog, "_current_phase", ""):
+            current = _plog._current_phase
+            stack = [dict(f) for f in (getattr(_plog, "_phase_stack", None) or [])]
+    except Exception:
+        pass
 
     user_parts = [f"TOOL RESULTS SUMMARY:\n{summary}"]
     user_parts.append(f"\nCURRENT PHASE STACK (newest last):\n{json.dumps(stack, indent=2)}")
     user_parts.append(f"\nCURRENT PHASE: {current}")
     if context:
         user_parts.append(f"\nCASE CONTEXT:\n{context}")
+    # Evidence the case holds: tools/challenges needing a missing kind are not
+    # prescribed (and are dropped server-side below). Live-monitoring traces
+    # and an undetermined inventory are never filtered.
+    _ev_profile = _evidence_profile(case_context)
+    from core.evidence_kinds import filter_kinds as _fk_kinds
+    _kinds = _fk_kinds(_ev_profile)
+    if _kinds:
+        user_parts.append(_evidence_line(_kinds))
+    try:
+        from core.execution_log import log as _wlog
+        _unrun_now = (_unrun_phase_tools(getattr(_wlog, "_entries", None) or [], current, _kinds)
+                      if getattr(_wlog, "_path", None) else [])
+    except Exception:
+        _unrun_now = []
+    if _unrun_now:
+        user_parts.append(f"\nWORK ORDER STATUS ({current}): prescribed but not yet run or "
+                          f"dispositioned: {', '.join(_unrun_now)}. The phase cannot be left "
+                          f"until each is run or dispositioned.")
+    ioc_leads = _ioc_coverage_block(current)
+    if ioc_leads:
+        user_parts.append(ioc_leads)
     user = "\n".join(user_parts)
 
     # Capture exactly what was sent to the DAIR model so the trace can be
@@ -844,10 +999,13 @@ def dair_assess(
         "case_context": context,
         "current_phase": current,
         "tool_manifest_version": MANIFEST_VERSION,
+        "evidence_kinds": _ev_profile.get("kinds") or [],
+        "evidence_determined": bool(_kinds),
         "user_message": user,
     }
+    _system = _dair_system(_kinds)
 
-    backend_result = _ask(_DAIR_SYS, user, max_tokens=MAX_TOKENS_DAIR)
+    backend_result = _ask(_system, user, max_tokens=MAX_TOKENS_DAIR)
 
     _empty_result = {
         **_EMPTY_ASSESSMENT,
@@ -868,27 +1026,61 @@ def dair_assess(
         result["_trudi_call_id"] = 0
         return result
 
-    raw = backend_result["raw"]
-    # Structured-first: RESULT {"assessment": {...}, "challenges": [...],
-    # "directives": {...}}; the legacy DAIR_ASSESSMENT / VERIFICATION_CHALLENGES
-    # blocks remain the fallback. parse_path records which one was used.
-    rb, _ = parse_result_block(raw)
-    parse_path = PARSE_NONE
-    if isinstance(rb, dict) and isinstance(rb.get("assessment"), dict):
-        assessment = {**_EMPTY_ASSESSMENT, **rb["assessment"]}
-        challenges = rb.get("challenges") if isinstance(rb.get("challenges"), list) else []
-        if isinstance(rb.get("directives"), dict) and rb["directives"]:
-            assessment["directives"] = dict(rb["directives"])
-        parse_path = RESULT_JSON
-    else:
-        challenges = _parse_challenges(raw)
-        assessment = _parse_dair_assessment(raw)
-        if re.search(r"DAIR_ASSESSMENT|VERIFICATION_CHALLENGES", raw or "", re.IGNORECASE):
+    from tools._llm_parse import validate_assessment
+    assessment, parse_path = {}, PARSE_NONE
+    for attempt in range(2):
+        raw = backend_result.get("raw", "")
+        rb, _ = parse_result_block(raw)
+        err = ""
+        if isinstance(rb, dict) and isinstance(rb.get("assessment"), dict):
+            assessment = {**_EMPTY_ASSESSMENT, **rb["assessment"]}
+            # Read-only compatibility with former RESULT layout.
+            if isinstance(rb.get("challenges"), list) and rb['challenges']:
+                assessment['verification_challenges'] = rb['challenges']
+            if isinstance(rb.get("directives"), dict):
+                assessment['directives'] = rb['directives']
+            parse_path = RESULT_JSON
+            if not all(k in rb['assessment'] for k in ('current_phase', 'stack_action', 'transition_recommended')):
+                err = "Assessment is missing required phase/transition fields"
+            if type(rb.get('schema_version', 1)) is not int or rb.get('schema_version', 1) != 1:
+                err = "Unsupported schema_version"
+        elif rb is None and 'RESULT:' not in raw:
+            assessment = _parse_dair_assessment(raw)
+            challenges = _parse_challenges(raw)
+            if challenges:
+                assessment['verification_challenges'] = challenges
             parse_path = LEGACY_BLOCK
+        else:
+            err = "Malformed RESULT assessment"
+        if not backend_result.get("success"):
+            err = backend_result.get("error") or "Assessment backend failed"
+        elif backend_result.get("truncated"):
+            err = "Assessment output was truncated; review is incomplete"
+        err = err or validate_assessment(assessment)
+        if not err:
+            break
+        if attempt == 0:
+            repaired = _ask(_system, user + "\nFORMAT REPAIR: " + err +
+                            ". Return the required RESULT assessment.", max_tokens=MAX_TOKENS_DAIR)
+            for key in ('input_tokens', 'output_tokens'):
+                repaired[key] = backend_result.get(key, 0) + repaired.get(key, 0)
+            backend_result = repaired
+        else:
+            cid = _log_dair({}, backend_result.get('input_tokens', 0),
+                            backend_result.get('output_tokens', 0), inputs=call_inputs,
+                            input_call_ids=input_call_ids, error=err, parse_path=PARSE_NONE,
+                            raw_answer=str(backend_result.get("raw") or "")[:20000])
+            return {'success': False, 'error': err, 'gate': 'dair_schema',
+                    'retryable': True, '_trudi_call_id': cid, 'schema_repair_attempted': True}
 
-    # challenges from dedicated block take precedence over those embedded in assessment
-    if challenges:
-        assessment["verification_challenges"] = challenges
+    # Server-side: a verification challenge whose challenge_method needs an
+    # evidence kind the case lacks can never be run — drop it before anything
+    # (prior-run verification, auto-satisfy, the open-challenge gates) sees it.
+    _filtered_challenges: list = []
+    if _kinds and assessment.get("verification_challenges"):
+        _kc, _filtered_challenges = _filter_challenges(
+            assessment.get("verification_challenges"), _kinds)
+        assessment["verification_challenges"] = _kc
 
     # Server-side: a challenge whose challenge_method ALREADY ran successfully
     # in this trace is verified by that run — DAIR can re-issue challenges for
@@ -1004,7 +1196,7 @@ def dair_assess(
     server_override = None
     try:
         from core.execution_log import log as _flog
-        _n_findings = len((_flog.index().by_type.get("finding") or [])) if getattr(_flog, "_path", None) else 0
+        _n_findings = len(_flog.index().active_findings) if getattr(_flog, "_path", None) else 0
     except Exception:
         _n_findings = 0
     if assessment.get("next_phase") == "Report" and _n_findings == 0:
@@ -1134,7 +1326,7 @@ def dair_assess(
                         "the work order) — advancing to Collect, where the systematic attack-"
                         "lifecycle collection belongs. Collection does not happen in Triage.")
             elif _cur3 == "Collect":
-                _backfill = prescribe_for_gaps(_entries3)
+                _backfill = _filter_tools(prescribe_for_gaps(_entries3), _kinds)[0]
                 if _backfill:
                     server_override = {"kind": "lifecycle_backfill",
                                        "detail": f"empty Collect work order backfilled from "
@@ -1184,31 +1376,24 @@ def dair_assess(
             print(f"[TRUDI WARN] phase-aware layer3 failed: {_e3}", file=_sys3.stderr)
 
     # Evidence-aware prescription: the backend prescribes from a generic playbook
-    # and can list tools that need an evidence type this case lacks — vol.* (a
-    # memory image) or pcap-based net.* (a network capture) on a disk-only case.
-    # Drop those from the work order so the agent isn't handed tools it cannot run
-    # (and the work-order gates don't force it to disposition them). Conservative
-    # + fail-open: only drops when the type is confidently absent.
+    # and can list tools that need an evidence kind this case lacks — vol.* with
+    # no memory image, net.* with no capture, ez.*/tsk.* on a memory- or
+    # PCAP-only case, live.* outside a live endpoint. Drop them from the work
+    # order (recorded on the dair entry as server_filtered_tools) so the agent
+    # is never handed a tool it cannot run and the work-order gates never make
+    # it disposition one. Fail-open: nothing is dropped unless the evidence
+    # inventory is determined; live-monitoring traces are never filtered.
+    _filtered_tools: list = []
     try:
-        _mem, _pcap = _evidence_types(getattr(_flog, "_path", None))
         _d0 = assessment.get("directives") or {}
         _pt0 = list(_d0.get("priority_tools") or [])
-        if _pt0 and (_mem is False or _pcap is False):
-            _dropped, _kept = [], []
-            for _t in _pt0:
-                _tl = str(_t).lower().replace(".", "_")
-                if _mem is False and (_tl.startswith("vol_") or _tl.startswith("volatility")
-                                      or _tl.startswith("rekall")):
-                    _dropped.append(_t); continue
-                if _pcap is False and re.match(r"net_(tcpdump|ngrep|http_session|tcpxtract|pcap)", _tl):
-                    _dropped.append(_t); continue
-                _kept.append(_t)
-            if _dropped:
-                _d0["priority_tools"] = _kept
+        if _kinds and _pt0:
+            _kept0, _filtered_tools = _filter_tools(_pt0, _kinds)
+            if _filtered_tools:
+                _d0["priority_tools"] = _kept0
                 assessment["directives"] = _d0
-                assessment["prescription_filtered"] = _dropped
     except Exception:
-        pass
+        _filtered_tools = []
 
     # Work-order completion on advance. A phase is left only when its work
     # order is done — a transition (push/pop) while the PRIOR dair_call's
@@ -1219,11 +1404,11 @@ def dair_assess(
             and str(assessment.get("stack_action")) in ("push", "pop")
             and str(assessment.get("next_phase") or "") != "Report"):
         try:
-            from tools._gates.work_order import unrun_from_list, _display as _display6
+            from tools._gates.work_order import _display as _display6
             _entries6 = getattr(_flog, "_entries", None) or []
-            _prior = [e for e in _entries6 if e.get("type") == "dair_call"]
-            _prior_pt = ((_prior[-1].get("directives") or {}).get("priority_tools")) if _prior else []
-            _outstanding = unrun_from_list(_entries6, _prior_pt)
+            # Every tool prescribed in this phase, not just the latest order:
+            # listing one at a time drip-fed the work order a round per tool.
+            _outstanding = _unrun_phase_tools(_entries6, current, _kinds)
             if _outstanding:
                 server_override = {"kind": "work_order_incomplete",
                                    "detail": f"unrun prescribed tools: {', '.join(_outstanding)}",
@@ -1239,7 +1424,8 @@ def dair_assess(
                 assessment["transition_rationale"] = (
                     f"Server override: work order incomplete — {len(_outstanding)} tool(s) "
                     f"DAIR prescribed for this phase were never run or dispositioned "
-                    f"({', '.join(_outstanding)}). A phase is entered to execute its work "
+                    f"({', '.join(_outstanding)}). This is the complete list for the phase — "
+                    f"run them all in one batch. A phase is entered to execute its work "
                     f"order, not to be passed through: run each, or settle it with "
                     f"misc.record_disposition(target_kind=\"tool\", reason=\"inapplicable\"|"
                     f"\"absent_from_evidence\"), before advancing."
@@ -1248,11 +1434,35 @@ def dair_assess(
             import sys as _sys6
             print(f"[TRUDI WARN] work-order advance gate failed: {_e6}", file=_sys6.stderr)
 
+    # Triage only when what would be triaged is new (see _DAIR_SYS). Anything
+    # else that needs more work is evidence gathering: Collect.
+    if (str(assessment.get("stack_action") or "") == "push"
+            and str(assessment.get("next_phase") or "") == "Triage"
+            and current not in ("", "Triage")
+            and str(assessment.get("triage_reason") or "") not in TRIAGE_REASONS):
+        assessment["next_phase"] = "Collect"
+        redirect = {"kind": "triage_redirected", "from_phase": current,
+                    "model_next_phase": "Triage",
+                    "triage_reason": assessment.get("triage_reason") or None}
+        assessment["transition_rationale"] = (
+            "Server override: Triage is re-entered only for a new evidence item, a changed "
+            "case question or a refuted premise (triage_reason). More work on the same "
+            "evidence is Collect. " + str(assessment.get("transition_rationale") or ""))
+        server_override = ({**server_override, "triage_redirected": redirect}
+                           if isinstance(server_override, dict) else redirect)
+
     tok_in  = backend_result.get("input_tokens", 0)
     tok_out = backend_result.get("output_tokens", 0)
+    _ev_extra = {"evidence_kinds": _ev_profile.get("kinds") or [],
+                 "evidence_determined": bool(_kinds)}
+    if _filtered_tools:
+        _ev_extra["server_filtered_tools"] = _filtered_tools
+    if _filtered_challenges:
+        _ev_extra["server_filtered_challenges"] = _filtered_challenges
     call_id = _log_dair(assessment, tok_in, tok_out, inputs=call_inputs,
                         input_call_ids=input_call_ids,
                         candidate_pivots=candidate_pivots,
+                        extra=_ev_extra,
                         backend_meta=backend_result.get("backend_meta"),
                         parse_path=parse_path, server_override=server_override,
                         observed_principals=[{k: v for k, v in it.items() if k != "norm"}
@@ -1268,7 +1478,22 @@ def dair_assess(
         "input_tokens": tok_in,
         "output_tokens": tok_out,
         "_trudi_call_id": call_id,
+        "evidence_kinds": _ev_profile.get("kinds") or [],
     }
+    if _filtered_tools:
+        result["server_filtered_tools"] = _filtered_tools
+        result["prescription_filtered"] = [f["tool"] for f in _filtered_tools]
+    if _filtered_challenges:
+        result["server_filtered_challenges"] = _filtered_challenges
     if candidate_pivots:
         result["candidate_pivots"] = candidate_pivots
+    if ioc_leads:
+        # The same leads the director saw, so the agent can act on them.
+        try:
+            from core.execution_log import log as _ilog
+            from core.iocs import coverage as _ioc_cov
+            _c = _ioc_cov(getattr(_ilog, "_entries", None) or [])
+            result["ioc_coverage"] = {"counts": _c["counts"], "open": _c["open"][:20]}
+        except Exception:
+            pass
     return result

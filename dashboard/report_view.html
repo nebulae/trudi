@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>TRUDI Report</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115; --bg-2: #161a21; --bg-3: #1c2230; --bg-hl: #2a3550;
+    --fg: #e6e9ef; --fg-dim: #8a93a6; --border: #28303f; --accent: #6ea8ff;
+    --confirmed: #ff6b6b; --likely: #ffa86b; --suspected: #ffd86b; --ok: #4ad295;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.55 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center;
+           padding: 8px 16px; background: var(--bg-2); border-bottom: 1px solid var(--border); }
+  header .title { font-weight: 600; }
+  header .case { color: var(--accent); font-family: ui-monospace, Menlo, Consolas, monospace; }
+  header select, header button { background: var(--bg-3); color: var(--fg); border: 1px solid var(--border);
+                                 border-radius: 4px; padding: 4px 8px; font: inherit; }
+  header .spacer { flex: 1; }
+  header a { color: var(--accent); text-decoration: none; }
+  header .meta { color: var(--fg-dim); font-size: 12px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px 24px 80px; }
+  .empty { color: var(--fg-dim); padding: 40px 0; text-align: center; }
+  article h1 { font-size: 24px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  article h2 { font-size: 19px; margin-top: 32px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+  article h3 { font-size: 16px; margin-top: 22px; }
+  article a { color: var(--accent); }
+  article a.cid { text-decoration: none; border-bottom: 1px dotted var(--accent);
+                  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.95em; }
+  article a.cid:hover { background: var(--bg-hl); }
+  article code { background: var(--bg-3); padding: 1px 5px; border-radius: 3px;
+                 font: 12.5px ui-monospace, Menlo, Consolas, monospace; }
+  article pre { background: var(--bg-2); border: 1px solid var(--border); padding: 10px;
+                overflow-x: auto; border-radius: 4px; }
+  article pre code { background: none; padding: 0; }
+  article blockquote { margin: 0; padding: 4px 14px; border-left: 3px solid var(--border); color: var(--fg-dim); }
+  article .table-wrap { overflow-x: auto; margin: 10px 0; }
+  article table { border-collapse: collapse; font-size: 13px; min-width: 50%; }
+  article th, article td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; vertical-align: top; }
+  article th { background: var(--bg-3); position: sticky; top: 0; }
+  article tr:nth-child(even) td { background: var(--bg-2); }
+  article .tier-CONFIRMED { color: var(--confirmed); font-weight: 600; }
+  article .tier-LIKELY { color: var(--likely); font-weight: 600; }
+  article .tier-SUSPECTED { color: var(--suspected); font-weight: 600; }
+  nav.toc { position: fixed; top: 60px; right: 12px; width: 230px; max-height: calc(100vh - 80px);
+            overflow-y: auto; font-size: 12px; background: var(--bg-2); border: 1px solid var(--border);
+            border-radius: 6px; padding: 8px 10px; }
+  nav.toc a { display: block; color: var(--fg-dim); text-decoration: none; padding: 2px 0; }
+  nav.toc a.h3 { padding-left: 12px; }
+  nav.toc a:hover { color: var(--fg); }
+  @media (max-width: 1500px) { nav.toc { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">TRUDI report</span>
+  <span class="case" id="case"></span>
+  <select id="picker" title="Reports in this case's reports/ folder"></select>
+  <button id="reload" title="Reload the report">↻</button>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <a id="trace-link" target="trudi-trace" title="Open the trace view">Trace ↗</a>
+</header>
+<main><article id="doc"><div class="empty">Loading…</div></article></main>
+<nav class="toc" id="toc"></nav>
+<script>
+const $ = (s) => document.querySelector(s);
+const params = new URLSearchParams(location.search);
+const trace = params.get('trace') || '';
+const api = (ep, q) => `/_dashboard/api/${ep}?` + new URLSearchParams(q).toString();
+const traceHref = (cid) => `dashboard.html?trace=${encodeURIComponent(trace)}` + (cid ? `&call=${cid}` : '');
+
+function slug(t) { return t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60); }
+
+function decorate(root) {
+  // wide tables scroll instead of stretching the page
+  root.querySelectorAll('table').forEach(t => {
+    const w = document.createElement('div'); w.className = 'table-wrap';
+    t.parentNode.insertBefore(w, t); w.appendChild(t);
+  });
+  // tier words stand out, as in the trace view
+  root.querySelectorAll('td, h3').forEach(el => {
+    if (el.children.length) return;
+    const m = el.textContent.match(/\b(CONFIRMED|LIKELY|SUSPECTED)\b/);
+    if (m && el.textContent.trim().length < 40) el.classList.add('tier-' + m[1]);
+  });
+  // call references open the trace view at that call
+  root.querySelectorAll('a.cid').forEach(a => {
+    a.href = traceHref(a.dataset.cid); a.target = 'trudi-trace';
+    a.title = `open call #${a.dataset.cid} in the trace view`;
+  });
+  // table of contents
+  const toc = $('#toc'); toc.innerHTML = '';
+  root.querySelectorAll('h2, h3').forEach(h => {
+    if (!h.id) h.id = slug(h.textContent);
+    const a = document.createElement('a');
+    a.href = '#' + h.id; a.textContent = h.textContent; a.className = h.tagName.toLowerCase();
+    toc.appendChild(a);
+  });
+}
+
+async function show(name) {
+  const doc = $('#doc');
+  if (!name) { doc.innerHTML = '<div class="empty">No report in this case\'s reports/ folder yet.</div>'; return; }
+  const resp = await fetch(api('report', {trace, name}), {cache: 'no-store'});
+  if (!resp.ok) { doc.innerHTML = `<div class="empty">Could not load ${name}: ${resp.status} ${resp.statusText}</div>`; return; }
+  doc.innerHTML = await resp.text();      // server-rendered; raw HTML in the Markdown is not rendered
+  decorate(doc);
+  const url = new URL(location.href); url.searchParams.set('name', name); history.replaceState(null, '', url);
+}
+
+async function init() {
+  $('#trace-link').href = traceHref();
+  if (!trace) { $('#doc').innerHTML = '<div class="empty">Open this page from the trace view (it needs ?trace=…).</div>'; return; }
+  const resp = await fetch(api('reports', {trace}), {cache: 'no-store'});
+  const data = resp.ok ? await resp.json() : {reports: [], error: resp.statusText};
+  $('#case').textContent = data.case || '';
+  const pick = $('#picker');
+  pick.innerHTML = (data.reports || []).map(r =>
+    `<option value="${r.name}">${r.name}</option>`).join('');
+  const want = params.get('name');
+  const first = (data.reports || []).find(r => r.name === want) || (data.reports || [])[0];
+  if (first) {
+    pick.value = first.name;
+    $('#meta').textContent = `${(first.bytes / 1024).toFixed(0)} KB · ${new Date(first.mtime * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  }
+  pick.onchange = () => show(pick.value);
+  $('#reload').onclick = () => init();
+  show(first && first.name);
+}
+init();
+</script>
+</body>
+</html>

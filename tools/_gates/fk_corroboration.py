@@ -65,7 +65,7 @@ _ACT_CATEGORY = {"execution": "for_execution", "presence": "for_presence",
 
 def _norm(name: str) -> str:
     """Canonical MCP tool name: lowercase, dotted→underscore, de-doubled
-    ('ez.pecmd'/'ez_ez_pecmd' → 'ez_pecmd')."""
+    ('ez.pecmd'/'ez_pecmd' → 'ez_pecmd')."""
     return _fk.normalize_tool_name((name or "").strip().lower().replace(".", "_"))
 
 

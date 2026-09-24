@@ -44,6 +44,8 @@ def _evaluates_for(ctx, norm: str) -> list[dict]:
     for e in by_type.get("reason_call", []) or []:
         if not isinstance(e, dict) or e.get("tool") != "reason_evaluate_finding":
             continue
+        if e.get("success") is False or e.get("review_pending"):
+            continue
         um = str(((e.get("inputs") or {}).get("user_message")) or "").lower()
         by_desc = bool(norm) and norm in um
         ec = e.get("claim")

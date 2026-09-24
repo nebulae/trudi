@@ -178,7 +178,7 @@ class TestRoundTrip:
             r = R.reason_evaluate_finding("Account defaultprinter was created (EID 4720)",
                                           f"Security.evtx (cid{cid}): 4720", input_call_ids=[cid])
         assert http.call_count == 2
-        assert "EVIDENCE INVENTORY" in _payload(http, 0)
+        assert "EVIDENCE PACKET" in _payload(http, 0)
         assert "TargetUserName: defaultprinter" in _payload(http, 0)   # pushed in round 1
         p2 = _payload(http, 1)
         assert "EVIDENCE_REQUEST RESULTS (round 1/" in p2
@@ -196,6 +196,44 @@ class TestRoundTrip:
         assert fetches and fetches[0]["requests"][0]["rows_returned"] == 1
         assert fetches[0]["reason_call_id"] == evals[0]["call_id"]
 
+    def test_fetch_entry_keeps_returned_rows_in_a_sidecar(self, pull_env):
+        # The dashboard shows the exact rows the reviewer got back: each
+        # request carries result_path (full text) + a short result_excerpt.
+        import os
+        cid = pull_env["cid"]
+        http = MagicMock(side_effect=[_http(_REQ % cid), _http(_SUPPORTED)])
+        with patch("httpx.post", http):
+            R.reason_evaluate_finding("Account defaultprinter was created (EID 4720)",
+                                      f"Security.evtx (cid{cid}): 4720", input_call_ids=[cid])
+        log = pull_env["log"]
+        fetch = [e for e in log._entries if e.get("type") == "reason_evidence_fetch"][0]
+        req = fetch["requests"][0]
+        path = req["result_path"]
+        assert os.path.basename(path) == f"fetch-{fetch['call_id']}-1.txt"
+        assert os.path.dirname(path) == log.stdout_sidecar_dir()
+        text = open(path, encoding="utf-8").read()
+        assert "TargetUserName: defaultprinter" in text      # the returned row
+        assert text in _payload(http, 1)                     # exactly what the reviewer saw
+        assert req["result_chars"] == len(text)
+        assert req["result_excerpt"] == text[:300]
+        assert len(json.dumps(fetch)) < 2000                 # entry stays small
+
+    def test_record_fetch_results_optional_and_aligned(self):
+        import os
+        from core.execution_log import log
+        reqs = [{"call_id": 1, "query": "a", "status": "ok", "rows_returned": 1},
+                {"call_id": 2, "query": "b", "status": "missing"}]
+        fid = log.record_reason_evidence_fetch(7, reqs, results=["A,B\n1," + "x" * 500, ""])
+        e = log.index().by_call_id[fid]
+        r1, r2 = e["requests"]
+        assert open(r1["result_path"]).read() == "A,B\n1," + "x" * 500
+        assert len(r1["result_excerpt"]) == 300
+        assert "result_path" not in r2 and "result_excerpt" not in r2
+        # No results → legacy shape, nothing written.
+        fid2 = log.record_reason_evidence_fetch(7, reqs)
+        assert all("result_path" not in r for r in log.index().by_call_id[fid2]["requests"])
+        assert not os.path.exists(os.path.join(log.stdout_sidecar_dir(), f"fetch-{fid2}-1.txt"))
+
     def test_round_one_pushes_the_matching_rows_and_supported_stands(self, pull_env):
         # J-2 push-then-pull: the 4720 row (past the excerpt, deep in a 40-row
         # CSV) is in the ROUND-1 message with its totals; a SUPPORTED that
@@ -207,7 +245,11 @@ class TestRoundTrip:
         assert http.call_count == 1
         p = _payload(http, 0)
         assert "TargetUserName: defaultprinter" in p
-        assert "showing 1 of 1 rows matching" in p and "41 rows scanned; source COMPLETE" in p
+        packet = pull_env["log"].index().by_call_id[r["_trudi_call_id"]]["evidence_packet"]
+        source = packet["evidence"][0]
+        selection = source["selections"][0]
+        assert selection["matched_lines"] == selection["shown_lines"] == 1
+        assert selection["scanned_rows"] == 41 and source["retained_output_complete"]
         assert "a selection with its totals" in p and "EVIDENCE_REQUEST" in p   # pull still offered
         assert r["verdict"] == "SUPPORTED" and "verdict_note" not in r
         assert r["evidence_pushed"] == {"rows": 1, "cids": [cid]}
@@ -220,7 +262,10 @@ class TestRoundTrip:
         with patch("httpx.post", http):
             r = R.reason_evaluate_finding("4799 group membership enumerated", "x", input_call_ids=[cid])
         p = _payload(http, 0)
-        assert f"showing {R.COMPAT_PUSH_ROWS_PER_CID} of 40 rows matching" in p
+        packet = pull_env["log"].index().by_call_id[r["_trudi_call_id"]]["evidence_packet"]
+        selection = packet["evidence"][0]["selections"][0]
+        assert selection["shown_lines"] == R.COMPAT_PUSH_ROWS_PER_CID
+        assert selection["matched_lines"] == 40 and not selection["selection_complete"]
         assert "request more via EVIDENCE_REQUEST" in p
         assert r["evidence_pushed"]["rows"] == R.COMPAT_PUSH_ROWS_PER_CID
 
@@ -241,8 +286,9 @@ class TestRoundTrip:
             r = R.reason_evaluate_finding("MSPAuth cookie findme69 FOUND", "x", input_call_ids=[full, legacy])
         p = _payload(http, 0)
         assert "FOUND: MSPAuth cookie for findme69@hotmail.example" in p
-        assert "source COMPLETE" in p
-        assert "PARTIAL" in p and "a term missing here is NOT absent" in p
+        packet = log.index().by_call_id[r["_trudi_call_id"]]["evidence_packet"]
+        assert any(e["retained_output_complete"] for e in packet["evidence"])
+        assert any(not e["retained_output_complete"] for e in packet["evidence"]) and "a term missing here is NOT absent" in p
         assert r["evidence_pushed"]["cids"] == [full]
 
     def test_no_request_and_not_supported_stays_as_answered(self, pull_env):
@@ -356,6 +402,18 @@ class TestPartialSources:
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "FOUND", "columns": []}], [cid], 4000)
         assert "source COMPLETE" in block and recs[0]["status"] == "ok"
+
+    def test_unlocatable_output_is_not_absence(self, pull_env, tmp_path):
+        # VANKO-2016-DEEPSEEK41 2026-09-19: an LECmd call whose CSV could not be
+        # located (empty excerpt, no file) answered "0 rows scanned; source
+        # COMPLETE", and synthesis read that as the LNK rows being absent.
+        log = pull_env["log"]
+        cid = log.record_tool_call(f"dotnet LECmd.dll -d /in --csv {tmp_path / 'gone'}",
+                                   True, False, 0, 0, stdout_excerpt="")
+        block, recs = R._resolve_evidence_requests(
+            [{"call_id": cid, "query": "vacation photos", "columns": []}], [cid], 4000)
+        assert "source COMPLETE" not in block and "absence NOT established" in block
+        assert recs[0]["status"] == "no_sources" and recs[0]["source_complete"] is False
 
     def test_sidecar_is_fetched_past_the_excerpt(self, pull_env):
         # E-01 sidecar: the FOUND line sits after 600 chars of OK lines.
@@ -598,11 +656,11 @@ class TestSchardtFollowUps:
         assert recs[0]["status"] == "not_evidence"
 
     def test_read_output_selflog_writes_sidecar(self, pull_env):
-        # read.read_output kept only a 600-char head → "excerpt omits the
+        # read.output kept only a 600-char head → "excerpt omits the
         # MAC/MachineID columns". The full body now goes to the sidecar.
         from tools.read_output import _selflog
         body = "col_a,col_b\n" + "\n".join(f"row{i},{'v' * 40}" for i in range(40))
-        cid = _selflog("read.read_output --output /x/a.csv", body)
+        cid = _selflog("read.output --output /x/a.csv", body)
         e = pull_env["log"].index().by_call_id[cid]
         assert e["stdout_chars"] == len(body) and e.get("stdout_path")
 
@@ -664,7 +722,7 @@ class TestVankoFollowUps:
         assert r.matched_rows == 1 and "SanDisk" in r.body and r.scan_complete
         assert not r.columns_ignored          # projection survived the NULs
         log = pull_env["log"]
-        cid = log.record_tool_call(f"read.read_output --output {f}", True, False, 0, 0,
+        cid = log.record_tool_call(f"read.output --output {f}", True, False, 0, 0,
                                    stdout_excerpt="x")
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "SanDisk Cruzer", "columns": ["KeyPath", "ValueData"]}], [cid], 4000)
@@ -711,7 +769,7 @@ class TestVankoFollowUps:
         f.write_text("EntryNumber,FileName,ParentPath\n1,vacation photos.7z,.\\Users\\PC User\\Downloads\n2,other,.\\x\n")
         body = "EntryNumber,FileName,ParentPath\n1,vacation photos.7z,.\\Users\\PC User\\Downloads\n"
         log = pull_env["log"]
-        cid = log.record_tool_call(f"read.read_output --output {f}", True, False, 0, 0,
+        cid = log.record_tool_call(f"read.output --output {f}", True, False, 0, 0,
                                    stdout_excerpt=body[:600], stdout_full=body + "x" * 700)
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid, "query": "vacation photos.7z", "columns": ["EntryNumber", "FileName"]}], [cid], 4000)
@@ -749,7 +807,7 @@ class TestVankoFollowUps:
         assert "EVIDENCE INTERPRETATION" not in _payload(http, 0)
 
     def test_read_over_agent_authored_file_is_not_evidence(self, pull_env, tmp_path):
-        # Laundering path: Write → read.read_output → cited as evidence.
+        # Laundering path: Write → read.output → cited as evidence.
         log = pull_env["log"]
         f = tmp_path / "exports" / "titan_thread.txt"
         f.parent.mkdir(parents=True)
@@ -763,7 +821,7 @@ class TestVankoFollowUps:
                 if e.get("call_id") == cid_w:
                     e["source"] = "claude_code_write"
             log._index_version += 1
-        cid_r = log.record_tool_call(f"read.read_output --output {f}", True, False, 0, 0,
+        cid_r = log.record_tool_call(f"read.output --output {f}", True, False, 0, 0,
                                      stdout_excerpt="bulgakov")
         block, recs = R._resolve_evidence_requests(
             [{"call_id": cid_r, "query": "bulgakov", "columns": []}], [cid_r], 4000)

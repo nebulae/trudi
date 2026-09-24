@@ -165,8 +165,9 @@ class TestCitationInjection:
     def test_reaches_request_payload_and_scope_also_present(self, trace):
         """End-to-end: both the scope header (a) and the cited block (b) land in
         the compat request, with the cited block after the finding."""
-        cid = trace.record_tool_call("ewf.mount_full_image /ev/d.E01", True, False, 0, 0,
-                                     stdout_excerpt="mounted ok")
+        trace.record_tool_call("ewf.mount_full_image /ev/d.E01", True, False, 0, 0)
+        cid = trace.record_tool_call("read.output /ev/rows.txt", True, False, 0, 0,
+                                     stdout_full="Observed record", stdout_excerpt="Observed record")
         resp = MagicMock(); resp.raise_for_status = MagicMock()
         resp.json.return_value = {"choices": [{"finish_reason": "stop",
                                   "message": {"content": "VERDICT: SUPPORTED"}}],
@@ -183,8 +184,8 @@ class TestCitationInjection:
             R.reason_evaluate_finding("finding text", "evidence text", input_call_ids=[cid])
         sent = http.call_args[1]["json"]["messages"][1]["content"]
         assert "EVIDENCE COLLECTED THIS INVESTIGATION" in sent   # (a)
-        assert "CITED TOOL OUTPUT" in sent and "mounted ok" in sent  # (b)
-        assert sent.index("finding text") < sent.index("CITED TOOL OUTPUT")
+        assert "EVIDENCE PACKET" in sent and "Observed record" in sent  # (b)
+        assert sent.index("finding text") < sent.index("EVIDENCE PACKET")
 
 
 # ── reading the tool's output file when stdout is a banner (relevance-aware) ──
@@ -254,8 +255,8 @@ class TestCitedOutputFileReading:
         with patch("core.execution_log.log", log), \
              patch.object(R, "COMPAT_EXPAND_CITED", True):
             block = R._expand_cited_evidence([cid], 6000, query_text="Anthony Vanko")
-        assert "[from output file]" not in block
-        assert "SHOULD_NOT_BE_READ" not in block
+        # The call's own kept stdout may be read; the unrelated CSV must not be.
+        assert "SHOULD_NOT_BE_READ" not in block and "x.csv" not in block
 
     def test_no_query_terms_does_not_read_file(self, tmp_path):
         out = tmp_path / "d"; out.mkdir()

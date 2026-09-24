@@ -67,6 +67,26 @@ class TestToolCount:
             assert count >= 12
 
 
+    def test_trace_lifecycle_tools_are_registered(self):
+        # 2026-09-23: a helper inserted between @mcp.tool() and
+        # start_execution_log registered the helper instead, and the agent had
+        # to open its trace through Bash with the wrong checkout's code.
+        import asyncio
+        from tools import misc
+        names = {t.name for t in asyncio.run(misc.mcp.list_tools())}
+        assert {"start_execution_log", "export_execution_log", "record_finding"} <= names
+        assert not any(n.startswith("_") for n in names), sorted(n for n in names if n.startswith("_"))
+
+    def test_no_module_exposes_a_private_helper_as_a_tool(self):
+        # The same decorator slip happened twice (misc.start_execution_log,
+        # then dair.dair_assess): check every mounted tool, not one module.
+        import asyncio
+        import server
+        names = {t.name for t in asyncio.run(server.mcp.list_tools())}
+        assert "dair_assess" in names and "misc_start_execution_log" in names
+        leaked = sorted(n for n in names if n.split("_", 1)[-1].startswith("_") or n.startswith("_"))
+        assert not leaked, leaked
+
 class TestCoreImports:
     def test_core_run_importable(self):
         from core import run

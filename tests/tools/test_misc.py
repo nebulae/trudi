@@ -1,12 +1,17 @@
 """Tests for tools/misc.py."""
 import os
+from core.readiness import state_fingerprint
 import pytest
 from unittest.mock import patch
 
 
 @pytest.fixture(autouse=True)
 def mock_run(run_ok):
-    with patch("tools.misc.run", return_value=run_ok) as m:
+    # Optional binaries resolve as installed unless a test says otherwise, so
+    # argv tests do not depend on what this host has installed.
+    with patch("tools.misc.run", return_value=run_ok) as m, \
+         patch("tools.misc._bin_or_warn",
+               side_effect=lambda n: n if n.startswith("/") else f"/usr/bin/{n}"):
         yield m
 
 
@@ -210,7 +215,9 @@ class TestPeTools:
     def test_pe_scanner(self, mock_run):
         from tools.misc import pe_scanner
         pe_scanner("/malware/sample.exe")
-        assert mock_run.called
+        # pe-scanner requires -f/--file (a bare positional is an argparse error)
+        assert mock_run.call_args[0][0] == [
+            "/usr/local/bin/pe-scanner", "-f", "/malware/sample.exe"]
 
     def test_pe_carver(self, mock_run, tmp_path):
         from tools.misc import pe_carver
@@ -287,6 +294,23 @@ class TestHindsight:
         from tools.misc import hindsight_chrome
         hindsight_chrome("/p", str(tmp_path), output_format="pdf")
         assert self._hs_fmt(mock_run) == "jsonl"
+
+    def test_hindsight_env_carries_py310_utc_shim(self, mock_run, tmp_path, monkeypatch):
+        # /opt/pyhindsight is Python 3.10; pyhindsight uses datetime.UTC (3.11+).
+        import subprocess, sys
+        from tools.misc import hindsight_chrome
+        monkeypatch.setenv("PYTHONPATH", "/prior")
+        hindsight_chrome("/p", str(tmp_path))
+        cmd, kw = mock_run.call_args[0][0], mock_run.call_args[1]
+        assert cmd[0] == "/usr/local/bin/hindsight.py" and cmd[cmd.index("-i") + 1] == "/p"
+        shim, prior = kw["env"]["PYTHONPATH"].split(os.pathsep)
+        assert prior == "/prior" and kw["env"]["PATH"] == os.environ["PATH"]
+        assert os.path.isfile(os.path.join(shim, "sitecustomize.py"))
+        # the shim really defines datetime.UTC in a child interpreter
+        out = subprocess.run(
+            [sys.executable, "-c", "import datetime; print(datetime.UTC is datetime.timezone.utc)"],
+            env={**os.environ, "PYTHONPATH": shim}, capture_output=True, text=True)
+        assert out.stdout.strip() == "True"
 
     def test_hindsight_valid_format_passthrough(self, mock_run, tmp_path):
         from tools.misc import hindsight_chrome
@@ -754,6 +778,148 @@ class TestMraptorScan:
         assert r["success"] is False
 
 
+class TestUsbDeviceForensics:
+    """-r is walked recursively and every file loaded as a hive 3x: the wrapper
+    stages symlinks to SYSTEM + SOFTWARE (+ INF/setupapi.dev.log) only."""
+
+    @staticmethod
+    def _capture(mock_run):
+        seen = {}
+
+        def _side(cmd, **kw):
+            stage = cmd[cmd.index("-r") + 1]
+            seen["cmd"], seen["kw"] = list(cmd), kw
+            seen["files"] = {n: os.readlink(os.path.join(stage, n))
+                             for n in os.listdir(stage)} if os.path.isdir(stage) else None
+            seen["stage"] = stage
+            return {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+                    "truncated": False, "cmd": " ".join(cmd)}
+        mock_run.side_effect = _side
+        return seen
+
+    def _win(self, tmp_path):
+        cfg = tmp_path / "Windows" / "System32" / "config"
+        cfg.mkdir(parents=True)
+        for n in ("SYSTEM", "SOFTWARE", "COMPONENTS", "SAM"):
+            (cfg / n).write_bytes(b"regf")
+        (cfg / "RegBack").mkdir()
+        (cfg / "RegBack" / "SYSTEM").write_bytes(b"regf")
+        inf = tmp_path / "Windows" / "INF"
+        inf.mkdir()
+        (inf / "setupapi.dev.log").write_text("x")
+        return cfg, inf
+
+    def test_config_dir_staged_with_timeout_and_output(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        cfg, inf = self._win(tmp_path)
+        seen = self._capture(mock_run)
+        out = str(tmp_path / "exports" / "usb.tsv")
+        r = usbdeviceforensics(str(cfg), output_path=out)
+        cmd = seen["cmd"]
+        assert cmd[:2] == ["/usr/local/bin/usbdeviceforensics", "-r"]
+        assert seen["stage"] != str(cfg)
+        assert seen["files"] == {"SYSTEM": str(cfg / "SYSTEM"),
+                                 "SOFTWARE": str(cfg / "SOFTWARE"),
+                                 "setupapi.dev.log": str(inf / "setupapi.dev.log")}
+        assert seen["kw"]["timeout"] >= 600
+        r0 = {"stdout": "x", "_stdout_full": "x"}
+        seen["kw"]["classify"](r0, "x", "")        # names the evidence read
+        assert r0["_stdout_full"].startswith(f"Staged input: {cfg / 'SYSTEM'}\n")
+        assert cmd[cmd.index("-o") + 1] == out and cmd[cmd.index("-f") + 1] == "tsv"
+        assert r["output_path"] == out and len(r["staged_inputs"]) == 3
+        assert not os.path.exists(seen["stage"])          # scratch cleaned up
+        assert (cfg / "SYSTEM").exists()                  # never the targets
+
+    def test_hive_file_staged(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        cfg, _ = self._win(tmp_path)
+        seen = self._capture(mock_run)
+        usbdeviceforensics(str(cfg / "SYSTEM"))
+        assert set(seen["files"]) == {"SYSTEM", "SOFTWARE", "setupapi.dev.log"}
+
+    def test_directory_without_system_passed_through(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        usbdeviceforensics(str(tmp_path))
+        assert mock_run.call_args[0][0] == ["/usr/local/bin/usbdeviceforensics", "-r", str(tmp_path)]
+        assert mock_run.call_args[1]["timeout"] >= 600
+
+    def test_runs_as_background_job_when_slow(self):
+        from core.jobs import background_mode
+        assert background_mode("misc_usbdeviceforensics") == "if_slow"
+
+    def test_output_into_evidence_refused(self):
+        from tools.misc import usbdeviceforensics
+        with pytest.raises(ValueError):
+            usbdeviceforensics("/mnt/x/SYSTEM", output_path="/mnt/x/usb.tsv")
+
+
+class TestToolUnavailable:
+    """A missing optional binary fails fast with a typed status and the tool
+    is dropped from the manifest DAIR prescribes from."""
+
+    @pytest.mark.parametrize("fn,args", [
+        ("chainsaw_hunt", ("/tmp/evtx",)), ("capa_analyze", ("/tmp/x.exe",)),
+        ("olevba_scan", ("/tmp/x.doc",)), ("mraptor_scan", ("/tmp/x.doc",)),
+        ("densityscout_scan", ("/tmp/x.exe",)), ("usnparser_parse", ("/tmp/$J",)),
+    ])
+    def test_typed_failure_without_running(self, mock_run, monkeypatch, fn, args):
+        import tools.misc as misc
+        monkeypatch.setattr("tools.misc._bin_or_warn", lambda name: None)
+        r = getattr(misc, fn)(*args)
+        assert r["success"] is False and r["status"] == "tool_unavailable"
+        assert "not installed" in r["error"]
+        assert not mock_run.called
+
+    def test_uninstalled_tools_excluded_from_manifest(self, monkeypatch):
+        import tools.tool_capabilities as tc
+        monkeypatch.setattr(tc.shutil, "which",
+                            lambda n: None if n == "chainsaw" else f"/usr/bin/{n}")
+        assert "misc.chainsaw_hunt" in tc.unavailable_tools()
+        assert "misc.chainsaw_hunt" not in tc.allowed_tool_names()
+        assert "misc.chainsaw_hunt" in tc.unknown_priority_tools(["misc.chainsaw_hunt"])
+        text = tc.format_tool_manifest_for_prompt(max_tools_per_capability=50)
+        assert "misc.chainsaw_hunt" not in text and "ez.evtxecmd" in text
+        monkeypatch.setattr(tc.shutil, "which", lambda n: f"/usr/bin/{n}")
+        assert "misc.chainsaw_hunt" in tc.allowed_tool_names()
+
+
+class TestSrumExport:
+    def test_esedbexport_argv_and_tables(self, monkeypatch, tmp_path):
+        from tools.misc import srum_export
+        out = tmp_path / "exports" / "srum"
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"], captured["kw"] = cmd, kw
+            exp = out / "srudb.export"
+            exp.mkdir(parents=True)
+            for t in ("{973F5D5C-1D90-4944-BE8E-24B94231A174}.7",
+                      "{D10CA2FE-6FCF-4F6D-848E-B2E99266FA89}.9", "SruDbIdMapTable.4"):
+                (exp / t).write_text("a\tb\n")
+            return {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+                    "_trudi_call_id": 5}
+        monkeypatch.setattr("tools.misc.run", fake_run)
+        r = srum_export("/mnt/x/Windows/System32/sru/SRUDB.dat", str(out))
+        assert captured["cmd"] == ["/usr/bin/esedbexport", "-t", str(out / "srudb"),
+                                   "/mnt/x/Windows/System32/sru/SRUDB.dat"]
+        assert r["success"] is True and r["output_path"] == str(out / "srudb.export")
+        assert len(r["tables"]) == 3
+        net = [v for k, v in r["key_tables"].items() if k.startswith("network_usage")]
+        assert net and net[0].endswith("{973F5D5C-1D90-4944-BE8E-24B94231A174}.7")
+        assert any(k.startswith("app_resource_usage") for k in r["key_tables"])
+
+    def test_output_into_evidence_refused(self):
+        from tools.misc import srum_export
+        with pytest.raises(ValueError):
+            srum_export("/mnt/x/SRUDB.dat", "/mnt/x/out")
+
+    def test_no_tables_is_failure(self, monkeypatch, tmp_path):
+        from tools.misc import srum_export
+        monkeypatch.setattr("tools.misc.run", lambda cmd, **kw: {"success": True})
+        r = srum_export("/tmp/SRUDB.dat", str(tmp_path / "exports"))
+        assert r["success"] is False and "no tables" in r["error"]
+
+
 class TestBatchRun:
     def test_batch_run_empty(self):
         from tools.misc import batch_run
@@ -967,7 +1133,7 @@ class TestRecordFindingMcpRoutingGate:
         assert r["success"] is False
         assert r.get("gate") == "mcp_routing"
         assert "MCP routing" in r["error"]
-        assert "vol.vol_" in r.get("suggested_wrapper", "")
+        assert "vol." in r.get("suggested_wrapper", "")
 
     def test_bash_dotnet_eztool_invocation_refuses_finding(self, tmp_path):
         from tools.misc import record_finding
@@ -982,7 +1148,7 @@ class TestRecordFindingMcpRoutingGate:
         assert r["success"] is False
         assert r.get("gate") == "mcp_routing"
         assert "EvtxECmd" in r.get("offending_cmd_excerpt", "")
-        assert "ez_evtxecmd" in r.get("suggested_wrapper", "")
+        assert "ez.evtxecmd" in r.get("suggested_wrapper", "")
 
     def test_bash_non_forensic_command_does_not_refuse(self, tmp_path):
         from tools.misc import record_finding
@@ -1499,7 +1665,8 @@ class TestExportRequiresPreReportCheck:
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_pre_report_check", True,
                              "READY_TO_REPORT: true\nBLOCKING_ISSUES (0): none", {},
-                             extra={"ready_to_report": True})
+                             extra={"ready_to_report": True,
+                                    "readiness_fingerprint": state_fingerprint(l._entries, l._case_id)})
         with patch("core.execution_log.log", l), \
              patch("tools.misc.assert_output_safe", lambda *a, **kw: None):
             r = export_execution_log(str(tmp_path / "out"))
@@ -1546,7 +1713,8 @@ class TestWriteFinalReportRequiresPreReportCheck:
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_pre_report_check", True,
                              "READY_TO_REPORT: true\nBLOCKING_ISSUES (0): none", {},
-                             extra={"ready_to_report": True})
+                             extra={"ready_to_report": True,
+                                    "readiness_fingerprint": state_fingerprint(l._entries, l._case_id)})
         out = tmp_path / "reports" / "report.md"
         with patch("core.execution_log.log", l):
             r = write_final_report(str(out), "# Report\n")
@@ -1554,9 +1722,8 @@ class TestWriteFinalReportRequiresPreReportCheck:
         assert out.read_text() == "# Report\n"
         assert r.get("_trudi_call_id")
 
-    def test_unresolved_synthesize_blockers_are_appended_as_limitations(self, tmp_path):
-        # H-6: pre_report demoted synthesize blockers ride into the report
-        # server-side; the agent cannot leave them out.
+    def test_adjudicated_limitations_are_appended(self, tmp_path):
+        # Adjudicated evidence limitations ride into the report server-side.
         from tools.misc import write_final_report
         from core.execution_log import ExecutionLog
         l = ExecutionLog()
@@ -1564,6 +1731,7 @@ class TestWriteFinalReportRequiresPreReportCheck:
         l.record_dair_call("Report", "", False, "", "", "stay", "")
         l.record_reason_call("reason_pre_report_check", True, "READY_TO_REPORT: true", {},
                              extra={"ready_to_report": True,
+                                    "readiness_fingerprint": state_fingerprint(l._entries, l._case_id),
                                     "synthesize_blockers_unresolved": ["Verification of X needed"]})
         out = tmp_path / "reports" / "report.md"
         with patch("core.execution_log.log", l):
@@ -1624,3 +1792,41 @@ class TestTypedTierAndCiteVerdict:
                              inputs={"user_message": f"FINDING:\n{desc}"},
                              extra={"cite_verdict": "ALL_CITED"})
         assert cc.check(self._ctx(l, desc, "LIKELY")) is None
+
+
+def test_clear_case_run_clears_hidden_entries_and_spares_evidence(tmp_path, monkeypatch):
+    """Hidden sidecars/locks in the output dirs are cleared (a stale
+    analysis/.tool_output/<cid>.txt would be read by the next run under a
+    reused call id); evidence/, CLAUDE.md and .claude/ are never touched."""
+    from tools.misc import clear_case_run
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "session.json").write_text("{}")
+    monkeypatch.setenv("TRUDI_CACHE_DIR", str(cache))
+    case = tmp_path / "case"
+    sidecars = case / "analysis" / ".tool_output"
+    sidecars.mkdir(parents=True)
+    (sidecars / "42.txt").write_text("previous run")
+    (case / "analysis" / ".FR-abc.lock").write_text("")
+    (case / "analysis" / ".synthesis-x.lock").write_text("")
+    (case / "analysis" / "CASE_trace.json").write_text("{}")
+    (case / "exports").mkdir()
+    (case / "exports" / ".hidden.csv").write_text("x")
+    (case / "reports").mkdir()
+    (case / "reports" / "CASE.md").write_text("x")
+    (case / "evidence").mkdir()
+    (case / "evidence" / "disk.E01").write_bytes(b"\x00")
+    (case / "CLAUDE.md").write_text("case")
+    (case / ".claude").mkdir()
+    (case / ".claude" / "settings.json").write_text("{}")
+
+    r = clear_case_run(str(case))
+
+    assert r["success"], r
+    for sub in ("analysis", "exports", "reports"):
+        assert (case / sub).is_dir()
+        assert os.listdir(case / sub) == []
+    assert (case / "evidence" / "disk.E01").exists()
+    assert (case / "CLAUDE.md").exists()
+    assert (case / ".claude" / "settings.json").exists()
+    assert not (cache / "session.json").exists()

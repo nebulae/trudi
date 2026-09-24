@@ -4,6 +4,13 @@ Directs the coding agent running a TRUDI investigation under OpenCode. This is t
 condensed orchestrator — every rule here is backed by a server-enforced gate; the
 full rationale lives in `~/trudi/claude/CLAUDE.md` and `~/trudi/docs/gates.md`.
 
+## Mode contract
+
+Default mode is **autonomous agent** — the rules below apply as written.
+When the **TRUDI Pilot profile** is active (the `trudi-pilot` agent), its
+conversational rules OVERRIDE the autonomy directives here; every other
+rule (evidence path, gates, typed claims, citability) applies unchanged.
+
 ## Ground rules
 
 - **Run fully autonomously.** Never ask questions, never check in, never end a turn
@@ -22,10 +29,10 @@ full rationale lives in `~/trudi/claude/CLAUDE.md` and `~/trudi/docs/gates.md`.
   `fls/icat/…`, EZ `dotnet …Cmd.dll`, `log2timeline.py`, `yara`, `bulk_extractor`,
   `tcpdump`, `hexdump/xxd/exiftool`, `rip.pl`, `clamscan`, mount tools). Findings
   citing bash runs of these are refused (gate `mcp_routing`).
-- **Read produced output with `read.read_output` / `read.read_mail`** — never
+- **Read produced output with `read.output` / `read.mail`** — never
   bash `cat`/`jq`/`python`. Bash reads are untraced and uncitable; `read.*` returns
   a `_trudi_call_id` you can cite. Recipient/dissemination claims MUST cite
-  `read.read_mail` message BODIES (To/Cc + body), never subject lines alone.
+  `read.mail` message BODIES (To/Cc + body), never subject lines alone.
 - Timestamps always UTC. Check `success: true` after every run; on failure read
   stderr, correct, retry. A result with `truncated: true` is INCOMPLETE — re-run
   narrower before recording any negative.
@@ -49,11 +56,11 @@ full rationale lives in `~/trudi/claude/CLAUDE.md` and `~/trudi/docs/gates.md`.
    question>)` — BEFORE reason.plan. Capture each `hypothesis_id`; route findings
    back via `tested_hypothesis_id`.
 4. Pre-plan parallel batch (evidence-type dependent): registry hives via
-   `ez.ez_recmd_hive` (SOFTWARE/SYSTEM/SAM), `vol.vol_symbol_check` on any memory
+   `ez.recmd_hive` (SOFTWARE/SYSTEM/SAM), `vol.symbol_check` on any memory
    image, `strings.stat_file` on evidence. PCAP-only cases: `net.tcpdump_read` +
    `net.tcpdump_extract_ips`/`list_connections` + `net.http_session_inventory`.
 5. `reason.plan(case_description, evidence_available, case_question=…)`.
-6. `dair.dair_assess` — then follow the DAIR loop below for the whole investigation.
+6. `dair.assess` — then follow the DAIR loop below for the whole investigation.
 
 ## DAIR execution loop (DAIR prescribes; you execute)
 
@@ -108,14 +115,31 @@ host pivots exist) appear in the trace's phase history.
   intended, collect the named missing classes or record at the reachable tier.
 - `reason.cite_check` — before recording findings with concrete claims (paths, IPs,
   hashes, technique IDs).
+- Before Report, call `reason.readiness_status` to settle deterministic prerequisites.
+  Call `reason.audit_findings` explicitly for new substantive narration; unchanged audits are cached.
 - Report phase: `reason.synthesize(findings=<narrative>)` → `reason.pre_report_check`
   → resolve ALL `blocking_issues` with evidence or typed dispositions (never
   wording) → `misc.export_execution_log("./reports/<case_id>_trace")` →
-  `misc.write_final_report`.
+  `misc.write_final_report`. Approval expires when relevant state changes. Repeated review
+  rounds never waive factual blockers; resolve structured issue IDs with evidence or a
+  reviewed correction. `supersedes` must target the current revision of the same claim;
+  use `misc.retract_finding` to withdraw an unsupported claim explicitly.
 - ATT&CK ids in findings are auto-validated; scout with `correlate.mitre_map` /
   `correlate.mitre_validate`.
 
 ## Recording findings (typed claims — the control plane reads these, not prose)
+
+Prefer `misc.submit_finding` for a complete draft: pass description, confidence,
+explicit evidence IDs, a stable idempotency key, and `claim={...}` containing the
+same typed fields as record_finding. It preflights, reviews and commits one finding.
+Reuse that exact key/request after timeout; a changed draft uses a new key.
+`recorded` means committed; otherwise act on the returned issues. This operation
+never silently lowers confidence. Legacy evaluate/record calls remain available,
+with new review receipts bound to the exact description, typed claim and evidence.
+The separate evaluate/confidence-score/cite-check steps above are handled inside
+submission; do not repeat them before submitting. For a preview, use the separate
+checks and finish with record_finding on the exact reviewed inputs.
+
 
 Every CONFIRMED/LIKELY/UNCONFIRMED finding via `misc.record_finding` needs:
 
@@ -185,7 +209,7 @@ typed park before Report — `pre_report_check` blocks otherwise.
   each was queried, cross-reference EVERY found identity against the roster.
 - **Recipient exhaustion:** "who received the data" needs a full sender/recipient
   inventory of mail (`misc.readpst_extract`/`pff_export`) AND chat stores
-  (`misc.chat_db_export`), read via `read.read_mail`/`read.read_output`,
+  (`misc.chat_db_export`), read via `read.mail`/`read.output`,
   cross-referenced against the roster. Declare recipients typed; engaged or
   roster-matched correspondents left unreferenced block the report.
 - **Exfil channels:** enumerate ALL candidates (removable, ftp, cloud, email, web,

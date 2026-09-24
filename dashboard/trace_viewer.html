@@ -84,9 +84,16 @@
 
   .layout {
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr) minmax(360px, 480px);
+    grid-template-columns: 240px minmax(0, 1fr) 6px var(--detail-w, minmax(360px, 480px));
     height: calc(100vh - 44px);
   }
+  /* Drag handle between the entry list and the detail pane. */
+  .splitter {
+    cursor: col-resize; background: var(--bg-2);
+    border-left: 1px solid var(--border); touch-action: none;
+  }
+  .splitter:hover, .splitter.dragging { background: var(--accent); }
+  body.resizing { cursor: col-resize; user-select: none; }
   .pane { overflow: auto; }
   .pane.filters { background: var(--bg-2); border-right: 1px solid var(--border); padding: 12px; }
   .pane.entries { padding: 0; }
@@ -130,6 +137,27 @@
   .pill.blocked { background: rgba(255,168,107,.18); color: var(--finding-likely); }
   .pill.fetch { background: rgba(94,209,209,.12); color: var(--curiosity); }
   .pill.disposition { background: rgba(180,140,255,.12); color: var(--dair); }
+  .pill.ioc { background: rgba(255,107,107,.12); color: var(--finding-confirmed); }
+  .pill.phase { background: rgba(180,140,255,.20); color: var(--dair); }
+  .pill.submission { background: rgba(255,168,107,.10); color: var(--finding-likely); }
+  .filter-group label.zero { opacity: .45; }
+  .filter-group select + select, .filter-group select + input { margin-top: 6px; }
+  .ioc-focus {
+    margin-top: 6px; padding: 4px 6px; border: 1px solid var(--accent); border-radius: 4px;
+    font-size: 11px; color: var(--accent); display: flex; align-items: center; gap: 6px;
+  }
+  .img-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+  .img-thumb { display: flex; flex-direction: column; align-items: center; width: 150px;
+               background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px;
+               padding: 4px; text-decoration: none; color: var(--fg-dim); font-size: 11px; }
+  .img-thumb img { max-width: 140px; max-height: 110px; object-fit: contain; background: #fff1; }
+  .img-thumb span { margin-top: 3px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .img-thumb.img-missing { display: none; }
+  .ioc-focus button, .detail .btn {
+    background: var(--bg-3); color: var(--accent); border: 1px solid var(--border);
+    border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer;
+  }
+  .ioc-focus button:hover, .detail .btn:hover { background: var(--bg-hl); }
 
   /* Entries list */
   .entry {
@@ -251,6 +279,7 @@
   <span class="stat" id="last-fetch" title="last successful trace fetch"></span>
   <span class="live" id="live"><span class="live-dot"></span><span id="live-text">offline</span></span>
   <a id="graph-link" class="graph-btn" target="_blank" title="Open Investigation Chain blueprint view">Chain ↗</a>
+  <a id="report-link" class="graph-btn" target="trudi-report" title="Open the case's final report">Report ↗</a>
   <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
     <input type="checkbox" id="follow-tail" checked /> follow new
   </label>
@@ -275,6 +304,31 @@
       <label><input type="checkbox" class="type-filter" value="tool_blocked" checked><span class="pill blocked">⛔ BLOCKED</span><span class="count" data-count="tool_blocked">0</span></label>
       <label><input type="checkbox" class="type-filter" value="disposition" checked><span class="pill disposition">📌 DISP</span><span class="count" data-count="disposition">0</span></label>
       <label><input type="checkbox" class="type-filter" value="reason_evidence_fetch"><span class="pill fetch">🔎 FETCH</span><span class="count" data-count="reason_evidence_fetch">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="finding_submission" checked><span class="pill submission">SUBMIT</span><span class="count" data-count="finding_submission">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="finding_retracted" checked><span class="pill refused">RETRACT</span><span class="count" data-count="finding_retracted">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="phase_transition" checked><span class="pill phase">⇄ PHASE</span><span class="count" data-count="phase_transition">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="ioc" checked><span class="pill ioc">☣ IOC</span><span class="count" data-count="ioc">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="user_message" checked><span class="pill narration">USER</span><span class="count" data-count="user_message">0</span></label>
+      <label><input type="checkbox" class="type-filter" value="run_profile"><span class="pill narration">profile</span><span class="count" data-count="run_profile">0</span></label>
+      <div id="type-filters-extra"></div>
+    </div>
+
+    <div class="filter-group" id="ioc-filters">
+      <h3>IOCs</h3>
+      <select id="ioc-type" title="IOC type"><option value="">all IOC types</option></select>
+      <select id="ioc-status" title="IOC status">
+        <option value="">any status</option>
+        <option value="malicious">malicious</option>
+        <option value="suspicious">suspicious</option>
+        <option value="observed">observed</option>
+        <option value="benign">benign</option>
+        <option value="unknown">unknown</option>
+      </select>
+      <input type="text" id="ioc-technique" placeholder="ATT&amp;CK technique, e.g. T1021" />
+      <label><input type="checkbox" id="ioc-only"> only IOC entries</label>
+      <div class="ioc-focus" id="ioc-focus" style="display:none">
+        <span id="ioc-focus-text"></span><button id="ioc-focus-clear" type="button">clear</button>
+      </div>
     </div>
 
     <div class="filter-group">
@@ -310,14 +364,19 @@
     <div class="empty" id="empty-state">Load a trace to begin.</div>
   </main>
 
+  <div class="splitter" id="detail-splitter" role="separator" aria-orientation="vertical"
+       title="Drag to resize · double-click to reset"></div>
+
   <aside class="pane detail" id="detail">
     <div class="empty">Click an entry on the left to see its details.</div>
   </aside>
 
 </div>
 
+<script src="trace_render.js"></script>
 <script>
 'use strict';
+const TR = window.TrudiRender;
 
 // ── State ────────────────────────────────────────────────────────────────────
 const State = {
@@ -336,6 +395,11 @@ const State = {
     phase: '',
     errorsOnly: false,
     hasFindingOnly: false,
+    iocType: '',
+    iocStatus: '',
+    iocTechnique: '',
+    iocOnly: false,
+    iocFocus: null,        // ioc call_id: show only it + its evidence calls
   },
   prevEntryCount: 0,
   refreshTimer: null,
@@ -492,8 +556,12 @@ function entrySummary(e) {
     }
     case 'reason_call': {
       const verdict = (() => {
+        const rv = reviewState(e);
+        if (rv.pending) return ` [⏳ reviewing · round ${rv.round}/${rv.maxRounds}]`;
+        const rb = reasonResult(e);
+        if (rb && typeof rb.verdict === 'string') return ` [${rb.verdict.toUpperCase()}${rv.fetches ? ` after ${rv.fetches} fetch${rv.fetches > 1 ? 'es' : ''}` : ''}]`;
         const c = e.conclusion || '';
-        const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN)/i);
+        const m = c.match(/VERDICT:\s*(SUPPORTED|CHALLENGED|UNCERTAIN|CONTRADICTED|UNVERIFIABLE)/i);
         return m ? ` [${m[1].toUpperCase()}]` : '';
       })();
       const status = e.success ? '' : ' FAIL';
@@ -621,6 +689,51 @@ function entrySummary(e) {
         meta: chip,
       };
     }
+    case 'ioc': {
+      const ev = Array.isArray(e.evidence_call_ids) ? e.evidence_call_ids : [];
+      const chips = ev.slice(0, 5).map(c => _linkChip(c, `→ #${c}`)).join('')
+        + (ev.length > 5 ? ` +${ev.length - 5}` : '');
+      const tech = (e.techniques || []).join(' ');
+      return {
+        pill: '<span class="pill ioc">☣ IOC</span>',
+        line: `${_iocStatusPill(e.status)} <code>${escapeHtml(e.ioc_type || '')}</code> ${escapeHtml(shorten(e.value || '', 100))}`,
+        meta: (tech ? `<code>${escapeHtml(tech)}</code> ` : '') + chips,
+      };
+    }
+    case 'phase_transition':
+      return {
+        pill: '<span class="pill phase">⇄ PHASE</span>',
+        line: `${escapeHtml(e.from_phase || '—')} → <b>${escapeHtml(e.to_phase || '')}</b>`,
+        meta: `<code>${escapeHtml(e.reason || '')}</code>` + (e.trigger ? ` · trigger ${escapeHtml(e.trigger)}` : ''),
+      };
+    case 'finding_submission': {
+      const chip = e.review_call_id ? ' ' + _linkChip(e.review_call_id, `review #${e.review_call_id}`) : '';
+      const fin = _findingForSubmission(e);
+      const finChip = fin ? ' ' + _linkChip(fin.call_id, `→ ${fin.finding_id || '#' + fin.call_id}`, {reverse: true}) : '';
+      return {
+        pill: '<span class="pill submission">SUBMIT</span>',
+        line: `<b>${escapeHtml(e.status || '')}</b> <code>${escapeHtml(e.idempotency_key || '')}</code>`,
+        meta: escapeHtml(shorten(e.error || e.reason || '', 100)) + chip + finChip,
+      };
+    }
+    case 'finding_retracted':
+      return {
+        pill: '<span class="pill refused">RETRACT</span>',
+        line: escapeHtml(shorten(e.reason || '', 120)),
+        meta: e.finding_call_id ? _linkChip(e.finding_call_id, `finding #${e.finding_call_id}`) : '',
+      };
+    case 'user_message':
+      return {
+        pill: '<span class="pill narration">USER</span>',
+        line: escapeHtml(shorten(e.content || '', 120)),
+        meta: '',
+      };
+    case 'run_profile':
+      return {
+        pill: '<span class="pill narration">profile</span>',
+        line: escapeHtml(shorten(JSON.stringify(e.code_identity || {}), 120)),
+        meta: '',
+      };
     default:
       return {
         pill: '<span class="pill">?</span>',
@@ -630,9 +743,45 @@ function entrySummary(e) {
   }
 }
 
+function _iocStatusPill(status) {
+  const st = String(status || 'unknown').toLowerCase();
+  return `<span class="tr-status ${escapeHtml(st)}">${escapeHtml(st)}</span>`;
+}
+
+function _findingForSubmission(sub) {
+  if (!sub || !sub.idempotency_key) return null;
+  for (const x of State.entries) {
+    if (x.type === 'finding' && x.submission_key === sub.idempotency_key) return x;
+  }
+  return null;
+}
+
+function _iocMatches(e) {
+  const F = State.filters;
+  if (F.iocType && e.ioc_type !== F.iocType) return false;
+  if (F.iocStatus && String(e.status || 'unknown').toLowerCase() !== F.iocStatus) return false;
+  if (F.iocTechnique) {
+    const q = F.iocTechnique.toLowerCase();
+    if (!(e.techniques || []).some(t => String(t).toLowerCase().includes(q))) return false;
+  }
+  return true;
+}
+
 function entryMatchesFilters(e) {
   const F = State.filters;
+  if (F.iocFocus !== null) {
+    // "Show calls linked to IOC X": the IOC plus the calls it cites as
+    // evidence, regardless of the type filters.
+    const ioc = State.entriesById.get(F.iocFocus);
+    if (!ioc) return false;
+    if (e.call_id === ioc.call_id) return true;
+    return (ioc.evidence_call_ids || []).includes(e.call_id);
+  }
   if (F.types.size && !F.types.has(e.type)) return false;
+  if (e.type === 'ioc' && !_iocMatches(e)) return false;
+  if (F.iocOnly && e.type !== 'ioc') return false;
+  if (e.type === 'reason_evidence_fetch' && !F.types.has('reason_evidence_fetch')
+      && e.reason_call_id && State.entriesById.has(e.reason_call_id)) return false;
   if (F.jump !== null) return e.call_id === F.jump;
   if (F.phase) {
     const blk = State.phaseBlocks.find(b => b.anchor === F.phase);
@@ -684,16 +833,18 @@ function renderEntries() {
   let prevBlockAnchor = null;
   for (let i = State.entries.length - 1; i >= 0; i--) {
     const e = State.entries[i];
+    if (!entryMatchesFilters(e)) continue;
     const block = _phaseBlockForCid(e.call_id);
     // Hook entries (call_ids >= 1e9) fall outside every block range — treat
     // them as inheriting the previous block so they don't fragment the header.
+    // A header is emitted only above a block's first visible entry, so a
+    // narrow filter does not leave a wall of empty phase headers.
     if (block) {
       if (block.anchor !== prevBlockAnchor) {
         html += `<div class="phase-header" id="${block.anchor}">PHASE: <span class="phase-name">${escapeHtml(block.phase)}</span><span class="range">#${block.startCid}–#${block.endCid}</span></div>`;
         prevBlockAnchor = block.anchor;
       }
     }
-    if (!entryMatchesFilters(e)) continue;
     const s = entrySummary(e);
     const cls = [
       'entry',
@@ -713,11 +864,14 @@ function renderEntries() {
   }
   container.innerHTML = html || paneEmpty('No entries match the current filters.');
 
-  // Update count badges per type
+  // Update count badges per type (counts come from the loaded trace).
   const counts = {};
   for (const e of State.entries) counts[e.type] = (counts[e.type] || 0) + 1;
   for (const el of $$('.count')) {
-    el.textContent = counts[el.dataset.count] || 0;
+    const n = counts[el.dataset.count] || 0;
+    el.textContent = n;
+    const lbl = el.closest('label');
+    if (lbl) lbl.classList.toggle('zero', n === 0);
   }
   $('#entry-count').textContent = State.entries.length;
 
@@ -760,12 +914,58 @@ function renderDetail(e) {
     case 'tool_blocked': body = renderToolBlocked(e); break;
     case 'disposition': body = renderDisposition(e); break;
     case 'reason_evidence_fetch': body = renderEvidenceFetch(e); break;
+    case 'ioc': body = renderIoc(e); break;
+    case 'phase_transition': body = renderPhaseTransition(e); break;
+    case 'finding_submission': body = renderFindingSubmission(e); break;
+    case 'finding_retracted': body = renderFindingRetracted(e); break;
+    case 'user_message': body = renderNarration(e); break;
     default: body = `<pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
   }
   $('#detail').innerHTML = head + body;
-  $('#detail').querySelectorAll('.link[data-jump]').forEach(el => {
-    el.addEventListener('click', () => selectEntry(parseInt(el.dataset.jump, 10)));
-  });
+  // Jump links (incl. ones inserted later by async output loads) are handled
+  // by one delegated listener on #detail — see setupFilters().
+  hydrateDetail(e);
+}
+
+// ── Async detail content (full stdout / fetch results / source files) ────────
+// Placeholders carry data-load-path; the text is fetched through the server's
+// read-only output endpoint and rendered as a table when it is CSV/TSV.
+function hydrateDetail(e) {
+  const cid = e.call_id;
+  $$('#detail [data-load-path][data-autoload]').forEach(el => loadInto(el, cid));
+  _hydrateImageDirs();
+}
+
+async function loadInto(el, cid) {
+  const path = el.dataset.loadPath;
+  if (!path || !State.traceUrl || !TR) return;
+  const max = el.dataset.loadMax ? parseInt(el.dataset.loadMax, 10) : undefined;
+  el.removeAttribute('data-autoload');
+  const status = el.querySelector('.load-status');
+  if (status) status.textContent = 'loading…';
+  try {
+    const res = await TR.fetchOutput(State.traceUrl, path, max);
+    if (State.selectedId !== cid) return;          // selection moved on
+    const note = res.truncated
+      ? `showing the first ${res.text.length.toLocaleString()} of ${res.size.toLocaleString()} bytes`
+      : `${res.size.toLocaleString()} bytes`;
+    const kind = el.dataset.loadKind || '';
+    el.innerHTML = kind === 'fetch'
+      ? renderFetchResultText(res.text, note)
+      : TR.outputHtml(res.text, { cmd: el.dataset.cmd || '', note, cap: 100 });
+  } catch (err) {
+    if (State.selectedId !== cid) return;
+    if (status) status.textContent = `could not load (${err.message}) — showing the stored excerpt`;
+  }
+}
+
+function _loadBox(path, inner, opts) {
+  opts = opts || {};
+  return `<div data-load-path="${escapeHtml(path)}"${opts.auto ? ' data-autoload="1"' : ''}`
+    + `${opts.kind ? ` data-load-kind="${escapeHtml(opts.kind)}"` : ''}`
+    + `${opts.cmd ? ` data-cmd="${escapeHtml(opts.cmd)}"` : ''}`
+    + `${opts.max ? ` data-load-max="${opts.max}"` : ''}>`
+    + `<div class="tr-note load-status"></div>${inner}</div>`;
 }
 
 function _findingsLinkedHere(cid) {
@@ -791,10 +991,104 @@ function renderToolCall(e) {
       ${e.stdout_chars !== undefined ? `<span class="k">stdout</span><span class="v">${e.stdout_chars} chars${e.stdout_path ? ` · sidecar <code>${escapeHtml(e.stdout_path)}</code>${e.stdout_partial ? ' (PARTIAL)' : ''}` : (e.stdout_excerpt && e.stdout_chars > e.stdout_excerpt.length ? ' · <span class="pill error">PARTIAL — only the excerpt is stored</span>' : ' · complete')}</span>` : ''}
       ${e.session_artifact ? `<span class="k">session artifact</span><span class="v">yes${Array.isArray(e.session_event_ids) ? ' (' + e.session_event_ids.join(', ') + ')' : ''}</span>` : ''}
     </div>
-    ${e.stdout_excerpt ? `<h3>stdout excerpt</h3><pre>${escapeHtml(e.stdout_excerpt)}</pre>` : ''}
+    ${renderToolOutput(e)}
+    ${_imagePreviews(e)}
     ${e.stderr ? `<h3>stderr</h3><pre>${escapeHtml(e.stderr)}</pre>` : ''}
     ${_findingsLinkedHere(e.call_id)}
+    ${_iocsCitingHere(e.call_id)}
   `;
+}
+
+// read.output / read.mail: parameters as a table; output as a table when it
+// is CSV/TSV (or one row per message for read.mail), else <pre>. The full
+// text comes from the stdout sidecar (stdout_path) via the output endpoint.
+function renderToolOutput(e) {
+  const rc = TR ? TR.parseReadCmd(e.cmd) : null;
+  let html = '';
+  if (rc) {
+    html += `<h3>${escapeHtml(rc.tool)} parameters</h3>` + TR.paramsHtml(rc);
+    if (rc.tool === 'read.output' && rc.file) {
+      html += `<div style="margin:4px 0"><span class="btn" data-load-source="${escapeHtml(rc.file)}">open source file (first 2 MB)</span></div>`
+        + `<div id="source-file-box"></div>`;
+    }
+  }
+  const excerpt = e.stdout_excerpt || '';
+  const full = e.stdout_path && (e.stdout_chars === undefined || e.stdout_chars > 0);
+  if (!excerpt && !full) {
+    return html + (e.stdout_chars === 0 ? `<h3>output</h3><div class="tr-note">(no output)</div>` : '');
+  }
+  const partialNote = e.stdout_chars && excerpt && e.stdout_chars > excerpt.length
+    ? `stored excerpt: ${excerpt.length} of ${e.stdout_chars} chars` : '';
+  const inner = TR ? TR.outputHtml(excerpt, { cmd: e.cmd, note: partialNote, cap: 100 })
+                   : `<pre>${escapeHtml(excerpt)}</pre>`;
+  const label = rc ? `${rc.tool} result` : 'stdout';
+  html += `<h3>${escapeHtml(label)}${full ? '' : ' excerpt'}</h3>`;
+  html += full ? _loadBox(e.stdout_path, inner, { auto: true, cmd: e.cmd }) : inner;
+  return html;
+}
+
+// ── Image previews ───────────────────────────────────────────────────────────
+// A tool that wrote or pointed at a picture (icat/carvers/exports, a
+// screenshot, an evidence photo) shows it here. Paths come from the command,
+// output_path/output_file and the tool's own output text; the server checks
+// each is inside the case (tool output, exports, evidence, mnt) and that its
+// header bytes really are an image.
+const _IMG_RE = /(?:^|[\s'"=(,])((?:\/|[A-Za-z]:\\)[^\s'"<>|,;()]*?\.(?:png|jpe?g|gif|bmp|webp))(?=$|[\s'"),;])/gi;
+function _tracePathParam() {
+  try { return new URL(State.traceUrl, location.href).pathname; } catch (_) { return State.traceUrl || ''; }
+}
+function _imgUrl(path) {
+  return `/_dashboard/api/image?trace=${encodeURIComponent(_tracePathParam())}&path=${encodeURIComponent(path)}`;
+}
+function _imageCandidates(e) {
+  const found = new Set();
+  const scan = (txt) => { if (!txt) return; for (const m of String(txt).matchAll(_IMG_RE)) found.add(m[1]); };
+  scan(e.cmd); scan(e.stdout_excerpt);
+  for (const k of ['output_path', 'output_file']) {
+    const v = e[k];
+    if (v && /\.(png|jpe?g|gif|bmp|webp)$/i.test(v)) found.add(v);
+  }
+  return [...found].slice(0, 12);
+}
+function _imagePreviews(e) {
+  const files = _imageCandidates(e);
+  const dir = e.output_path && !/\.[A-Za-z0-9]{1,5}$/.test(e.output_path) ? e.output_path : '';
+  if (!files.length && !dir) return '';
+  const thumbs = files.map(p => _imgThumb(p)).join('');
+  return `<div class="img-previews"${dir ? ` data-img-dir="${escapeHtml(dir)}"` : ''}>`
+    + (files.length ? `<h3>images</h3><div class="img-grid">${thumbs}</div>` : '')
+    + `</div>`;
+}
+function _imgThumb(p) {
+  const name = p.split(/[\\/]/).pop();
+  return `<a class="img-thumb" href="${_imgUrl(p)}" target="_blank" title="${escapeHtml(p)}">`
+    + `<img loading="lazy" src="${_imgUrl(p)}" alt="${escapeHtml(name)}" `
+    + `onerror="this.closest('.img-thumb').classList.add('img-missing')">`
+    + `<span>${escapeHtml(name)}</span></a>`;
+}
+async function _hydrateImageDirs() {
+  for (const box of $$('#detail [data-img-dir]')) {
+    const dir = box.dataset.imgDir;
+    box.removeAttribute('data-img-dir');
+    try {
+      const u = `/_dashboard/api/images?trace=${encodeURIComponent(_tracePathParam())}&dir=${encodeURIComponent(dir)}`;
+      const r = await fetch(u, { cache: 'no-store' });
+      if (!r.ok) continue;
+      const data = await r.json();
+      const imgs = (data.images || []).filter(p => !box.querySelector(`[title="${CSS.escape(p)}"]`));
+      if (!imgs.length) continue;
+      const more = data.total > (data.images || []).length ? ` (showing ${data.images.length} of ${data.total})` : '';
+      box.insertAdjacentHTML('beforeend',
+        `<h3>images in output folder${escapeHtml(more)}</h3><div class="img-grid">${imgs.map(_imgThumb).join('')}</div>`);
+    } catch (_) { /* preview is best-effort */ }
+  }
+}
+
+function _iocsCitingHere(cid) {
+  const iocs = State.entries.filter(x => x.type === 'ioc' && (x.evidence_call_ids || []).includes(cid));
+  if (!iocs.length) return '';
+  return `<h3>IOCs citing this call</h3><ul>` + iocs.map(i =>
+    `<li>${_linkChip(i.call_id, `→ #${i.call_id}`)} ${_iocStatusPill(i.status)} <code>${escapeHtml(i.ioc_type || '')}</code> ${escapeHtml(i.value || '')}</li>`).join('') + `</ul>`;
 }
 
 function renderFindingRefused(e) {
@@ -836,18 +1130,247 @@ function renderDisposition(e) {
 
 function renderEvidenceFetch(e) {
   const reqs = Array.isArray(e.requests) ? e.requests : [];
+  const review = e.reason_call_id ? State.entriesById.get(e.reason_call_id) : null;
+  const verdict = review && TR ? TR.reviewVerdict(review) : '';
+  const siblings = ((State.fetchesByReview && State.fetchesByReview.get(e.reason_call_id)) || []);
+  const round = siblings.findIndex(f => f.call_id === e.call_id) + 1;
   return `
     <div class="kv">
-      <span class="k">for reason call</span><span class="v">${e.reason_call_id ? _linkChip(e.reason_call_id, `→ #${e.reason_call_id}`) : ''}</span>
+      <span class="k">for review</span><span class="v">${e.reason_call_id ? _linkChip(e.reason_call_id, `→ #${e.reason_call_id} ${review ? review.tool || '' : ''}`) : ''}${verdict ? ` <span class="tr-verdict ${escapeHtml(verdict)}">${escapeHtml(verdict)}</span>` : ''}</span>
+      ${round ? `<span class="k">round</span><span class="v">${round} of ${siblings.length} fetch round${siblings.length === 1 ? '' : 's'}</span>` : ''}
+      <span class="k">requests</span><span class="v">${reqs.length}</span>
     </div>
-    <h3>requests</h3><pre>${escapeHtml(JSON.stringify(reqs, null, 2))}</pre>
+    ${reqs.map((r, i) => renderFetchRequest(e, r, i)).join('')}
+    <details><summary style="cursor:pointer;color:var(--fg-dim)">raw requests JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(reqs, null, 2))}</pre></details>
   `;
+}
+
+function renderFetchRequest(fetch, r, i) {
+  const src = r.call_id ? State.entriesById.get(r.call_id) : null;
+  const srcCmd = src ? (src.cmd || src.tool || src.type || '') : '';
+  const statusCls = r.status === 'ok' ? 'ok' : 'error';
+  const cols = Array.isArray(r.columns) ? r.columns : [];
+  const params = [
+    ['query', r.query ? `<code>${escapeHtml(r.query)}</code>` : ''],
+    ['columns', cols.length ? cols.map(c => `<span class="tr-tag">${escapeHtml(c)}</span>`).join('') : ''],
+    ['selector', r.selector ? `<code>${escapeHtml(typeof r.selector === 'string' ? r.selector : JSON.stringify(r.selector))}</code>` : ''],
+    ['where', r.where ? `<code>${escapeHtml(r.where)}</code>` : ''],
+    ['file', r.file ? `<code>${escapeHtml(r.file)}</code>` : ''],
+  ].filter(x => x[1]);
+  const rowsTxt = r.total_rows !== undefined ? `${r.rows_returned ?? 0} of ${r.total_rows}` : `${r.rows_returned ?? 0}`;
+  const results = [
+    ['status', `<span class="pill ${statusCls}">${escapeHtml(r.status || '')}</span>`],
+    ['rows returned', escapeHtml(rowsTxt) + (r.clipped_rows ? ` · ${r.clipped_rows} clipped` : '')],
+    ['source', escapeHtml([r.source_kind, r.source_complete === false ? 'PARTIAL' : (r.source_complete ? 'complete' : '')].filter(Boolean).join(' · '))],
+    ['bytes', r.bytes ? String(r.bytes) : ''],
+    ['truncation', r.truncation_reason ? escapeHtml(r.truncation_reason) : ''],
+    ['scan incomplete', r.scan_incomplete ? escapeHtml(r.scan_incomplete) : ''],
+    ['missing columns', (r.missing_columns || []).length ? escapeHtml(r.missing_columns.join(', ')) : ''],
+    ['columns ignored', r.columns_ignored ? 'yes — full lines returned' : ''],
+    ['siblings', Array.isArray(r.siblings) && r.siblings.length ? r.siblings.map(x => `${_linkChip(x.call_id, `#${x.call_id}`)} ${x.rows} rows`).join(' ') : ''],
+  ].filter(x => x[1]);
+  let rowsHtml;
+  if (r.result_path) {
+    const inner = r.result_excerpt ? renderFetchResultText(r.result_excerpt, `stored excerpt (${r.result_excerpt.length} of ${r.result_chars || '?'} chars)`) : '';
+    rowsHtml = _loadBox(r.result_path, inner, { auto: true, kind: 'fetch' });
+  } else if (r.result_excerpt) {
+    rowsHtml = renderFetchResultText(r.result_excerpt, 'excerpt only');
+  } else {
+    rowsHtml = `<div class="tr-note">The returned rows were not stored for this fetch (recorded before fetch results were kept). ${r.call_id ? `Rows came from ${_linkChip(r.call_id, '#' + r.call_id)}.` : ''}</div>`;
+  }
+  return `<div class="tr-card">
+    <div class="tr-card-h">request ${i + 1} · source ${r.call_id ? _linkChip(r.call_id, `#${r.call_id} ${src ? _toolLabel(src) : ''}`, {title: srcCmd}) : '—'}</div>
+    ${srcCmd ? `<div class="tr-note">fetched from: <code>${escapeHtml(shorten(srcCmd, 300))}</code></div>` : (r.call_id ? `<div class="tr-note">call #${r.call_id} is not in this trace</div>` : '')}
+    <div class="tr-h">parameters</div>
+    <table class="tr-params"><tbody>${params.map(([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>
+    <div class="tr-h">result</div>
+    <table class="tr-params"><tbody>${results.map(([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td>${v}</td></tr>`).join('')}</tbody></table>
+    <div class="tr-h">rows returned to the reviewer</div>
+    ${rowsHtml}
+  </div>`;
+}
+
+// The text a reviewer got back for one request: a "[call N] …" preamble and
+// one chunk per source ("  (label): X of Y rows match …\n<header+rows>").
+const FETCH_CHUNK_RE = /^  \((.*?)\)(.*?):\s+(\d+ of \d+ (?:rows|lines) match.*)$/;
+function renderFetchResultText(text, note) {
+  const lines = String(text || '').split('\n');
+  const pre = [], chunks = [];
+  let cur = null;
+  for (const ln of lines) {
+    const m = ln.match(FETCH_CHUNK_RE);
+    if (m) { cur = { label: m[1], extra: m[2], stats: m[3], body: [] }; chunks.push(cur); continue; }
+    if (cur) cur.body.push(ln); else pre.push(ln);
+  }
+  let html = note ? `<div class="tr-note">${escapeHtml(note)}</div>` : '';
+  const preText = pre.join('\n').trim();
+  if (preText) html += `<pre>${escapeHtml(preText)}</pre>`;
+  for (const c of chunks) {
+    html += `<div class="tr-note"><b>${escapeHtml(c.label)}</b>${escapeHtml(c.extra)} — ${escapeHtml(c.stats)}</div>`;
+    html += TR ? TR.outputHtml(c.body.join('\n'), { cap: 50 }) : `<pre>${escapeHtml(c.body.join('\n'))}</pre>`;
+  }
+  return html;
+}
+
+function renderIoc(e) {
+  const ev = Array.isArray(e.evidence_call_ids) ? e.evidence_call_ids : [];
+  const tech = Array.isArray(e.techniques) ? e.techniques : [];
+  const focused = State.filters.iocFocus === e.call_id;
+  return `
+    <div class="kv">
+      <span class="k">type</span><span class="v"><code>${escapeHtml(e.ioc_type || '')}</code></span>
+      <span class="k">value</span><span class="v"><code>${escapeHtml(e.value || '')}</code></span>
+      ${e.normalized && e.normalized !== e.value ? `<span class="k">normalized</span><span class="v"><code>${escapeHtml(e.normalized)}</code></span>` : ''}
+      <span class="k">status</span><span class="v">${_iocStatusPill(e.status)}</span>
+      ${tech.length ? `<span class="k">techniques</span><span class="v">${tech.map(t => `<span class="tr-tag">${escapeHtml(t)}</span>`).join('')}</span>` : ''}
+      ${(e.aliases || []).length ? `<span class="k">aliases</span><span class="v">${e.aliases.map(a => `<span class="tr-tag">${escapeHtml(a)}</span>`).join('')}</span>` : ''}
+      <span class="k">evidence calls</span><span class="v">${ev.length ? ev.map(c => { const x = State.entriesById.get(c); return _linkChip(c, `#${c}${x ? ' ' + _toolLabel(x) : ''}`, {title: x ? (x.cmd || x.tool || '') : 'not in this trace'}); }).join('') : '<span style="color:var(--fg-dim)">none</span>'}</span>
+    </div>
+    <div style="margin:8px 0"><span class="btn" data-ioc-focus="${focused ? '' : e.call_id}">${focused ? 'show all entries' : 'show only calls linked to this IOC'}</span></div>
+    ${e.note ? `<h3>note</h3><pre>${escapeHtml(e.note)}</pre>` : ''}
+    ${ev.length ? `<h3>evidence</h3><ul>${ev.map(c => { const x = State.entriesById.get(c); return `<li>${_linkChip(c, '#' + c)} ${x ? `<code>${escapeHtml(shorten(x.cmd || x.tool || x.description || x.type || '', 160))}</code>` : '<span style="color:var(--fg-dim)">not in this trace</span>'}</li>`; }).join('')}</ul>` : ''}
+  `;
+}
+
+function renderPhaseTransition(e) {
+  const refs = e.input_call_ids || [];
+  return `
+    <div class="kv">
+      <span class="k">from</span><span class="v">${escapeHtml(e.from_phase || '—')}</span>
+      <span class="k">to</span><span class="v"><b>${escapeHtml(e.to_phase || '')}</b></span>
+      <span class="k">reason</span><span class="v"><code>${escapeHtml(e.reason || '')}</code></span>
+      ${e.trigger ? `<span class="k">trigger</span><span class="v"><code>${escapeHtml(e.trigger)}</code></span>` : ''}
+      ${refs.length ? `<span class="k">caused by</span><span class="v">${refs.map(c => { const x = State.entriesById.get(c); return _linkChip(c, `#${c}${x ? ' ' + _toolLabel(x) : ''}`); }).join('')}</span>` : ''}
+    </div>
+    <p style="color:var(--fg-dim);font-size:11px;">A server-initiated phase move (not a DAIR recommendation): e.g. a Report-phase call that needed evidence sent the investigation back to ${escapeHtml(e.to_phase || 'Collect')}.</p>
+  `;
+}
+
+function renderFindingSubmission(e) {
+  const fin = _findingForSubmission(e);
+  const shown = new Set(['call_id', 'type', 'ts', 'dair_phase', 'dair_depth', 'status', 'idempotency_key',
+                         'review_call_id', 'error', 'reason', 'unverified_items', 'packet_id',
+                         'request_hash', 'owner', 'lease_until']);
+  const rest = Object.fromEntries(Object.entries(e).filter(([k]) => !shown.has(k)));
+  const unv = e.unverified_items;
+  return `
+    <div class="kv">
+      <span class="k">status</span><span class="v"><b>${escapeHtml(e.status || '')}</b></span>
+      <span class="k">idempotency key</span><span class="v"><code>${escapeHtml(e.idempotency_key || '')}</code></span>
+      ${e.review_call_id ? `<span class="k">review</span><span class="v">${_linkChip(e.review_call_id, `#${e.review_call_id}`)}${State.entriesById.get(e.review_call_id) && TR ? ` <span class="tr-verdict ${escapeHtml(TR.reviewVerdict(State.entriesById.get(e.review_call_id)))}">${escapeHtml(TR.reviewVerdict(State.entriesById.get(e.review_call_id)))}</span>` : ''}</span>` : ''}
+      ${fin ? `<span class="k">recorded finding</span><span class="v">${_linkChip(fin.call_id, `→ ${fin.finding_id || '#' + fin.call_id}`, {reverse: true})}</span>` : ''}
+      ${e.packet_id ? `<span class="k">evidence packet</span><span class="v"><code title="${escapeHtml(e.packet_id)}">${escapeHtml(shorten(e.packet_id, 28))}</code></span>` : ''}
+      ${e.request_hash ? `<span class="k">request hash</span><span class="v"><code title="${escapeHtml(e.request_hash)}">${escapeHtml(shorten(e.request_hash, 16))}</code></span>` : ''}
+    </div>
+    ${e.error ? `<h3>error</h3><pre>${escapeHtml(e.error)}</pre>` : ''}
+    ${e.reason ? `<h3>reason</h3><pre>${escapeHtml(typeof e.reason === 'string' ? e.reason : JSON.stringify(e.reason, null, 2))}</pre>` : ''}
+    ${unv && (!Array.isArray(unv) || unv.length) ? `<h3>unverified items</h3><pre>${escapeHtml(JSON.stringify(unv, null, 2))}</pre>` : ''}
+    ${Object.keys(rest).length ? `<h3>other fields</h3><pre>${escapeHtml(JSON.stringify(rest, null, 2))}</pre>` : ''}
+  `;
+}
+
+function renderFindingRetracted(e) {
+  const f = e.finding_call_id ? State.entriesById.get(e.finding_call_id) : null;
+  const refs = e.input_call_ids || [];
+  return `
+    <div class="kv">
+      <span class="k">finding</span><span class="v">${e.finding_call_id ? _linkChip(e.finding_call_id, `#${e.finding_call_id}${f && f.finding_id ? ' ' + f.finding_id : ''}`) : ''}</span>
+      ${refs.length ? `<span class="k">evidence</span><span class="v">${refs.map(c => _linkChip(c, '#' + c)).join('')}</span>` : ''}
+    </div>
+    <h3>reason</h3><pre>${escapeHtml(e.reason || '')}</pre>
+    ${f ? `<h3>retracted finding</h3><pre>${escapeHtml(f.description || '')}</pre>` : ''}
+  `;
+}
+
+// Evidence fetches grouped under the review that requested them.
+function buildFetchIndex(entries) {
+  const m = new Map();
+  for (const e of entries) {
+    if (e.type === 'reason_evidence_fetch' && e.reason_call_id) {
+      if (!m.has(e.reason_call_id)) m.set(e.reason_call_id, []);
+      m.get(e.reason_call_id).push(e);
+    }
+  }
+  return m;
+}
+
+// A review is logged at round 1 and rewritten in place when its last round
+// finishes; review_pending stays true until then.
+const MAX_EVIDENCE_ROUNDS = 3;
+function reviewState(e) {
+  const fetches = ((State.fetchesByReview && State.fetchesByReview.get(e.call_id)) || []).length;
+  const pending = e.tool === 'reason_evaluate_finding' && e.review_pending === true;
+  return { fetches, pending, round: Math.min(fetches + 1, MAX_EVIDENCE_ROUNDS + 1),
+           maxRounds: MAX_EVIDENCE_ROUNDS + 1 };
+}
+
+function renderReviewFetches(e) {
+  const fetches = (State.fetchesByReview && State.fetchesByReview.get(e.call_id)) || [];
+  const rv = reviewState(e);
+  if (!fetches.length && !rv.pending) return '';
+  const rows = fetches.map((f, i) => {
+    const reqs = Array.isArray(f.requests) ? f.requests : [];
+    return reqs.map(r => {
+      const src = r.call_id ? State.entriesById.get(r.call_id) : null;
+      const file = r.file ? String(r.file).split('/').pop() : '';
+      return `<tr>
+      <td>${i + 1}</td>
+      <td>${_linkChip(f.call_id, '#' + f.call_id, {title: 'open this fetch: parameters + returned rows'})}</td>
+      <td>${r.call_id ? _linkChip(r.call_id, `#${r.call_id}${src ? ' ' + _toolLabel(src) : ''}`, {title: src ? (src.cmd || src.tool || '') : ''}) : ''}</td>
+      <td style="word-break:break-all"><code>${escapeHtml(shorten(r.query || '', 60))}</code>${(r.columns || []).length ? `<br/><span style="color:var(--fg-dim)">cols: ${escapeHtml(shorten(r.columns.join(','), 60))}</span>` : ''}${file ? `<br/><span style="color:var(--fg-dim)" title="${escapeHtml(r.file)}">${escapeHtml(file)}</span>` : ''}</td>
+      <td>${r.rows_returned ?? ''}${r.total_rows !== undefined ? ` / ${r.total_rows}` : ''}</td>
+      <td>${escapeHtml(r.status || '')}${r.source_complete === false ? ' · PARTIAL' : ''}</td></tr>`;
+    }).join('');
+  }).join('');
+  const note = rv.pending
+    ? `<p style="color:var(--self-correct)">⏳ Review in progress — round ${rv.round} of ${rv.maxRounds}. The verdict below is from an earlier round and will be replaced.</p>`
+    : `<p style="color:var(--fg-dim)">Final verdict reached after ${fetches.length} evidence fetch round${fetches.length === 1 ? '' : 's'}; earlier-round answers were replaced.</p>`;
+  return `<h3>evidence fetches</h3>${note}
+    ${rows ? `<table><thead><tr><th>round</th><th>fetch</th><th>source</th><th>query</th><th>rows / total</th><th>status</th></tr></thead><tbody>${rows}</tbody></table>` : ''}`;
+}
+
+// A reviewer answer's structured RESULT object: the logged result_block, or —
+// for entries recorded before the parser accepted a bare object — a
+// conclusion that is itself the JSON object (optionally ```json-fenced).
+function reasonResult(e) {
+  if (e.result_block && typeof e.result_block === 'object' && Object.keys(e.result_block).length) {
+    return e.result_block;
+  }
+  const c = (e.conclusion || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  if (!c.startsWith('{')) return null;
+  try {
+    const obj = JSON.parse(c);
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
+  } catch (_) { return null; }
+}
+
+function renderResultValue(v) {
+  if (v === null || v === undefined || v === '') return '<span style="color:var(--fg-dim)">—</span>';
+  if (typeof v !== 'object') return `<pre>${escapeHtml(String(v))}</pre>`;
+  if (Array.isArray(v) && v.every(x => typeof x !== 'object' || x === null)) {
+    return v.length ? `<ul>${v.map(x => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul>` : '<span style="color:var(--fg-dim)">none</span>';
+  }
+  return `<pre>${escapeHtml(JSON.stringify(v, null, 2))}</pre>`;
+}
+
+function renderResultBlock(rb, e) {
+  const shown = new Set(['schema_version', 'rationale']);
+  if ((e.directives || {}).priority_tools) shown.add('directives');
+  const rest = Object.keys(rb).filter(k => !shown.has(k));
+  return `
+    ${rb.rationale ? `<h3>rationale</h3><pre>${escapeHtml(rb.rationale)}</pre>` : ''}
+    ${rest.map(k => `<h3>${escapeHtml(k.replace(/_/g, ' '))}</h3>${renderResultValue(rb[k])}`).join('')}
+    <details><summary style="cursor:pointer;color:var(--fg-dim)">raw RESULT JSON</summary>
+      <pre>${escapeHtml(JSON.stringify(rb, null, 2))}</pre></details>`;
 }
 
 function renderReasonCall(e) {
   const inputs = e.inputs || {};
   const directives = e.directives || {};
   const audit = e.evidence_audit || [];
+  const rb = reasonResult(e);
+  const conclusionIsJson = rb && !(e.result_block && Object.keys(e.result_block).length);
   return `
     <div class="kv">
       <span class="k">tool</span><span class="v"><code>${escapeHtml(e.tool)}</code></span>
@@ -862,7 +1385,11 @@ function renderReasonCall(e) {
     </div>
     ${inputs.user_message ? `<h3>input — user message</h3><pre>${escapeHtml(inputs.user_message)}</pre>` : ''}
     ${inputs.system_prompt_kind ? `<div class="kv"><span class="k">system_prompt_kind</span><span class="v"><code>${escapeHtml(inputs.system_prompt_kind)}</code></span></div>` : ''}
-    ${e.conclusion ? `<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
+    ${renderReviewFetches(e)}
+    ${e.error ? `<h3>error</h3><pre style="color:var(--error)">${escapeHtml(e.error)}</pre>` : ''}
+    ${e.conclusion && !conclusionIsJson && e.conclusion !== e.error
+      && !(rb && (rb.rationale || '').trim() === e.conclusion.trim()) ?`<h3>conclusion</h3><pre>${escapeHtml(e.conclusion)}</pre>` : ''}
+    ${rb ? renderResultBlock(rb, e) : ''}
     ${directives.priority_tools && directives.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(directives.priority_tools, null, 2))}</pre>` : ''}
     ${audit.length ? `<h3>evidence audit</h3><pre>${escapeHtml(JSON.stringify(audit, null, 2))}</pre>` : ''}
     ${_findingsLinkedHere(e.call_id)}
@@ -889,6 +1416,9 @@ function renderDairCall(e) {
     ${inputs.case_context ? `<h3>input — case_context</h3><pre>${escapeHtml(inputs.case_context)}</pre>` : ''}
     ${challenges.length ? renderChallenges(challenges) : ''}
     ${dirs.priority_tools && dirs.priority_tools.length ? `<h3>directives — priority_tools</h3><pre>${escapeHtml(JSON.stringify(dirs.priority_tools, null, 2))}</pre>` : ''}
+    ${e.evidence_kinds ? `<div class="kv"><span class="k">evidence</span><span class="v">${escapeHtml((e.evidence_kinds || []).join(', ') || 'undetermined')}${e.evidence_determined ? '' : ' (not filtered)'}</span></div>` : ''}
+    ${(e.server_filtered_tools || []).length ? `<h3>server-filtered tools (need evidence the case lacks)</h3><pre>${escapeHtml(JSON.stringify(e.server_filtered_tools, null, 2))}</pre>` : ''}
+    ${(e.server_filtered_challenges || []).length ? `<h3>server-filtered challenges (need evidence the case lacks)</h3><pre>${escapeHtml(JSON.stringify(e.server_filtered_challenges, null, 2))}</pre>` : ''}
     ${rec.length ? `<h3>recommended actions (advisory)</h3><ul>${rec.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
   `;
 }
@@ -913,6 +1443,14 @@ function renderChallenges(challenges) {
 }
 
 function renderFinding(e) {
+  if (TR) {
+    // Shared with the chain view (trace_render.js) so both show the same data.
+    return TR.findingDetailHtml(e, {
+      byId: State.entriesById,
+      fetchesByReview: State.fetchesByReview,
+      link: (cid, label, title) => _linkChip(cid, label, {title}),
+    }) + _iocsCitingHere(e.call_id);
+  }
   const conf = (e.confidence || '').toUpperCase();
   const cls = `finding-${conf.toLowerCase()}`;
   return `
@@ -999,6 +1537,7 @@ function pulseLinked(e) {
   const targets = [];
   if (e.linked_call_id) targets.push(e.linked_call_id);
   if (Array.isArray(e.input_call_ids)) targets.push(...e.input_call_ids);
+  if (Array.isArray(e.evidence_call_ids)) targets.push(...e.evidence_call_ids);
   // For tool_call/reason_call entries, also highlight findings linked TO them.
   if (e.type === 'tool_call' || e.type === 'reason_call') {
     const rev = (State.reverseIndex && State.reverseIndex.get(e.call_id)) || [];
@@ -1057,6 +1596,8 @@ function updateGraphLink() {
   const trace = params.get('trace');
   if (trace) link.href = `chain_view.html?trace=${encodeURIComponent(trace)}`;
   else link.href = 'chain_view.html';
+  const rlink = document.getElementById('report-link');
+  if (rlink) rlink.href = trace ? `report_view.html?trace=${encodeURIComponent(trace)}` : 'report_view.html';
 }
 
 // ── Data load ────────────────────────────────────────────────────────────────
@@ -1072,6 +1613,7 @@ async function load() {
     State.entries = newEntries;
     State.entriesById = new Map(newEntries.map(e => [e.call_id, e]));
     State.reverseIndex = buildReverseFindingIndex(newEntries);
+    State.fetchesByReview = buildFetchIndex(newEntries);
     State.phaseBlocks = buildPhaseIndex(newEntries);
     $('#case-id').textContent = State.caseId;
     $('#last-fetch').textContent = `fetched ${_fmtLocalHMS(new Date())}`;
@@ -1085,6 +1627,8 @@ async function load() {
     sel.innerHTML = '<option value="">all phases</option>' +
       State.phaseBlocks.map(b => `<option value="${b.anchor}">${escapeHtml(b.phase)} (#${b.startCid}–#${b.endCid})</option>`).join('');
     sel.value = cur;
+    syncExtraTypeFilters(newEntries);
+    syncIocTypeOptions(newEntries);
     renderEntries();
     if (newEntries.length > oldCount) {
       // Flash new entries
@@ -1103,15 +1647,83 @@ async function load() {
 }
 
 // ── Wiring ───────────────────────────────────────────────────────────────────
+function updateTypeFilters() {
+  State.filters.types = new Set(
+    $$('.type-filter:checked').map(el => el.value)
+  );
+  renderEntries();
+}
+
+// Entry types present in the trace but not in the static list get their own
+// checkbox (checked), so every loaded entry is reachable and counted.
+function syncExtraTypeFilters(entries) {
+  const known = new Set($$('.type-filter').map(el => el.value));
+  const box = $('#type-filters-extra');
+  let added = false;
+  for (const e of entries) {
+    const t = e && e.type;
+    if (!t || known.has(t)) continue;
+    known.add(t);
+    const lbl = document.createElement('label');
+    lbl.innerHTML = `<input type="checkbox" class="type-filter" value="${escapeHtml(t)}" checked><span class="pill">${escapeHtml(t)}</span><span class="count" data-count="${escapeHtml(t)}">0</span>`;
+    lbl.querySelector('input').addEventListener('change', updateTypeFilters);
+    box.appendChild(lbl);
+    added = true;
+  }
+  if (added) State.filters.types = new Set($$('.type-filter:checked').map(el => el.value));
+}
+
+function syncIocTypeOptions(entries) {
+  const sel = $('#ioc-type');
+  const types = [...new Set(entries.filter(e => e.type === 'ioc' && e.ioc_type).map(e => e.ioc_type))].sort();
+  const cur = sel.value;
+  const want = ['<option value="">all IOC types</option>',
+    ...types.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)} (${entries.filter(e => e.type === 'ioc' && e.ioc_type === t).length})</option>`)].join('');
+  if (sel.dataset.sig !== want) { sel.innerHTML = want; sel.dataset.sig = want; sel.value = cur; }
+}
+
+function setIocFocus(cid) {
+  State.filters.iocFocus = cid;
+  const box = $('#ioc-focus');
+  if (cid === null) {
+    box.style.display = 'none';
+  } else {
+    const ioc = State.entriesById.get(cid);
+    const n = ioc ? (ioc.evidence_call_ids || []).length : 0;
+    $('#ioc-focus-text').textContent = `IOC #${cid}${ioc ? ' ' + shorten(ioc.value || '', 28) : ''}: ${n} linked call${n === 1 ? '' : 's'}`;
+    box.style.display = '';
+  }
+  renderEntries();
+  const e = State.selectedId !== null ? State.entriesById.get(State.selectedId) : null;
+  if (e) renderDetail(e);
+}
+
 function setupFilters() {
-  const updateTypes = () => {
-    State.filters.types = new Set(
-      $$('.type-filter:checked').map(el => el.value)
-    );
-    renderEntries();
-  };
-  $$('.type-filter').forEach(el => el.addEventListener('change', updateTypes));
-  updateTypes();
+  $$('.type-filter').forEach(el => el.addEventListener('change', updateTypeFilters));
+  updateTypeFilters();
+
+  $('#ioc-type').addEventListener('change', (ev) => { State.filters.iocType = ev.target.value; renderEntries(); });
+  $('#ioc-status').addEventListener('change', (ev) => { State.filters.iocStatus = ev.target.value; renderEntries(); });
+  $('#ioc-technique').addEventListener('input', (ev) => { State.filters.iocTechnique = ev.target.value.trim(); renderEntries(); });
+  $('#ioc-only').addEventListener('change', (ev) => { State.filters.iocOnly = ev.target.checked; renderEntries(); });
+  $('#ioc-focus-clear').addEventListener('click', () => setIocFocus(null));
+
+  // Detail pane: one delegated listener for jump chips (incl. content loaded
+  // asynchronously), IOC focus and source-file loads.
+  $('#detail').addEventListener('click', (ev) => {
+    const j = ev.target.closest('[data-jump]');
+    if (j) { selectEntry(parseInt(j.dataset.jump, 10)); return; }
+    const f = ev.target.closest('[data-ioc-focus]');
+    if (f) { setIocFocus(f.dataset.iocFocus ? parseInt(f.dataset.iocFocus, 10) : null); return; }
+    const src = ev.target.closest('[data-load-source]');
+    if (src) {
+      const box = $('#source-file-box');
+      if (!box) return;
+      box.innerHTML = _loadBox(src.dataset.loadSource, '', { max: 2 * 1024 * 1024 });
+      src.remove();
+      loadInto(box.firstElementChild, State.selectedId);
+    }
+  });
 
   $('#search').addEventListener('input', (ev) => {
     State.filters.search = ev.target.value.trim();
@@ -1301,7 +1913,60 @@ const CasePicker = {
   },
 };
 
+// ── Resizable detail pane ───────────────────────────────────────────────────
+const DETAIL_W_KEY = 'trudi.detailWidth';
+const DETAIL_MIN = 280;
+const ENTRIES_MIN = 320;
+
+function setupDetailResize() {
+  const layout = $('.layout');
+  const handle = $('#detail-splitter');
+  const clamp = (w) => {
+    const max = layout.clientWidth - 240 - 6 - ENTRIES_MIN;
+    return Math.round(Math.max(DETAIL_MIN, Math.min(w, max)));
+  };
+  const apply = (w) => layout.style.setProperty('--detail-w', `${clamp(w)}px`);
+
+  try {
+    const saved = parseInt(localStorage.getItem(DETAIL_W_KEY), 10);
+    if (saved > 0) apply(saved);
+  } catch (_) { /* storage unavailable: keep the default width */ }
+
+  handle.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    try { handle.setPointerCapture(ev.pointerId); } catch (_) {}
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    const right = layout.getBoundingClientRect().right;
+    const move = (e) => apply(right - e.clientX);
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      try {
+        localStorage.setItem(DETAIL_W_KEY, String(parseInt($('#detail').offsetWidth, 10)));
+      } catch (_) {}
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  });
+
+  handle.addEventListener('dblclick', () => {
+    layout.style.removeProperty('--detail-w');
+    try { localStorage.removeItem(DETAIL_W_KEY); } catch (_) {}
+  });
+
+  // Keep a saved width valid when the window shrinks.
+  window.addEventListener('resize', () => {
+    if (layout.style.getPropertyValue('--detail-w')) apply($('#detail').offsetWidth);
+  });
+}
+
 function init() {
+  setupDetailResize();
   const url = getQueryParam('trace');
   if (url) {
     State.traceUrl = url;
@@ -1314,7 +1979,14 @@ function init() {
   tickClocks();
   setInterval(tickClocks, 1000);
   if (State.traceUrl) {
-    load();
+    const deep = parseInt(getQueryParam('call') || '', 10);
+    const first = load();
+    if (deep > 0) {
+      State.followTail = false;
+      const box = document.getElementById('follow-tail');
+      if (box) box.checked = false;
+      Promise.resolve(first).then(() => selectEntry(deep));
+    }
     setupRefreshTimer();
   }
 }

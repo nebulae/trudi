@@ -1,5 +1,5 @@
 """agent_authored_source — a finding may not rest on a file the agent wrote
-(laundering path: an exports/ file via Write → read.read_output →
+(laundering path: an exports/ file via Write → read.output →
 SUPPORTED → CONFIRMED finding)."""
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,11 +11,11 @@ from tools._gates._evidence_calls import agent_authored_paths, authored_source_o
 def _entries():
     return [
         {"call_id": 112, "type": "tool_call", "source": None,
-         "cmd": "read.read_mail -o /case/exports/mbox_gmail/Inbox.mbox", "success": True},
+         "cmd": "read.mail -o /case/exports/mbox_gmail/Inbox.mbox", "success": True},
         {"call_id": 127, "type": "tool_call", "source": "claude_code_write",
          "cmd": "write /case/exports/titan_thread.txt", "success": True},
         {"call_id": 128, "type": "tool_call", "source": None,
-         "cmd": "read.read_output --output /case/exports/titan_thread.txt", "success": True},
+         "cmd": "read.output --output /case/exports/titan_thread.txt", "success": True},
         {"call_id": 129, "type": "tool_call", "source": "claude_code_bash",
          "cmd": "grep -i bulgakov x | tee exports/curated.txt", "success": True},
         {"call_id": 130, "type": "reason_call", "tool": "reason_evaluate_finding", "verdict": "SUPPORTED",
@@ -28,7 +28,7 @@ def _ctx(linked, inputs, claim=None):
     idx = SimpleNamespace(by_call_id={e["call_id"]: e for e in ents},
                           by_type={"tool_call": [e for e in ents if e["type"] == "tool_call"]})
     return GateContext(description="Vanko disseminated research to Titan", confidence="Confirmed",
-                       tier="CONFIRMED", source="read.read_mail", linked_call_id=linked,
+                       tier="CONFIRMED", source="read.mail", linked_call_id=linked,
                        tested_hypothesis_id="", log=MagicMock(), idx=idx, window=ents,
                        input_call_ids=inputs, supporting_evidence="x", claim=claim or {})
 

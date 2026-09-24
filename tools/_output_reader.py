@@ -159,6 +159,20 @@ def _cited_query_terms(text: str) -> list[str]:
     return maximal
 
 
+def _looks_like_path(token: str) -> bool:
+    """A flag's value is an output path only if it looks like one.
+
+    The same short flags mean other things to other tools: Sleuth Kit's `-o` is
+    a partition OFFSET (`istat -o 1411072 image.E01 12994`) and mount's `-t` is
+    a filesystem TYPE. Read as output files, every tsk call looked like an
+    invocation log whose output had vanished and was refused as evidence.
+    """
+    t = (token or "").strip()
+    if not t or t.startswith("-"):
+        return False
+    return "/" in t or t.lower().endswith(_OUTPUT_FILE_EXTS)
+
+
 def _cmd_output_paths(cmd: str) -> list[str]:
     """Output file/dir paths named in a recorded tool cmd, best-effort."""
     if not cmd:
@@ -170,9 +184,30 @@ def _cmd_output_paths(cmd: str) -> list[str]:
         toks = cmd.split()
     out = []
     for i, t in enumerate(toks[:-1]):
-        if t in _OUTPUT_FLAGS:
-            out.append(toks[i + 1])
+        if t in _OUTPUT_FLAGS and _looks_like_path(toks[i + 1]):
+            out.append(_rejoin_spaced_path(toks, i + 1))
     return out
+
+
+_ARG_TOKEN = re.compile(r"^(?:-{1,2}\w|[A-Za-z_]\w*=)")
+
+
+def _rejoin_spaced_path(toks: list, j: int) -> str:
+    """An unquoted path containing spaces ('.../Root - Mailbox/...', as
+    pffexport writes) was split into several tokens. Take the longest run of
+    following tokens that joins into an existing path; the lone token when none
+    does (the path may not exist yet, or is not local)."""
+    import os
+    best = toks[j]
+    if os.path.exists(best) and not os.path.isdir(best):
+        return best
+    for k in range(j + 1, len(toks)):
+        if _ARG_TOKEN.match(toks[k]) and not os.path.exists(" ".join(toks[j:k + 1])):
+            break
+        cand = " ".join(toks[j:k + 1])
+        if os.path.exists(cand):
+            best = cand
+    return best
 
 
 def _cmd_input_paths(cmd: str) -> set:
@@ -216,13 +251,17 @@ def sibling_match_counts(by_id: dict, entry: dict, terms: list, limit: int = 3) 
         if not (mine & _cmd_input_paths(str(e.get("cmd") or ""))):
             continue
         rows = 0
-        for src in entry_text_sources(e):
+        srcs = entry_text_sources(e)
+        # The excerpt is the head of the same stdout the sidecar holds in full:
+        # count it only when no sidecar was kept, or a line is counted twice.
+        has_sidecar = any(x.kind == "stdout_sidecar" for x in srcs)
+        for src in srcs:
             if src.kind in ("file", "stdout_sidecar"):
                 try:
                     rows += _scan_relevant(src.path, terms, 400).matched_rows
                 except Exception:
                     continue
-            elif src.kind == "stdout_excerpt" and src.text:
+            elif src.kind == "stdout_excerpt" and src.text and not has_sidecar:
                 rows += sum(1 for ln in src.text.splitlines()
                             if any(t in ln.lower() for t in terms))
         out.append({"call_id": int(e.get("call_id") or 0),
@@ -230,6 +269,25 @@ def sibling_match_counts(by_id: dict, entry: dict, terms: list, limit: int = 3) 
         if len(out) >= limit:
             break
     return out
+
+
+def _dir_is_capped(tgt: str) -> bool:
+    """True when `tgt` is a directory holding more data files than the scan
+    cap takes — a miss over the kept subset is not absence (13,385 mail files
+    were scanned as 5 and reported COMPLETE, 2026-09-23)."""
+    import glob
+    try:
+        if not os.path.isdir(tgt):
+            return False
+        n = 0
+        for f in glob.iglob(os.path.join(tgt, "**", "*"), recursive=True):
+            if os.path.isfile(f) and f.lower().endswith(_OUTPUT_FILE_EXTS):
+                n += 1
+                if n > 5:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _candidate_output_files(tgt: str) -> list[str]:
@@ -539,15 +597,16 @@ def entry_text_sources(entry: dict) -> list[TextSource]:
                               label=str(entry.get("tool") or "reason")))
         return out
     seen: set[str] = set()
-    op = entry.get("output_path")
-    if op:
-        for f in _candidate_output_files(str(op)):
-            if f not in seen:
-                seen.add(f); out.append(TextSource("file", path=f, label=os.path.basename(f)))
-    for tgt in _cmd_output_paths(entry.get("cmd") or ""):
+    targets = ([str(entry["output_path"])] if entry.get("output_path") else []) \
+        + _cmd_output_paths(entry.get("cmd") or "")
+    for tgt in targets:
+        capped = _dir_is_capped(tgt)
         for f in _candidate_output_files(tgt):
             if f not in seen:
-                seen.add(f); out.append(TextSource("file", path=f, label=os.path.basename(f)))
+                seen.add(f)
+                out.append(TextSource("file", path=f, complete=not capped,
+                                      label=os.path.basename(f) + (" (subset of a larger output directory)"
+                                                                   if capped else "")))
     sp = entry.get("stdout_path")
     if sp and os.path.isfile(sp):
         out.append(TextSource("stdout_sidecar", path=sp,

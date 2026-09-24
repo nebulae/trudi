@@ -31,7 +31,7 @@ classes:
     label: TerminalServices channel (RDP sessions with source IP)
   logon_session:
     marker: session_artifact
-    tools: [ez.evtxecmd (Security 4624/4625/4778/4779), misc.evtx_filter, net.pcap_identity_timeline, net.http_session_inventory, live.live_recent_logins]
+    tools: [ez.evtxecmd (Security 4624/4625/4778/4779), misc.evtx_filter, net.pcap_identity_timeline, net.http_session_inventory, live.recent_logins]
     label: logon / session artifact (type + source)
   sam_account:
     cmd: 'samparse|config[\\/]sam(?:$|[ ."\\/])|[\\/]sam\.(?:hive|bak|save)\b'
@@ -97,7 +97,7 @@ classes:
     label: device-install inventory (setupapi.dev.log)
   srum:
     cmd: 'sqlecmd|srudb|srum'
-    tools: [ez.sqlecmd SRUDB]
+    tools: [misc.srum_export, ez.sqlecmd SRUDB]
     label: SRUM network / app usage
   scheduled_tasks:
     cmd: 'parse_scheduled_tasks|scheduled_tasks|schtasks|\\tasks\\|/tasks/'
@@ -110,16 +110,17 @@ classes:
   transfer:
     marker: transfer_artifact
     text: '(?:\btransfers?\.log\b|\bftp log\b|\b\d[\d,]*\s*bytes?\s*(?:sent|written|read|transferred|uploaded)\b|\bbytes[_ ](?:sent|written|read)\b|\$j\b|\$usnjrnl|\busnjrnl\b|\busn[ _]journal\b|\b(?:data ?extend|filecreate|file ?write)\b|\bmounteddevices\b|\bdisk ?\[usbstor\]|content-disposition:\s*attachment|\bnetflow\b|\bsrudb\b|\bbytessent\b)'
-    tools: [FTP transfers.log via read.read_output, misc.usnparser_parse, ez.lecmd on the removable volume, ez.recmd_hive SYSTEM MountedDevices, read.read_mail (attachment), ez.sqlecmd SRUM, net.tcpdump_read]
+    tools: [FTP transfers.log via read.output, misc.usnparser_parse, ez.lecmd on the removable volume, ez.recmd_hive SYSTEM MountedDevices, read.mail (attachment), ez.sqlecmd SRUM, net.tcpdump_read]
     label: transfer artifact (bytes moved)
   receipt:
     marker: receipt_artifact
     text: '(?:\bhttp/\d(?:\.\d)?\s+2\d\d\b|\b(?:response|status)(?:[ _]code)?\s*[:=]\s*2\d\d\b|\b226\b[^.\n]{0,30}complete|\btransfer complete\b|\b250\b[^.\n]{0,20}(?:ok|queued|accepted|delivered|2\.\d)|\bmessage (?:accepted for delivery|delivered|queued)\b|\bdsn\b|\bdelivery status notification\b|\bdiagnostic-code\b|\bdelivery receipt\b|\bread receipt\b|\baccess\.log\b)'
-    tools: [destination-side log via read.read_output, net.http_session_inventory (2xx), read.read_mail (250/DSN)]
+    tools: [destination-side log via read.output, net.http_session_inventory (2xx), read.mail (250/DSN)]
     label: destination-side receipt
   mail_store:
-    cmd: 'readpst|pff_export|read\.read_mail|\.mbox\b|\.eml\b|\.pst\b|\.ost\b'
-    tools: [misc.readpst_extract, misc.pff_export, read.read_mail]
+    cmd: 'readpst|pff_export|read\.(read_)?mail\b|\.mbox\b|\.eml\b|\.pst\b|\.ost\b'
+    mcp_tools: [misc.readpst_extract, misc.pff_export, read.mail]
+    tools: [misc.readpst_extract, misc.pff_export, read.mail]
     label: mail store message
   chat_store:
     marker: chat_db_export
@@ -132,23 +133,37 @@ classes:
     label: packet capture
   memory_process:
     cmd: '(?:^|[\s/])vol(?:atility)?\b.*(?:pslist|pstree|psscan|cmdline|dlllist|handles|getsids|privileges|psxview|envars|consoles|cmdscanner|sessions|thrdscan|mutantscan|filescan|dumpfiles|hashdump|lsadump|cachedump)|live_process'
-    tools: [vol.pslist, vol.pstree, vol.cmdline, vol.dlllist, live.live_processes]
+    tools: [vol.pslist, vol.pstree, vol.cmdline, vol.dlllist, live.processes]
     label: memory process record
   memory_network:
     cmd: 'netscan|netstat|live_network'
-    tools: [vol.netscan, vol.netstat, live.live_network_connections]
+    tools: [vol.netscan, vol.netstat, live.network_connections]
     label: memory network connection
   memory_injection:
     cmd: 'malfind|hollowprocesses|ldrmodules|suspicious_threads|unhooked|callbacks|ssdt|vadyarascan'
     tools: [vol.malfind, vol.hollowprocesses, vol.ldrmodules]
     label: memory injection / hooking record
+  implant_config:
+    # Stamped only when misc.cs_beacon_config DECODED a config (a negative run
+    # carries no class). A decoded config proves the implant's bytes are present
+    # and names its intended C2 — it does not show traffic, so it is c2_weak.
+    marker: implant_config
+    tools: [misc.cs_beacon_config]
+    label: decoded implant configuration (Cobalt Strike beacon)
   file_content:
-    cmd: 'strings_extract|strings_grep|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.read_output|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
-    tools: [strings.strings_grep, tsk.icat, read.read_output, misc.capa_analyze]
+    # strings.grep / strings.extract record the executed binary ('strings -a -n
+    # 4 <file>'), strings.file_identify records 'file <path>', and read.output
+    # records 'read.output --output …' (the old 'read.read_output' spelling is
+    # kept for existing traces). The tool-name keywords never appear in those
+    # command lines, so match the recorded binary as well. New entries also
+    # carry mcp_tool, matched against `mcp_tools` in _tiering.classify_entry.
+    cmd: 'strings_extract|strings_grep|^strings\s|^file\s|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.(read_)?output\b|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
+    mcp_tools: [strings.grep, strings.extract, strings.hexdump, strings.xxd_dump, tsk.icat, read.output]
+    tools: [strings.grep, tsk.icat, read.output, misc.capa_analyze]
     label: file content read
   hash_match:
     cmd: 'hash_file|hashdeep|md5deep|ssdeep|verify_evidence_hash'
-    tools: [hash.hash_file, hash.ssdeep_compare]
+    tools: [hash.file, hash.ssdeep_compare]
     label: hash match
   yara:
     cmd: 'yara'
@@ -164,7 +179,7 @@ classes:
     label: threat-intel enrichment
   timeline:
     cmd: 'log2timeline|psort|plaso|mactime'
-    tools: [plaso.plaso_create_timeline, tsk.mactime]
+    tools: [plaso.create_timeline, tsk.mactime]
     label: super-timeline row
   filesystem_listing:
     cmd: '(?:^|[ /])fls(?:\s|$)|\bistat\b|\bffind\b|indxparse|mftecmd_dir|\bils\b|tsk_fls'
@@ -172,34 +187,34 @@ classes:
     label: filesystem listing / inode record
   live_host:
     cmd: 'live\.|live_'
-    tools: [live.live_persistence_audit, live.live_open_files]
+    tools: [live.persistence_audit, live.open_files]
     label: live host record
   unix_auth_log:
     cmd: 'auth\.log|[\\/]secure\b|\bwtmp\b|\bbtmp\b|lastlog|journalctl|\bsshd\b|\blast\b -f'
-    tools: [read.read_output on auth.log/secure, live.live_recent_logins, strings.strings_grep on wtmp]
+    tools: [read.output on auth.log/secure, live.recent_logins, strings.grep on wtmp]
     label: unix authentication log
   unix_shell_history:
     cmd: 'bash_history|zsh_history|sh_history|\.histfile'
-    tools: [read.read_output on shell history, strings.strings_extract]
+    tools: [read.output on shell history, strings.extract]
     label: shell history
   unix_persistence:
     cmd: 'crontab|[\\/]cron\.(?:d|daily|hourly)|[\\/]systemd[\\/]|\.service\b|rc\.local|[\\/]init\.d[\\/]|launchagents|launchdaemons'
-    tools: [live.live_persistence_audit, read.read_output on cron/systemd units]
+    tools: [live.persistence_audit, read.output on cron/systemd units]
     label: unix/macOS persistence record
   unix_syslog:
     cmd: '[\\/]syslog\b|[\\/]messages\b|journal(?:ctl)?\b'
-    tools: [read.read_output on syslog, live.live_event_log_tail]
+    tools: [read.output on syslog, live.event_log_tail]
     label: unix system log
   macos_artifacts:
     cmd: 'fseventsd|\.logarchive|log show|unified log|\bplutil\b|\.plist\b|knowledgec\.db|quarantine'
-    tools: [read.read_output on plists/KnowledgeC, strings.strings_extract on fsevents]
+    tools: [read.output on plists/KnowledgeC, strings.extract on fsevents]
     label: macOS system artifact
 
 groups:
   # ANY = every class (used by act=other)
   execution_primary: [prefetch, userassist, amcache, bam, event_logs_security, memory_process, live_host, srum, jump_lists, unix_shell_history, unix_auth_log, macos_artifacts]
   execution_weak: [shimcache, mft, lnk_files, shellbags, registry, file_content, timeline, yara, av, usn_journal, filesystem_listing]
-  presence_primary: [mft, filesystem_listing, usn_journal, file_content, hash_match, memory_process, recycle_bin, memory_injection]
+  presence_primary: [mft, filesystem_listing, usn_journal, file_content, hash_match, memory_process, recycle_bin, memory_injection, implant_config]
   presence_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, prefetch, registry, timeline, yara, av, userassist]
   timeline_primary: [mft, usn_journal, event_logs_security, prefetch, timeline, srum, logon_session, registry, network_capture, terminalservices, device_install, unix_auth_log, unix_syslog, macos_artifacts]
   timeline_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, file_content, userassist, mail_store, chat_store]
@@ -220,7 +235,7 @@ groups:
   persistence_weak: [file_content, yara, av, mft, prefetch, amcache, shimcache, timeline, filesystem_listing]
   network_evidence: [memory_network, network_capture, srum, live_host]
   process_evidence: [memory_process, memory_injection, prefetch, userassist, amcache, bam, event_logs_security]
-  c2_weak: [yara, av, enrichment, file_content, memory_injection, registry, timeline]
+  c2_weak: [yara, av, enrichment, file_content, memory_injection, registry, timeline, implant_config]
   lateral_primary: [logon_session, network_capture, terminalservices, unix_auth_log]
   lateral_corroborator: [registry, prefetch, userassist, srum, memory_process, event_logs_security, jump_lists, shellbags, lnk_files, terminalservices, memory_network]
   lateral_weak: [registry, lnk_files, shellbags, jump_lists, file_content, timeline]

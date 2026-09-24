@@ -3,13 +3,16 @@
 Also includes email-forensics, packer-detection, capability-analysis, Office-macro,
 Sigma-hunt, and batch-execution helpers.
 """
+from core.execution_log import trace_transaction
+from core.readiness import state_fingerprint
 import os
 import re
 import shutil
 from typing import Optional
 from fastmcp import FastMCP
 from core import run, run_with_output_file, output_safe
-from core.paths import assert_output_safe
+from core.paths import assert_output_safe, trudi_cache_dir
+from tools.tool_capabilities import optional_binary, tool_unavailable_result
 
 mcp = FastMCP("misc")
 
@@ -295,6 +298,9 @@ def usnparser_parse(usn_journal: str, output_path: Optional[str] = None) -> dict
     """
     if output_path:
         assert_output_safe(output_path)
+    missing = tool_unavailable_result("misc.usnparser_parse", _bin_or_warn)
+    if missing:
+        return missing
     cmd = ["/usr/local/bin/usnparser", "-f", usn_journal]
     if output_path:
         cmd += ["-o", output_path]
@@ -336,6 +342,9 @@ def hindsight_chrome(
         back to 'jsonl' rather than failing on an invalid -f choice.
     """
     import os
+    missing = tool_unavailable_result("misc.hindsight_chrome", _bin_or_warn)
+    if missing:
+        return missing
     _VALID = {"jsonl", "sqlite", "xlsx"}
     _ALIAS = {"json": "jsonl", "csv": "xlsx", "xls": "xlsx", "db": "sqlite", "sqlite3": "sqlite"}
     fmt = (output_format or "").strip().lower()
@@ -360,10 +369,24 @@ def hindsight_chrome(
         os.makedirs(output_dir, exist_ok=True)
     except OSError:
         pass
-    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir)
+    r = run(cmd, timeout=300, output_dir=output_dir, cwd=output_dir,
+            env=_hindsight_env())
     if isinstance(r, dict):
         r["output_format"] = fmt
     return r
+
+
+# /opt/pyhindsight is Python 3.10 but uses datetime.UTC (3.11+): the child gets
+# a TRUDI-owned sitecustomize that aliases it (the install is not modified).
+_HINDSIGHT_SHIM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "_compat", "hindsight")
+
+
+def _hindsight_env() -> dict:
+    env = dict(os.environ)
+    prior = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = _HINDSIGHT_SHIM + (os.pathsep + prior if prior else "")
+    return env
 
 
 # ── AV scanning ──────────────────────────────────────────────────────────────
@@ -397,12 +420,119 @@ def clamscan_directory(directory: str, recursive: bool = True) -> dict:
 def usbdeviceforensics(registry_path: str, output_path: Optional[str] = None) -> dict:
     """
     Extract USB device connection history from registry hives.
-    registry_path: path to SYSTEM hive or a directory containing SYSTEM.
+    registry_path: SYSTEM hive file or the directory holding it (config dir).
+    output_path: optional TSV output file.
     """
     if output_path:
         assert_output_safe(output_path)
-    cmd = ["/usr/local/bin/usbdeviceforensics", registry_path]
-    return run(cmd, timeout=60)
+    stage, staged = _usbdf_stage(registry_path)
+    hives = stage or registry_path
+    cmd = ["/usr/local/bin/usbdeviceforensics", "-r", hives]
+    if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        cmd += ["-o", output_path, "-f", "tsv"]
+    def _stamp_inputs(r: dict, _out: str, _err: str) -> None:
+        # The -r dir is a scratch stage: record which evidence files it held
+        # in the stored output so the trace names the hives actually read.
+        head = "".join(f"Staged input: {p}\n" for p in staged)
+        r["stdout"] = head + r.get("stdout", "")
+        r["_stdout_full"] = head + r.get("_stdout_full", "")
+
+    try:
+        result = run(cmd, timeout=_USBDF_TIMEOUT,
+                     classify=_stamp_inputs if staged else None)
+    finally:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+    if staged:
+        result["staged_inputs"] = staged
+    if output_path:
+        result["output_path"] = output_path
+    return result
+
+
+_USBDF_TIMEOUT = 600
+
+
+def _usbdf_stage(registry_path: str) -> tuple:
+    """usbdeviceforensics os.walk()s -r RECURSIVELY and loads every file as a
+    hive three times (COMPONENTS, RegBack, systemprofile …) — on a real config
+    dir that ran past 60 s. Stage symlinks to just SYSTEM + SOFTWARE (and the
+    Windows\\INF\\setupapi.dev.log it also reads) in a scratch dir. Returns
+    (stage_dir, source_paths), or (None, []) when no SYSTEM hive is found (the
+    path is then passed through unchanged)."""
+    import tempfile
+    src = os.path.dirname(registry_path) if os.path.isfile(registry_path) else registry_path
+    if not os.path.isdir(src):
+        return None, []
+    by_lower = {n.lower(): n for n in os.listdir(src)}
+    picks = []
+    if os.path.isfile(registry_path):
+        picks.append(registry_path)
+    elif "system" in by_lower:
+        picks.append(os.path.join(src, by_lower["system"]))
+    else:
+        return None, []
+    if "software" in by_lower:
+        picks.append(os.path.join(src, by_lower["software"]))
+    inf = os.path.normpath(os.path.join(src, "..", "..", "INF"))
+    if os.path.isdir(inf):
+        for n in os.listdir(inf):
+            if n.lower() == "setupapi.dev.log":
+                picks.append(os.path.join(inf, n))
+    stage = tempfile.mkdtemp(prefix="trudi-usbdf-")
+    names, used = [], []
+    for p in picks:
+        name = os.path.basename(p)
+        if name in names:
+            continue
+        os.symlink(os.path.abspath(p), os.path.join(stage, name))
+        names.append(name)
+        used.append(os.path.abspath(p))
+    return stage, used
+
+
+# ── SRUM (ESE database) ──────────────────────────────────────────────────────
+
+# SRUDB.dat tables the agent needs by name (GUID-named extension tables).
+_SRUM_TABLES = {
+    "{973F5D5C-1D90-4944-BE8E-24B94231A174}": "network_usage (bytes sent/received per app/user)",
+    "{D10CA2FE-6FCF-4F6D-848E-B2E99266FA89}": "app_resource_usage (per-app run/cycle time)",
+    "SruDbIdMapTable": "id_map (AppId/UserId -> app path / SID)",
+}
+
+
+@mcp.tool()
+@output_safe
+def srum_export(srudb_path: str, output_dir: str) -> dict:
+    """
+    Export SRUM (SRUDB.dat, an ESE db ez.sqlecmd cannot read) with esedbexport:
+    one TSV per table under <output_dir>/srudb.export/ (read with read.output).
+    `key_tables` names network usage, app resource usage and SruDbIdMapTable.
+    """
+    assert_output_safe(output_dir)
+    missing = tool_unavailable_result("misc.srum_export", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.srum_export", _bin_or_warn)
+    os.makedirs(output_dir, exist_ok=True)
+    target = os.path.join(output_dir, "srudb")
+    # esedbexport appends ".export" to the -t basename.
+    r = run([binary, "-t", target, srudb_path], timeout=1800, output_dir=output_dir)
+    export_dir = target + ".export"
+    tables = sorted(os.listdir(export_dir)) if os.path.isdir(export_dir) else []
+    r["output_path"] = export_dir
+    r["tables"] = [os.path.join(export_dir, t) for t in tables]
+    r["key_tables"] = {
+        label: os.path.join(export_dir, t)
+        for name, label in _SRUM_TABLES.items()
+        for t in tables if t.split(".")[0].upper() == name.upper()
+    }
+    r["table_legend"] = _SRUM_TABLES
+    if r.get("success") and not tables:
+        r["success"] = False
+        r["error"] = f"esedbexport wrote no tables under {export_dir}"
+    return r
 
 
 @mcp.tool()
@@ -426,7 +556,7 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                analysis/exports/reports.
     chat_app:  auto | skype | whatsapp.
 
-    Read the produced CSVs with read.read_output. Returns _trudi_call_id for
+    Read the produced CSVs with read.output. Returns _trudi_call_id for
     record_finding; participants are annotated onto the trace entry so
     correspondent-exhaustion checks can consume them.
     """
@@ -500,6 +630,11 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                 participant_count=len(parts),
                 observed_correspondents=parts[:200],
                 correspondents_partial=len(parts) > 200,
+                # engagement stamp (v2): participants the store owner actually
+                # exchanged messages/files with; contacts-only / service
+                # handles and the owner's own handle are inventory.
+                chat_engaged=list(parsed.get("engaged") or [])[:200],
+                chat_owners=list(parsed.get("owners") or []),
             )
         except Exception:
             pass
@@ -617,6 +752,118 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
     }
 
 
+# ── Cobalt Strike beacon config ───────────────────────────────────────────────
+
+def _cs_summary_lines(res: dict) -> list:
+    lines = []
+    for m in res.get("matches", []):
+        s = m.get("summary", {})
+        lines.append(f"[{m.get('form')} {m.get('file')} @{m.get('offset_hex')} "
+                     f"key={m.get('xor_key')} ver={m.get('version_guess')} "
+                     f"config_id={m.get('config_id')}]")
+        for k, v in s.items():
+            if v not in (None, ""):
+                lines.append(f"  {k}: {v}")
+        if m.get("pointers_unresolved"):
+            lines.append(f"  pointers_unresolved: {m['pointers_unresolved']} "
+                         f"({m.get('pointer_resolution')})")
+    return lines
+
+
+@mcp.tool()
+@output_safe
+def cs_beacon_config(path: str, output_path: Optional[str] = None,
+                     memmap_listing: str = "", max_seconds: int = 600) -> dict:
+    """Extract Cobalt Strike beacon configs (C2, port, sleep, jitter, watermark, spawnto, UA, URIs, public-key hash) from memory dumps, a carved beacon, or a raw memory image.
+
+    path: file or directory (malfind/vadinfo/memmap dumps, raw image; scanned in
+    chunks, bounded by max_seconds). Finds the XOR-encoded settings block (any
+    single-byte key) and the runtime settings table; runtime string settings are
+    heap pointers, resolved from sibling vadinfo/malfind dumps or from
+    memmap_listing (vol windows.memmap -r json output of the process).
+    output_path: optional full JSON under analysis/ or exports/.
+    found=False with the scan inventory is a valid negative.
+    """
+    import json
+    from core.executor import _log_tool
+    from core.cs_beacon import extract
+
+    if output_path:
+        assert_output_safe(output_path)
+        if not {"analysis", "exports", "reports"} & {s.lower() for s in
+                                                    os.path.abspath(output_path).split(os.sep)}:
+            raise ValueError("output_path must be under analysis/, exports/ or reports/")
+    err = None
+    if not os.path.exists(path):
+        err = f"input not found: {path}"
+    elif memmap_listing and not os.path.isfile(memmap_listing):
+        err = f"memmap_listing not found: {memmap_listing}"
+    res = extract(path, memmap_listing=memmap_listing, max_seconds=max_seconds) \
+        if err is None else {"success": False, "error": err}
+    ok = bool(res.get("success"))
+
+    if ok and res.get("found"):
+        head = (f"{len(res['matches'])} beacon config match(es), "
+                f"{res['distinct_configs']} distinct")
+    elif ok:
+        head = "NO beacon config found"
+    else:
+        head = res.get("error", "cs_beacon_config failed")
+    if ok:
+        head += (f" — scanned {res['files_scanned']}/{res['files_total']} file(s), "
+                 f"{res['bytes_scanned']} bytes in {res['elapsed_seconds']}s"
+                 + (" (TIMED OUT: partial)" if res.get("timed_out") else "")
+                 + f"; searched: {res['searched_for']}")
+    summary = "\n".join([head] + _cs_summary_lines(res))
+    full = json.dumps(res, indent=1, default=str)
+
+    if ok and output_path:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as fh:
+                fh.write(full)
+        except OSError as e:
+            res["warning"] = f"JSON write failed: {e}"
+            output_path = None
+
+    # Self-log: cmd carries the SOURCE path; the full decoded JSON goes to the
+    # stdout sidecar so a reviewer can fetch every setting of the cited call.
+    tc = {"success": ok, "stdout": summary[:4000], "_stdout_full": summary + "\n\n" + full,
+          "stderr": "" if ok else res.get("error", ""), "exit_code": 0 if ok else 1,
+          "truncated": False, "retries": 0,
+          "elapsed_seconds": float(res.get("elapsed_seconds") or 0.0),
+          "timed_out": bool(res.get("timed_out")),
+          "cmd": f"misc.cs_beacon_config {path}"
+                 + (f" --memmap-listing {memmap_listing}" if memmap_listing else ""),
+          "output_path": output_path if ok else None}
+    _log_tool(tc)
+    cid = tc.get("_trudi_call_id")
+    if cid and ok and res.get("found"):
+        try:
+            from core.execution_log import log
+            first = res["matches"][0]["summary"]
+            log.annotate_tool_call(
+                cid, implant_config=True, implant_family="cobalt_strike",
+                beacon_c2=sorted({c for m in res["matches"]
+                                  if isinstance(c := m["summary"].get("c2_server"), str)
+                                  and c})[:20] or None,
+                beacon_watermark=first.get("watermark"))
+        except Exception:
+            pass
+
+    return {
+        "success": ok, "error": res.get("error"), "warning": res.get("warning"),
+        "_trudi_call_id": cid, "found": bool(res.get("found")),
+        "distinct_configs": res.get("distinct_configs", 0),
+        "matches": res.get("matches", [])[:10],
+        "match_count": len(res.get("matches", [])),
+        "files_scanned": res.get("files_scanned", 0), "bytes_scanned": res.get("bytes_scanned", 0),
+        "timed_out": bool(res.get("timed_out")), "searched_for": res.get("searched_for"),
+        "elapsed_seconds": res.get("elapsed_seconds"), "summary": summary[:4000],
+        "output_path": output_path if ok else None,
+    }
+
+
 # ── Scheduled tasks (disk) ────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -718,7 +965,7 @@ def pdf_parser_analyze(pdf_path: str, object_id: Optional[int] = None) -> dict:
 @output_safe
 def pe_scanner(file_path: str) -> dict:
     """Scan a PE executable for suspicious characteristics using pe-scanner."""
-    return run(["/usr/local/bin/pe-scanner", file_path], timeout=30)
+    return run(["/usr/local/bin/pe-scanner", "-f", file_path], timeout=30)
 
 
 @mcp.tool()
@@ -746,7 +993,7 @@ def _pre_report_ready_gate() -> dict | None:
     from core.execution_log import log
 
     pre_report_entry = None
-    pre_report_window = log._entries[-50:] if len(log._entries) > 50 else log._entries
+    pre_report_window = log._entries
     for e in reversed(pre_report_window):
         if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
             pre_report_entry = e
@@ -755,8 +1002,7 @@ def _pre_report_ready_gate() -> dict | None:
         return {
             "success": False,
             "error": (
-                "refused: no reason.pre_report_check call found in the last "
-                "50 trace entries. Call reason.pre_report_check() after "
+                "refused: no reason.pre_report_check call found in the trace. Call reason.pre_report_check() after "
                 "reason.synthesize and resolve any blocking_issues before "
                 "exporting the trace or writing the final report."
             ),
@@ -788,7 +1034,42 @@ def _pre_report_ready_gate() -> dict | None:
             "gate": "pre_report_check_required",
             "pre_report_conclusion": conclusion[:500],
         }
+    recorded = pre_report_entry.get("readiness_fingerprint")
+    current = state_fingerprint(log._entries, log._case_id)
+    if not recorded or recorded != current:
+        return {"success": False, "gate": "pre_report_check_required",
+                "error": "Report snapshot is missing or stale; run reason.pre_report_check again.",
+                "missing_check": "reason_pre_report_check"}
     return None
+
+
+def _code_identity() -> str:
+    """Which server code is running: git commit, dirty flag, and a digest of
+    core/ + tools/ as they were when this server process imported them. Edits
+    landing on disk mid-run do not change the loaded code, so the trace must
+    say what was loaded, not what is on disk now."""
+    import hashlib
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    h = hashlib.sha256()
+    for p in sorted([*root.glob("core/**/*.py"), *root.glob("tools/**/*.py")]):
+        h.update(str(p.relative_to(root)).encode())
+        h.update(p.read_bytes())
+    def git(*args):
+        try:
+            return subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args], capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        except Exception:
+            return ""
+    dirty = " dirty" if git("status", "--porcelain", "--", "core", "tools") else ""
+    return (f"commit {git('rev-parse', '--short', 'HEAD') or '?'} "
+            f"branch {git('rev-parse', '--abbrev-ref', 'HEAD') or '?'}{dirty} "
+            f"code_sha256 {h.hexdigest()[:16]}")
+
+
+_CODE_IDENTITY = _code_identity()
+
 
 @mcp.tool()
 @output_safe
@@ -832,6 +1113,7 @@ def start_execution_log(case_id: str, output_path: str,
         recovered = log.configure(case_id, output_path)
         log.record_system_error("trace_initialized",
                                 f"trace path {output_path}")
+        log.record_run_profile(_CODE_IDENTITY)
     except Exception as e:
         return {
             "success": False,
@@ -1005,6 +1287,109 @@ def record_curiosity_probe(
 
 
 @mcp.tool()
+def record_ioc(
+    ioc_type: str,
+    value: str,
+    evidence_call_ids: list[int],
+    techniques: list[str] | None = None,
+    status: str = "observed",
+    note: str = "",
+    aliases: list[str] | None = None,
+    input_call_ids: list[int] | None = None,
+) -> dict:
+    """
+    Record a typed indicator of compromise as soon as it surfaces, mapped to
+    MITRE ATT&CK. IOCs are filterable (misc.list_iocs), listed in the report,
+    and drive Scan: each technique's ATT&CK detection strategy names the data
+    sources that would confirm or scope it, and unexamined ones come back as
+    coverage leads (warnings, never blockers). Re-record the same value to
+    update its status or add techniques.
+
+    ioc_type: ipv4 | ipv6 | domain | url | email | md5 | sha1 | sha256 |
+              file_path | file_name | registry_key | account | sid | device
+              (VID:PID) | volume_serial | scheduled_task | service | process |
+              command_line | hostname
+    value:    the indicator as observed (normalised server-side for matching).
+    evidence_call_ids: REQUIRED — successful tool calls whose output shows it.
+    techniques: ATT&CK ids (e.g. ["T1200", "T1136.001"]); validated against the
+              local ATT&CK table. correlate.mitre_map can suggest candidates.
+    status:   observed | malicious | suspicious | benign | unknown
+    aliases:  other spellings the evidence uses for the same indicator (an
+              account's SID, a device's product string) — coverage counts an
+              examination as ABOUT this IOC when its command or read query
+              names the value or an alias.
+    """
+    from core.execution_log import log
+    from core import iocs as I
+    from tools._gates._evidence_calls import is_evidence_tool_call
+    from tools.mitre import validate as mitre_validate
+    try:
+        normalized = I.normalize(ioc_type, value)
+    except ValueError as exc:
+        return {"success": False, "gate": "typed_ioc", "error": str(exc),
+                "ioc_types": list(I.IOC_TYPES)}
+    if status not in I.STATUSES:
+        return {"success": False, "gate": "typed_ioc",
+                "error": f"status must be one of {', '.join(I.STATUSES)}"}
+    idx = log.index()
+    cids = sorted({int(c) for c in (evidence_call_ids or []) if c})
+    bad = [c for c in cids if not is_evidence_tool_call(idx.by_call_id.get(c) or {})]
+    if not cids or bad:
+        return {"success": False, "gate": "typed_ioc", "missing": ["evidence_call_ids"],
+                "error": ("An IOC must be grounded: pass evidence_call_ids of the successful "
+                          "evidence tool calls whose output shows it"
+                          + (f" (not evidence tool calls: {bad})" if bad else ""))}
+    tids = [str(t).strip().upper() for t in (techniques or []) if str(t).strip()]
+    unknown = [t for t in tids if not mitre_validate(t).get("exists")]
+    if unknown:
+        return {"success": False, "gate": "mitre_technique_validation",
+                "error": f"Unknown ATT&CK technique id(s): {unknown}. Use correlate.mitre_map "
+                         f"or correlate.mitre_validate to find the right id."}
+    cid = log.record_ioc(ioc_type, value, normalized, status, tids, cids, note, input_call_ids,
+                         aliases=aliases)
+    cov = I.coverage(log._entries)
+    mine = [i for i in cov["open"] if I.ioc_key(ioc_type, normalized) in i["iocs"]]
+    return {"success": True, "_trudi_call_id": cid, "key": I.ioc_key(ioc_type, normalized),
+            "normalized": normalized, "techniques": tids,
+            "coverage_open_for_this_ioc": mine[:12],
+            "coverage_counts": cov["counts"]}
+
+
+@mcp.tool()
+def list_iocs(ioc_type: str = "", technique: str = "", tactic: str = "", status: str = "",
+              include_coverage: bool = True) -> dict:
+    """
+    List recorded IOCs, filtered by ioc_type, ATT&CK technique (a parent id
+    matches its sub-techniques), tactic name, or status. With include_coverage,
+    each technique's ATT&CK detection components are shown as covered (with the
+    examining call ids), dispositioned, open (a Scan lead), or unmapped, plus
+    advisory related techniques.
+    """
+    from core.execution_log import log
+    from core import iocs as I
+    from tools.mitre import validate as mitre_validate
+    rows = list(I.ioc_state(log._entries).values())
+    if ioc_type:
+        rows = [r for r in rows if r["ioc_type"] == ioc_type]
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    if technique:
+        t = technique.strip().upper()
+        rows = [r for r in rows if any(x == t or x.startswith(t + ".") for x in r["techniques"])]
+    if tactic:
+        want = tactic.strip().lower()
+        rows = [r for r in rows if any(want in str(mitre_validate(x).get("tactic", "")).lower()
+                                       for x in r["techniques"])]
+    out = {"success": True, "count": len(rows), "iocs": rows}
+    if include_coverage:
+        cov = I.coverage(log._entries)
+        keys = {r["key"] for r in rows}
+        out["coverage"] = [i for i in cov["items"] if set(i["iocs"]) & keys]
+        out["coverage_counts"] = cov["counts"]
+    return out
+
+
+@mcp.tool()
 def record_disposition(
     target_kind: str,
     target_id: str,
@@ -1030,10 +1415,15 @@ def record_disposition(
                  destruction_scope → the finding call_id.
     reason:      absent_from_evidence | inapplicable | out_of_scope | noise |
                  excluded | not_a_principal | controller_unknown |
-                 evidence_unavailable | ruled_out | refuted | undetermined
+                 evidence_unavailable | ruled_out | refuted | undetermined |
+                 same_as | verified (challenge) | tool_unavailable (tool) |
+                 present_unparseable (source / coverage)
                  (each target_kind accepts a subset — the refusal lists it).
     evidence_call_ids: REQUIRED for excluded / ruled_out / refuted /
-                 not_a_principal — the evidence tool calls that establish it.
+                 not_a_principal / same_as / verified, and for
+                 absent_from_evidence or present_unparseable on a source or
+                 coverage row — the evidence tool calls that establish it
+                 (for "absent": the listing or search that shows it absent).
     window:      {start, end} ISO dates the disposition covers (device rule-outs).
     """
     from core.execution_log import log
@@ -1051,7 +1441,7 @@ def record_disposition(
     rs = reason.strip().lower()
     tk = target_kind.strip().lower()
     cids = sorted({int(c) for c in (evidence_call_ids or []) if c})
-    if rs in D.EVIDENCE_REQUIRED:
+    if D.evidence_required(tk, rs):
         bad = [c for c in cids if not is_evidence_tool_call(idx.by_call_id.get(c) or {})]
         if not cids or bad:
             return {"success": False, "gate": "typed_disposition",
@@ -1121,19 +1511,20 @@ def record_disposition(
     # or a case-roster match) cannot be settled reason="noise": "noise" asserts
     # inbound spam/clutter, and mislabelling would sweep a real recipient out of
     # the recipient-exhaustion duty. Steer to out_of_scope or excluded — this
-    # constrains the LABEL, not the conclusion. Mirrors the pre-report check's
-    # engagement predicate (wrote_to / chat / roster), so single-target and
-    # batch dispositions both inherit it.
+    # constrains the LABEL, not the conclusion. Shares the pre-report check's
+    # engagement predicate (owner wrote to it / chat / roster), so single-target and
+    # batch dispositions both inherit it (core.mail_roster.registry_record_engaged).
     if tk == "correspondent" and rs == "noise":
         from tools._gates._entities import entity_matches as _emx
         tnorm = target_id.strip().lower()
         crec = (getattr(idx, "correspondents", {}) or {}).get(tnorm) or {}
-        wrote_to = int(crec.get("to") or 0) > 0
-        chat = any("chat" in str(s) for s in (crec.get("sources") or []))
+        from core.mail_roster import registry_record_engaged as _eng
+        engaged = _eng(crec)
+        chat = bool(crec.get("chat_engaged"))
         roster = any(_emx(tnorm, t) for t in (getattr(idx, "roster", {}) or {}))
-        if wrote_to or chat or roster:
-            why = ("the subject WROTE TO this address" if wrote_to
-                   else "this is a chat participant" if chat
+        if engaged or roster:
+            why = ("this is a chat participant" if chat
+                   else "the subject WROTE TO this address" if engaged
                    else "this matches the case roster")
             return {"success": False, "gate": "typed_disposition",
                     "detail_gate": "engaged_correspondent_not_noise",
@@ -1150,7 +1541,7 @@ def record_disposition(
     # character apart from another observed correspondent) cannot be EXCLUDED on
     # a roster/senders listing. Excluding asserts it is uninvolved — for a
     # near-twin of an engaged address that must rest on reading ITS messages,
-    # not an assumed typo. Require a body read (read.read_mail mode=messages)
+    # not an assumed typo. Require a body read (read.mail mode=messages)
     # that queried this address among the cited evidence. Symmetric: the same
     # read can equally prove the pair distinct.
     if tk == "correspondent" and rs in ("excluded", "out_of_scope", "noise"):
@@ -1169,7 +1560,7 @@ def record_disposition(
             local = tnorm.split("@", 1)[0]
             stems = {tnorm} | {local[i:i + 4] for i in range(max(1, len(local) - 3))}
             body_read = any(
-                "read.read_mail" in (cmd := str((idx.by_call_id.get(c) or {}).get("cmd", "")).lower())
+                "read.mail" in (cmd := str((idx.by_call_id.get(c) or {}).get("cmd", "")).lower())
                 and "mode=messages" in cmd and any(s in cmd for s in stems)
                 for c in cids)
             if not body_read:
@@ -1180,7 +1571,7 @@ def record_disposition(
                         f"{target_id} is a near-alias (one character apart, same domain) "
                         f"of another observed correspondent — settling it {rs!r} dismisses "
                         f"it, which for a near-twin of an engaged address must rest on "
-                        f"reading ITS messages, not an assumed typo. Cite a read.read_mail "
+                        f"reading ITS messages, not an assumed typo. Cite a read.mail "
                         f"mode=messages call that queried {target_id} (field=body) among "
                         f"evidence_call_ids, or resolve the pair with a finding — do not "
                         f"dismiss it on a roster/senders listing.")}
@@ -1193,6 +1584,55 @@ def record_disposition(
 
 @mcp.tool()
 @output_safe
+@trace_transaction
+def retract_finding(finding_call_id: int, reason: str, input_call_ids: list[int]) -> dict:
+    """Withdraw a current finding explicitly; retain the full audit history."""
+    from core.execution_log import log, _utcnow
+    from core.findings import active_findings
+    active = {e['call_id'] for e in active_findings(log._entries)}
+    if finding_call_id not in active or not reason.strip():
+        return {"success": False, "error": "Retraction needs a current finding and a reason"}
+    if not input_call_ids or any(cid not in log.index().by_call_id for cid in input_call_ids):
+        return {"success": False, "error": "Retraction needs real supporting call IDs"}
+    cid = log._next_id()
+    log._append_entry({"type": "finding_retracted", "call_id": cid, "ts": _utcnow(),
+                       "finding_call_id": finding_call_id, "reason": reason,
+                       "input_call_ids": input_call_ids})
+    return {"success": True, "_trudi_call_id": cid, "retracted": finding_call_id}
+
+
+@mcp.tool()
+@output_safe
+def submit_finding(description: str, confidence: str, input_call_ids: list[int],
+                   idempotency_key: str, claim: dict, source: str = "",
+                   linked_call_id: int = 0, tested_hypothesis_id: str = "",
+                   supersedes: int = 0, case_context: str = "",
+                   selectors: list[dict] | None = None) -> dict:
+    """Preflight, independently review and record one finding in one operation.
+
+    claim: the typed record_finding fields (claim_kind/category/act/entities,
+        scope/window, attribution and evidence IDs). No confidence downgrade.
+    input_call_ids: real evidence-producing calls; summaries are not evidence.
+    idempotency_key: stable unique key for this exact request; reuse on retries.
+    selectors: optional {call_id, path, start_byte, end_byte}; half-open byte
+        ranges within that call's output. Otherwise relevant lines are selected.
+    Returns status: recorded, needs-evidence, contradicted, invalid, or
+        retryable-review-failure; failures include concrete next actions.
+    """
+    from core.execution_log import log
+    from core.finding_submission import make_request, submit
+    from core.evidence_packets import PacketError
+    try:
+        request = make_request(description, confidence, input_call_ids, claim, source,
+                               linked_call_id, tested_hypothesis_id, supersedes, case_context)
+    except (PacketError, TypeError, ValueError) as exc:
+        return {"success": False, "status": "invalid", "error": str(exc)}
+    return submit(log, request, idempotency_key, selectors)
+
+
+@mcp.tool()
+@output_safe
+@trace_transaction
 def record_finding(
     description: str,
     confidence: str,
@@ -1328,6 +1768,12 @@ def record_finding(
         transfer_call_ids=transfer_call_ids, receipt_call_ids=receipt_call_ids,
         rule_outs=rule_outs, resolves=resolves, answers_case_question=answers_case_question)
 
+    from core.findings import validate_revision
+    try:
+        validate_revision(log._entries, supersedes, claim)
+    except ValueError as exc:
+        return {"success": False, "gate": "finding_revision", "error": str(exc)}
+
     ctx = GateContext(
         description=description,
         confidence=confidence,
@@ -1341,8 +1787,19 @@ def record_finding(
         input_call_ids=list(input_call_ids) if input_call_ids else [],
         supporting_evidence=supporting_evidence or "",
         claim=claim,
+        supersedes=supersedes,
     )
 
+    from core.finding_submission import submission_commit, receipt_matches
+    submission = submission_commit.get()
+    if submission:
+        review = log.index().by_call_id.get(submission['review_call_id'], {})
+        if any(e.get('gated_by_evaluate_call_id') == submission['review_call_id']
+               for e in log.index().by_type.get('finding', [])):
+            return {"success": False, "gate": "review_receipt", "error": "Review receipt already used by a finding"}
+        if not receipt_matches(ctx, review):
+            return {"success": False, "gate": "review_receipt", "error": "Exact claim/evidence review receipt missing or stale"}
+        ctx.review_call_id = submission['review_call_id']
     failure = run_gates(ctx)
     if failure is not None:
         # Refusal ledger — the single write site (record_agent_message delegates
@@ -1372,6 +1829,10 @@ def record_finding(
     # foreign key. The chain view, accuracy report, and synthesize all use
     # these directly instead of inferring links from user_message substrings.
     gate_metadata = {}
+    if submission:
+        gate_metadata.update({k: submission[k] for k in
+                              ('submission_key', 'submission_request_hash', 'evidence_packet_id')})
+        gate_metadata['gated_by_evaluate_call_id'] = submission['review_call_id']
     if ctx.gated_by_evaluate_call_id:
         gate_metadata["gated_by_evaluate_call_id"] = ctx.gated_by_evaluate_call_id
     if ctx.gated_by_confidence_call_id:
@@ -1396,7 +1857,7 @@ def record_finding(
         gate_metadata["tier_rule"] = ctx.tier_rule
         gate_metadata["artifact_classes"] = ctx.artifact_classes
 
-    log.record_finding(
+    finding_cid = log.record_finding(
         description, confidence, source, linked_call_id, tested_hypothesis_id,
         gate_metadata=gate_metadata,
         input_call_ids=input_call_ids,
@@ -1404,7 +1865,9 @@ def record_finding(
         supporting_evidence=supporting_evidence or "",
         claim=claim if _claim_declared(claim) else None,
     )
-    result = {"success": True, "description": description, "confidence": confidence}
+    result = {"success": True, "description": description, "confidence": confidence,
+              "_trudi_call_id": finding_cid, "finding_id": log.index().by_call_id[finding_cid]["finding_id"],
+              "revision": log.index().by_call_id[finding_cid]["revision"]}
     if ctx.tier_achievable:
         from tools._gates._tiering import _RANK as _TRANK
         result["tier_achievable"] = ctx.tier_achievable
@@ -1505,6 +1968,7 @@ def record_self_correction(
 
 @mcp.tool()
 @output_safe
+@trace_transaction
 def export_execution_log(output_path: str) -> dict:
     """
     Export the execution trace to <output_path>.json and <output_path>.md.
@@ -1539,6 +2003,7 @@ def export_execution_log(output_path: str) -> dict:
 
 @mcp.tool()
 @output_safe
+@trace_transaction
 def write_final_report(output_path: str, content: str) -> dict:
     """
     Write the final Markdown report only after reason.pre_report_check returned
@@ -1555,14 +2020,16 @@ def write_final_report(output_path: str, content: str) -> dict:
                 ),
             }
         return refusal
+    from core.execution_log import log as _plog
+    from tools.reasoning import report_phase_refusal
+    phase_refusal = report_phase_refusal(_plog, "write_final_report")
+    if phase_refusal is not None:
+        return phase_refusal
 
     assert_output_safe(output_path)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     from core.execution_log import log
-    # H-6: synthesize blockers that pre_report_check demoted to warnings (round
-    # 2+ with no new evidence) are carried into the report verbatim, so the
-    # reader sees what the reviewer could not settle. Appended server-side —
-    # the agent cannot leave them out.
+    # Explicitly adjudicated evidence limitations always accompany the report.
     limitations: list = []
     try:
         for e in reversed(log._entries):
@@ -1577,11 +2044,26 @@ def write_final_report(output_path: str, content: str) -> dict:
     # is still SHOWN, so relevance scoping never hides an identity.
     inventory: dict = {}
     lifecycle: dict = {}
+    ioc_inv: dict = {}
+    unshown: list = []
+    disp_review: list = []
+    advisories: list = []
     try:
         for e in reversed(log._entries):
             if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
                 inventory = dict(e.get("registry_inventory") or {})
                 lifecycle = dict(e.get("lifecycle_coverage") or {})
+                ioc_inv = dict(e.get("ioc_inventory") or {})
+                unshown = list(e.get("unshown_review_details") or [])
+                disp_review = list(e.get("disposition_review") or [])
+                break
+        # The latest successful cross-finding review's advisories: non-blocking
+        # by the reviewer's own classification, but a reader should see them.
+        for e in reversed(log._entries):
+            if (e.get("type") == "reason_call" and e.get("tool") == "reason_synthesize"
+                    and e.get("success") is not False):
+                advisories = [str(a) for a in ((e.get("result_block") or {}).get("advisories")
+                                               or e.get("advisories") or []) if str(a).strip()]
                 break
     except Exception:
         inventory = {}
@@ -1592,7 +2074,8 @@ def write_final_report(output_path: str, content: str) -> dict:
     # goals (never a demand that an attack exist).
     if lifecycle and "attack-lifecycle coverage" not in content.lower():
         _order = ["persistence", "privilege_escalation", "lateral_movement", "execution", "exfil"]
-        _lbl = {"established": "established", "ruled_out": "ruled out",
+        _lbl = {"established": "established", "suspected": "suspected (lead only)",
+                "ruled_out": "ruled out",
                 "examined": "examined (no verdict)", "not_examined": "NOT examined"}
         _sec = ["\n\n## Attack-lifecycle coverage",
                 "Coverage of the five DFIR goals for this investigation. A phase is covered "
@@ -1648,12 +2131,76 @@ def write_final_report(output_path: str, content: str) -> dict:
                        f"(derived by misc.knowns_pattern_generate).")
         if inv_rows:
             content = content.rstrip() + "\n".join(sec) + "\n"
+    if ioc_inv.get("iocs") and "## indicators of compromise" not in content.lower():
+        sec = ["\n\n## Indicators of compromise",
+               "Typed indicators recorded during the investigation, each grounded in the "
+               "cited tool calls and mapped to MITRE ATT&CK.",
+               "\n| type | value | status | ATT&CK | evidence calls |\n|---|---|---|---|---|"]
+        for r in ioc_inv["iocs"]:
+            sec.append(f"| {r.get('ioc_type','')} | {r.get('value','')} | {r.get('status','')} | "
+                       f"{', '.join(r.get('techniques') or []) or '—'} | "
+                       f"{', '.join(str(c) for c in (r.get('evidence_call_ids') or [])[:6])} |")
+        cc = ioc_inv.get("coverage_counts") or {}
+        if cc:
+            sec.append(f"\nATT&CK detection coverage for these techniques: "
+                       f"{cc.get('covered', 0)} data sources examined, "
+                       f"{cc.get('open', 0) + cc.get('dispositioned', 0)} NOT examined "
+                       f"({cc.get('dispositioned', 0)} of them with a recorded reason), "
+                       f"{cc.get('not_applicable', 0)} needing evidence the case does not hold, "
+                       f"{cc.get('unmapped', 0)} with no disk-forensic equivalent.")
+        not_examined = list(ioc_inv.get("open") or []) + list(ioc_inv.get("dispositioned") or [])
+        if not_examined:
+            sec.append("\n### Detection sources not examined\n")
+            sec.append("| technique | data component | indicators | would be examined with | "
+                       "why not examined |\n|---|---|---|---|---|")
+            for i in not_examined:
+                sec.append(f"| {i.get('technique','')} {i.get('technique_name','')} | "
+                           f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
+                           f"{', '.join((i.get('examine_with') or [])[:4])} | "
+                           f"{('disposition: ' + str(i.get('disposition'))) if i.get('disposition') else 'open'} |")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if disp_review and "## dispositions to review" not in content.lower():
+        sec = ["\n\n## Dispositions to review",
+               "These questions were settled by a typed disposition rather than a finding, with "
+               "little or no evidence addressing the claim itself (term overlap is shown). They "
+               "are not findings; check each before relying on it."]
+        for d in disp_review:
+            sec.append(f"- #{d.get('call_id')} {d.get('target_kind')} `{d.get('target_id')}` → "
+                       f"{d.get('reason')} — {d.get('why')}")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if advisories and "## reviewer advisories" not in content.lower():
+        sec = ["\n\n## Reviewer advisories",
+               "Points the cross-finding reviewer raised as advisories (not blockers) in its "
+               "latest round."]
+        sec += [f"- {a}" for a in advisories[:20]]
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if unshown and "## details the reviewer could not see" not in content.lower():
+        sec = ["\n\n## Details the reviewer could not see",
+               "During finding review these details could not be checked because the deciding "
+               "rows were not displayed to the reviewer — a display limit, not a finding of "
+               "absence. Compare each with the recorded findings: a detail absent from them was "
+               "removed rather than verified and remains un-checked."]
+        for u in unshown:
+            sec.append(f"- ({u.get('submission')}, call {u.get('call_id')}) {u.get('item')}")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    from core.findings import active_findings
+    current = active_findings(log._entries)
+    if current:
+        section = ["\n\n## Current recorded findings",
+                   "Current revisions at report approval. Earlier versions remain in the execution trace."]
+        for finding in current:
+            fid = finding.get('finding_id') or f"F-{finding['call_id']}"
+            section.append(f"\n### {fid} · call {finding['call_id']} · {finding.get('confidence', '')}\n\n"
+                           + finding.get('description', ''))
+        content = content.rstrip() + "\n".join(section) + "\n"
     appended = 0
-    if limitations and "reviewer limitations" not in content.lower():
-        content = (content.rstrip() + "\n\n## Reviewer limitations (unresolved synthesize blockers)\n"
+    if limitations:
+        content = (content.rstrip() + "\n\n## Reviewer limitations and unresolved objections\n"
                    "The adversarial reviewer raised the following points that could not be settled "
-                   "with the evidence in scope; the recorded tiers already reflect the evaluate "
-                   "reviewer's caps.\n"
+                   "with the evidence in scope. Entries marked UNRESOLVED are objections the "
+                   "reviewer still held when the bounded review ended — they are stated here, "
+                   "not settled; the others are adjudicated limitations backed by a reviewed "
+                   "narrower claim and a typed evidence disposition.\n"
                    + "\n".join(f"- {b}" for b in limitations) + "\n")
         appended = len(limitations)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -1812,13 +2359,15 @@ def record_agent_message(
 @mcp.tool()
 def job_status(job_id: str) -> dict:
     """
-    Poll a background job (e.g. net.tcpxtract_streams). While running:
-    status + elapsed + files-so-far. When finished: the full tool result —
-    trace-logged with a citable _trudi_call_id on first collection. Poll
-    between other work; never wait idle on a running job.
+    Poll a background job. Long tools (ewf_verify, plaso, carvers, directory
+    scans, and any Volatility / EZ directory / event-log run that passes ~30 s)
+    return a job_id instead of blocking. While running: status (running |
+    queued) + elapsed. When finished: the tool's full result with its citable
+    _trudi_call_id. Poll between other work; never wait idle on a running job.
+    A job_id that is unknown after a server restart was lost — re-run the tool.
     """
-    from core.jobs import job_status as _job_status
-    return _job_status(job_id)
+    from core.jobs import job_status as _job_status, task_job_status
+    return task_job_status(job_id) or _job_status(job_id)
 
 
 @mcp.tool()
@@ -1826,7 +2375,9 @@ def job_status(job_id: str) -> dict:
 def clear_case_run(case_dir: str) -> dict:
     """
     Reset a case for a fresh investigation run. Deletes:
-      - analysis/, exports/, reports/ contents
+      - analysis/, exports/, reports/ contents, INCLUDING hidden entries
+        (analysis/.tool_output/ sidecars, .FR-*/.synthesis-* locks) so a new
+        run never reads a previous run's output under a reused call id
       - ~/.cache/trudi/session.json (prevents auto-reconnect to stale trace)
       - ~/.claude/projects/<encoded>/memory/ files (clears case memory)
 
@@ -1839,9 +2390,16 @@ def clear_case_run(case_dir: str) -> dict:
 
     for subdir in ("analysis", "exports", "reports"):
         target = os.path.join(case_dir, subdir)
-        for item in glob.glob(os.path.join(target, "*")):
+        # os.listdir, not glob("*"): glob skips dotfiles, which left stale
+        # .tool_output/ sidecars behind for the next run to read.
+        try:
+            names = sorted(os.listdir(target))
+        except OSError:
+            names = []
+        for name in names:
+            item = os.path.join(target, name)
             try:
-                if os.path.isdir(item):
+                if os.path.isdir(item) and not os.path.islink(item):
                     shutil.rmtree(item)
                 else:
                     os.remove(item)
@@ -1849,7 +2407,7 @@ def clear_case_run(case_dir: str) -> dict:
             except OSError as e:
                 errors.append(str(e))
 
-    session = os.path.expanduser("~/.cache/trudi/session.json")
+    session = os.path.join(trudi_cache_dir(), "session.json")
     if os.path.exists(session):
         try:
             os.remove(session)
@@ -1886,21 +2444,22 @@ def pff_export(pst_path: str, output_dir: str, mode: str = "items") -> dict:
     mode: items (default — produces a directory tree of messages), all,
           recovered, or debug. Outputs are written under output_dir.
     """
-    binary = _bin_or_warn("pffexport")
-    if not binary:
-        return {"success": False, "error": "pffexport not installed — apt install pff-tools"}
+    missing = tool_unavailable_result("misc.pff_export", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.pff_export", _bin_or_warn)
     os.makedirs(output_dir, exist_ok=True)
     # -q: quiet — suppress the progress banner from stdout. pffexport APPENDS
     # ".export" to the -t target, so the real output tree is
     # `<output_dir>.export/` (a call reporting output_dir left it empty and the
     # agent read "no mail" — a false-absence episode). Surface the true path
-    # and a read hint so read.read_mail is pointed at the tree that exists.
+    # and a read hint so read.mail is pointed at the tree that exists.
     r = run([binary, "-q", "-m", mode, "-t", output_dir, pst_path], timeout=1800)
     if isinstance(r, dict) and r.get("success"):
         actual = output_dir + ".export"
         r["output_path"] = actual if os.path.isdir(actual) else output_dir
         r["layout"] = "pffexport_items"
-        r["read_hint"] = (f"read.read_mail over {r['output_path']} — pffexport item tree "
+        r["read_hint"] = (f"read.mail over {r['output_path']} — pffexport item tree "
                           f"(MessageNNNNN/ dirs), consumed natively; or use "
                           f"misc.readpst_extract for an mbox.")
     return r
@@ -1914,9 +2473,10 @@ def readpst_extract(pst_path: str, output_dir: str, format_mbox: bool = True) ->
 
     format_mbox: True → -o mbox; False → -e (per-message .eml files).
     """
-    binary = _bin_or_warn("readpst")
-    if not binary:
-        return {"success": False, "error": "readpst not installed — sudo apt install pst-utils"}
+    missing = tool_unavailable_result("misc.readpst_extract", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.readpst_extract", _bin_or_warn)
     os.makedirs(output_dir, exist_ok=True)
     # -q: quiet — only error messages on stdout (progress banner otherwise
     # dominates the trace excerpt; converted mail is written under output_dir).
@@ -1939,9 +2499,10 @@ def densityscout_scan(target: str, threshold: float = 0.10) -> dict:
     threshold: density threshold (0.0–1.0). Higher = more permissive matches.
     Output rows are formatted as `<density> <offset> <path>` per region.
     """
-    binary = _bin_or_warn("densityscout") or "/usr/local/bin/densityscout"
-    if not os.path.exists(binary):
-        return {"success": False, "error": "densityscout not installed"}
+    missing = tool_unavailable_result("misc.densityscout_scan", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.densityscout_scan", _bin_or_warn)
     cmd = [binary, "-pe", "-t", str(threshold), target]
     return run(cmd, timeout=600)
 
@@ -1966,11 +2527,10 @@ def chainsaw_hunt(evtx_dir: str, sigma_dir: Optional[str] = None,
     """
     if output_path:
         assert_output_safe(output_path)
-    binary = _bin_or_warn("chainsaw")
-    if not binary:
-        return {"success": False, "error":
-                "chainsaw not installed — see install.sh for the binary release "
-                "(github.com/WithSecureLabs/chainsaw)"}
+    missing = tool_unavailable_result("misc.chainsaw_hunt", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.chainsaw_hunt", _bin_or_warn)
     if sigma_dir is None:
         for candidate in ("/opt/chainsaw/sigma", "/usr/local/share/chainsaw/sigma",
                           "/usr/share/chainsaw/sigma"):
@@ -2000,10 +2560,10 @@ def capa_analyze(file_path: str, output_path: Optional[str] = None) -> dict:
     """
     if output_path:
         assert_output_safe(output_path)
-    binary = _bin_or_warn("capa")
-    if not binary:
-        return {"success": False, "error":
-                "capa not installed — pip install flare-capa"}
+    missing = tool_unavailable_result("misc.capa_analyze", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.capa_analyze", _bin_or_warn)
     cmd = [binary]
     if output_path:
         cmd += ["-j"]  # JSON output to stdout, we redirect via run() if needed
@@ -2033,10 +2593,10 @@ def olevba_scan(office_path: str, decode: bool = True) -> dict:
     Flags suspicious patterns (AutoOpen, Shell, URLDownloadToFile, MZ headers
     in strings, IOCs, etc.) — a strong signal for phishing-borne initial access.
     """
-    binary = _bin_or_warn("olevba") or _bin_or_warn("olevba3")
-    if not binary:
-        return {"success": False, "error":
-                "olevba not installed — pip install oletools"}
+    missing = tool_unavailable_result("misc.olevba_scan", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.olevba_scan", _bin_or_warn)
     cmd = [binary]
     if decode:
         cmd.append("--decode")
@@ -2054,10 +2614,10 @@ def mraptor_scan(office_path: str) -> dict:
     pattern (auto-exec, write to system, execute external command, etc.).
     """
     from tools._exit_codes import policy
-    binary = _bin_or_warn("mraptor") or _bin_or_warn("mraptor3")
-    if not binary:
-        return {"success": False, "error":
-                "mraptor not installed — pip install oletools"}
+    missing = tool_unavailable_result("misc.mraptor_scan", _bin_or_warn)
+    if missing:
+        return missing
+    binary = optional_binary("misc.mraptor_scan", _bin_or_warn)
     return run([binary, office_path], timeout=120, **policy("mraptor"))
 
 
@@ -2113,7 +2673,7 @@ def batch_run(tool_calls: list[dict], max_concurrent: int = 4) -> dict:
 # ~/.cache/trudi/dashboard.url on startup, and surface a deep-link URL that
 # pre-selects this case's trace.
 
-_DASHBOARD_DISCOVERY_FILE = os.path.expanduser("~/.cache/trudi/dashboard.url")
+_DASHBOARD_DISCOVERY_FILE = os.path.join(trudi_cache_dir(), "dashboard.url")
 
 
 def _detect_case_id(case_dir: str) -> str:
@@ -2386,4 +2946,3 @@ def knowns_pattern_generate(
             pass
 
     return result
-
