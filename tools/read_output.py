@@ -196,49 +196,6 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
     Returns _trudi_call_id for record_finding — a recipient/dissemination claim
     should cite this (the To:/body), not an extraction/strings call.
     """
-    import mailbox
-    import email
-    from email import policy
-
-    def _pff_item(msg_dir):
-        """One pffexport item dir (MessageNNNNN/) → an email.message. Primary
-        source is InternetHeaders.txt (RFC822); OutlookHeaders.txt fills
-        From/To/Subject/Date when internet headers are absent (e.g. some OSTs).
-        Body from Message.txt, else de-tagged Message.html."""
-        import re as _re
-        def _read(name):
-            p = os.path.join(msg_dir, name)
-            try:
-                with open(p, "r", errors="replace") as fh:
-                    return fh.read()
-            except OSError:
-                return ""
-        hdrs = _read("InternetHeaders.txt")
-        body = _read("Message.txt")
-        if not body:
-            html = _read("Message.html")
-            if html:
-                html = _re.sub(r"<style.*?</style>", " ", html, flags=_re.S | _re.I)
-                body = _re.sub(r"<[^>]+>", " ", html)
-        if "From:" not in hdrs and "from:" not in hdrs:
-            # fall back to the Outlook-side labelled headers
-            ok = {}
-            for ln in _read("OutlookHeaders.txt").splitlines():
-                if ":" in ln:
-                    k, _, v = ln.partition(":")
-                    ok[k.strip().lower()] = v.strip()
-            recips = _read("Recipients.txt").strip().replace("\n", ", ")
-            hdrs = (f"From: {ok.get('sender name','')} <{ok.get('sender email address','')}>\n"
-                    f"To: {recips}\n"
-                    f"Subject: {ok.get('subject','')}\n"
-                    f"Date: {ok.get('client submit time','')}\n")
-        try:
-            m = email.message_from_string(hdrs, policy=policy.default)
-            m.set_payload(body)
-            return m
-        except Exception:
-            return None
-
     resolved, err = _guard(mail_path)
     if err:
         return err
@@ -248,49 +205,12 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
     body_cap = 4000
     scan_cap = 5000  # messages
 
+    from core import mail_roster as _mr
+
     def _msgs():
-        n = 0
-        if os.path.isdir(resolved):
-            import glob
-            # pffexport item tree: MessageNNNNN/ dirs holding InternetHeaders.txt.
-            item_dirs = sorted(
-                d for d in glob.glob(os.path.join(resolved, "**", "Message*"), recursive=True)
-                if os.path.isfile(os.path.join(d, "InternetHeaders.txt")))
-            if item_dirs:
-                for d in item_dirs:
-                    if n >= scan_cap:
-                        return
-                    m = _pff_item(d)
-                    if m is not None:
-                        yield m; n += 1
-                return
-            for f in sorted(glob.glob(os.path.join(resolved, "**", "*"), recursive=True)):
-                if n >= scan_cap:
-                    return
-                fl = f.lower()
-                if fl.endswith(".eml") and os.path.isfile(f):
-                    try:
-                        with open(f, "rb") as fh:
-                            yield email.message_from_binary_file(fh, policy=policy.default)
-                        n += 1
-                    except Exception:
-                        continue
-                elif fl.endswith(".mbox") and os.path.isfile(f):
-                    try:
-                        for m in mailbox.mbox(f):
-                            yield m; n += 1
-                            if n >= scan_cap:
-                                return
-                    except Exception:
-                        continue
-        else:
-            try:
-                for m in mailbox.mbox(resolved):
-                    yield m; n += 1
-                    if n >= scan_cap:
-                        return
-            except Exception:
-                return
+        # (message, folder locator) — the locator tells Sent from received
+        # mail so the roster can derive the mailbox owner.
+        yield from _mr.iter_store(resolved, scan_cap)
 
     def _body(m):
         try:
@@ -316,52 +236,24 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
         return any(t in hay for t in terms)
 
     import collections
-    from email.utils import getaddresses
     matched, senders, threads = [], collections.Counter(), collections.defaultdict(lambda: [0, set()])
     saw_attachment = saw_dsn = False
     total_chars = 0
-    observed: set = set()
     observed_cap = 1000   # roster size bound (annotation size), NOT a scan bound
-    # Per-address direction counts (sent vs written-to): the pre-report
-    # recipient check uses them to tell an engaged correspondent from a
-    # one-shot inbound sender, so bulk senders never force dispositions.
-    stats: dict = {}
-    # Bulk-class senders identified by the RFC-standard bulk-mail headers
-    # (List-Unsubscribe / List-Id / Precedence: bulk|list|junk). Volume alone
-    # is not engagement — a newsletter that sends many messages is not a
-    # correspondent the subject engaged; the standard headers mark it as bulk
-    # so the pre-report exhaustion check inventories it instead of blocking.
-    bulk_senders: set = set()
+    # Correspondent roster (registry feeder): only syntactically valid
+    # addresses (pffexport header labels are field names, not people), with
+    # per-address direction counts INCLUDING owner_to — messages the mailbox
+    # owner (derived from the store's Sent folders) sent to the address. The
+    # pre-report exhaustion check blocks only on owner_to / chat / roster
+    # engagement; inbound volume and third-party To: lists are inventory.
+    roster = _mr.RosterBuilder(resolved, cap=observed_cap)
     consumed = 0
     capped = False
-    for m in _msgs():
+    for m, _loc in _msgs():
         consumed += 1
         # Correspondent roster from EVERY scanned message — annotated onto the
         # trace entry below as a registry feeder (server-stamped, not prose).
-        try:
-            _is_bulk = bool(m.get("List-Unsubscribe") or m.get("List-Id")
-                            or _re.search(r"\b(bulk|list|junk|auto[- ]?reply)\b",
-                                          str(m.get("Precedence", "")), _re.IGNORECASE))
-            for _dn, _addr in getaddresses([str(m.get("From", ""))]):
-                if _addr:
-                    a = _addr.lower()
-                    if len(observed) < observed_cap:
-                        observed.add(a)
-                    if a in observed:
-                        s = stats.setdefault(a, {"from": 0, "to": 0})
-                        s["from"] += 1
-                        if _is_bulk:
-                            bulk_senders.add(a)
-            for _dn, _addr in getaddresses([str(m.get("To", "")), str(m.get("Cc", ""))]):
-                if _addr:
-                    a = _addr.lower()
-                    if len(observed) < observed_cap:
-                        observed.add(a)
-                    if a in observed:
-                        s = stats.setdefault(a, {"from": 0, "to": 0})
-                        s["to"] += 1
-        except Exception:
-            pass
+        roster.add(m, _loc)
         body = _body(m) if (include_body or field == "body" or mode == "messages") else ""
         if mode == "senders":
             senders[f"{m.get('From','?')} -> {m.get('To','?')}"] += 1
@@ -407,14 +299,9 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
     # zero yield is flagged so no registry or absence claim rests on it.
     zero_yield = False
     if consumed == 0:
-        for m in _msgs():
+        for m, _loc in _msgs():
             consumed += 1
-            try:
-                for _dn, _addr in getaddresses([str(m.get("From", "")), str(m.get("To", "")), str(m.get("Cc", ""))]):
-                    if _addr and len(observed) < observed_cap:
-                        observed.add(_addr.lower())
-            except Exception:
-                pass
+            roster.add(m, _loc)
             body = _body(m)
             if not capped and _hit(m, body):
                 rec = {"date": str(m.get("Date", "")), "from": str(m.get("From", "")),
@@ -428,6 +315,7 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
         zero_yield = consumed == 0
     # The cmd carries mode/field/query so the trace shows HOW the store was
     # read (a roster listing is not a body read) — audit-traceable.
+    _ros = roster.result()
     import shlex
     _cmd = f"read.mail -o {shlex.quote(resolved)} mode={mode} field={field}" + (f" q={query[:60]}" if query else "")
     cid = _selflog(_cmd,
@@ -444,15 +332,19 @@ def read_mail(mail_path: str, query: str = "", field: str = "any",
             _rcpt = saw_dsn
             _elog.annotate_tool_call(
                 cid,
-                observed_correspondents=sorted(observed),
-                observed_correspondent_stats={a: stats[a] for a in sorted(observed) if a in stats},
-                observed_correspondent_bulk=sorted(bulk_senders),
+                observed_correspondents=_ros["observed"],
+                observed_correspondent_stats=_ros["stats"],
+                observed_correspondent_bulk=_ros["bulk"],
+                # owner-direction stamp (v2): who owns this store, and — in
+                # the stats — how often the owner wrote to each address.
+                mailbox_owners=_ros["owners"],
+                correspondent_direction=True,
                 # partial ONLY when the SCAN was actually cut short — a large
                 # roster is not incompleteness (K-3a: a false partial flag
                 # silently disabled every completeness check downstream). A
                 # zero-yield store never feeds the registry as complete.
                 messages_scanned=consumed,
-                correspondents_partial=(consumed >= scan_cap or len(observed) >= observed_cap
+                correspondents_partial=(consumed >= scan_cap or _ros["capped"]
                                         or zero_yield),
                 transfer_artifact=True if _xfer else None,
                 receipt_artifact=True if _rcpt else None,

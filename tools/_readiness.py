@@ -337,13 +337,15 @@ def assess_readiness(log, include_synthesis=True):
     # when it is (a) a forced DAIR candidate / a principal the agent declared
     # created or interactively logged on, (b) a match against the case roster
     # the operator declared (misc.knowns_pattern_generate, server-stamped), or
-    # (c) engaged (written to / repeat sender / chat participant — check #3).
+    # (c) engaged (the mailbox owner wrote to it / chat exchange — check #3).
     # Everything else the registries hold is rendered into the report as an
     # inventory, never a blocker and never a disposition.
     _roster_terms = list((getattr(idx_all, "roster", None) or {}).keys())
 
     def _roster_match(name: str) -> bool:
         return bool(name) and any(entity_matches(name, t) for t in _roster_terms)
+
+    from core.mail_roster import registry_record_engaged as _corr_engaged
 
     _forced: dict = {}          # norm → (display, how)
     for _e in entries:
@@ -470,16 +472,26 @@ def assess_readiness(log, include_synthesis=True):
                 meta = meta or {}
                 if meta.get("bulk"):
                     continue          # bulk-class: inventoried, never mandatory
-                # "Engaged" (blocking) requires POSITIVE two-way / roster / chat
-                # evidence. Inbound volume alone is inbox clutter, not engagement:
-                # inbound-only senders route to the report inventory (shown,
-                # warned, never silently dropped) rather than blocking.
-                wrote_to = int(meta.get("to") or 0) > 0
-                chat = any("chat" in str(s) for s in (meta.get("sources") or []))
-                if not (wrote_to or chat or _roster_match(full)):
+                # "Engaged" (blocking) requires POSITIVE evidence that the
+                # SUBJECT engaged: the mailbox owner wrote to it, a chat
+                # exchange, or a roster match. Inbound volume and third-party
+                # To: lists (spam, newsletters, mass mail) are inbox clutter:
+                # they route to the report inventory (shown, warned, never
+                # silently dropped) rather than blocking.
+                if not (_corr_engaged(meta) or _roster_match(full)):
                     inbound_only.append(full)
                     continue
                 leftovers.append((full, meta.get("first_cid")))
+            _legacy = sorted(getattr(idx_all, "correspondent_legacy_stores", set()) or ())
+            if _legacy:
+                warnings.append(
+                    f"{len(_legacy)} mail store(s) were read only by an older read.mail "
+                    f"that did not record which addresses the mailbox owner wrote to: "
+                    f"{'; '.join(_legacy[:4])}{' …' if len(_legacy) > 4 else ''}. Their "
+                    f"correspondents fall back to a conservative two-way rule (sent AND "
+                    f"received mail). Re-run read.mail once over each store to stamp "
+                    f"owner-direction counts."
+                )
             if inbound_only:
                 correspondents_auto_noise.extend(inbound_only)
                 shown = ", ".join(inbound_only[:8])
@@ -831,13 +843,15 @@ def assess_readiness(log, include_synthesis=True):
                 _st = "noise-class (address pattern)"
             elif _roster_match(_addr):
                 _st = "roster-match (open)"
-            elif (int(_meta.get("to") or 0) > 0
-                  or any("chat" in str(x) for x in (_meta.get("sources") or []))):
-                _st = "engaged (open)"          # two-way / chat, not inbound volume
+            elif _meta.get("store_owner"):
+                _st = "store owner"
+            elif _corr_engaged(_meta):
+                _st = "engaged (open)"          # owner wrote to it / chat, not inbound volume
             else:
                 _st = "inventory"
             registry_inventory["correspondents"].append(
                 {"address": _addr, "from": _meta.get("from", ""), "to": _meta.get("to", ""),
+                 "owner_to": _meta.get("owner_to", ""),
                  "sources": list(_meta.get("sources") or []), "status": _st})
         for _idv, _meta in sorted((getattr(idx_all, "identities", {}) or {}).items()):
             if any(entity_matches(_idv, r) for r in _referenced):
@@ -850,13 +864,14 @@ def assess_readiness(log, include_synthesis=True):
                 _st = "inventory"
             registry_inventory["identities"].append(
                 {"value": _idv, "first_cid": (_meta or {}).get("first_cid", ""), "status": _st})
+        _all_corr = list(registry_inventory["correspondents"])
         registry_inventory["correspondents"] = registry_inventory["correspondents"][:400]
         registry_inventory["identities"] = registry_inventory["identities"][:400]
         # K-3c: near-alias addresses are SURFACED as a typed lead — same
         # domain, same-length local parts differing in exactly one character.
         # Never auto-merged: whether they are one correspondent or two distinct
         # people is a finding to establish with evidence, in either direction.
-        _addrs = sorted({r["address"] for r in registry_inventory["correspondents"]
+        _addrs = sorted({r["address"] for r in _all_corr
                          if "@" in str(r.get("address") or "")})
         _leads = []
         for _i in range(len(_addrs)):

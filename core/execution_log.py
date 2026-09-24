@@ -398,6 +398,12 @@ class LogIndex:
     # The pre-report exhaustion checks treat a registry identity that matches
     # a roster term as mandatory; everything else is report inventory.
     roster: dict[str, dict] = field(default_factory=dict)
+    # Mail stores whose only registry stamps predate owner-direction counts
+    # (no `correspondent_direction` marker) — the pre-report check falls back
+    # to a conservative two-way rule for them and asks for a re-stamp.
+    correspondent_legacy_stores: set = field(default_factory=set)
+    # Mailbox / chat-store owner identities derived from the stores.
+    correspondent_owners: set = field(default_factory=set)
     # Typed dispositions keyed (target_kind, target_norm) → [entries, oldest first].
     dispositions: dict[tuple, list] = field(default_factory=dict)
 
@@ -413,6 +419,114 @@ _IDENTITY_NOISE_RE = re.compile(
     r"mailer-daemon|postmaster|no-?reply|do-?not-?reply|undisclosed[- ]recipients"
     r"|notifications?@|newsletters?@|bounce|feedback@|automated@",
     re.IGNORECASE)
+
+
+def _mail_store_of(e: dict) -> str:
+    """The store path of a read.mail stamp (`read.mail -o <path> mode=...`)."""
+    cmd = str(e.get("cmd") or "")
+    m = re.match(r"read\.mail -o (.+?) mode=", cmd)
+    if not m:
+        return ""
+    p = m.group(1).strip()
+    if len(p) >= 2 and p[0] == p[-1] == "'":
+        p = p[1:-1]
+    return p
+
+
+def _chat_store_owner_from_cmd(cmd: str) -> str:
+    """Skype stores live at .../Skype/<account>/main.db — '#3a' is ':'."""
+    m = re.search(r"[\\/]Skype[\\/]([^\\/]+)[\\/]main\.db", cmd or "", re.IGNORECASE)
+    return m.group(1).replace("#3a", ":").lower() if m else ""
+
+
+def _add_correspondent_stamp(idx: "LogIndex", e: dict, cid, v2_stores: set) -> None:
+    """Fold one feeder's observed_correspondents stamp into idx.correspondents.
+
+    Only valid correspondents enter the registry: e-mail addresses for mail
+    stores, whitespace-free handles for chat stores (header labels such as
+    "address type" / "recipient type" from older pffexport parses are field
+    names, not people). Engagement data per record:
+      owner_to      — the mailbox owner wrote to it (v2 read.mail stamps)
+      chat_engaged  — exchanged messages/files in a chat store
+      legacy_from/legacy_to — direction counts from a pre-v2 stamp whose store
+                      was never re-stamped (conservative two-way fallback)
+    """
+    from core.mail_roster import (is_valid_email, is_valid_chat_handle,
+                                  is_chat_system_handle, unwrap_tracking)
+    oc = e.get("observed_correspondents")
+    if not (isinstance(oc, list) and oc):
+        return
+    cmd = str(e.get("cmd") or "")
+    src = cmd.split()[0] if cmd else ""
+    is_chat = bool(e.get("chat_db_export")) or "chat" in src
+    stats = e.get("observed_correspondent_stats")
+    stats = stats if isinstance(stats, dict) else {}
+    # RFC bulk-header senders (List-Unsubscribe / List-Id / Precedence: bulk)
+    # — flagged bulk so inbound volume is never read as engagement.
+    bulk_set = e.get("observed_correspondent_bulk")
+    bulk_set = {str(a).strip().lower()
+                for a in bulk_set} if isinstance(bulk_set, list) else set()
+    direction = bool(e.get("correspondent_direction"))
+    store = "" if is_chat else _mail_store_of(e)
+    legacy = (not is_chat) and not direction and store not in v2_stores
+    superseded = (not is_chat) and not direction and store in v2_stores
+    if legacy and store:
+        idx.correspondent_legacy_stores.add(store)
+    for o in (e.get("mailbox_owners") or []):
+        idx.correspondent_owners.add(str(o).strip().lower())
+    chat_owners: set = set()
+    chat_engaged = None
+    if is_chat:
+        chat_owners = {str(o).strip().lower() for o in (e.get("chat_owners") or [])}
+        po = _chat_store_owner_from_cmd(cmd)
+        if po:
+            chat_owners.add(po)
+        idx.correspondent_owners.update(chat_owners)
+        ce = e.get("chat_engaged")
+        if isinstance(ce, list):
+            chat_engaged = {str(x).strip().lower() for x in ce}
+    for raw in oc:
+        v = str(raw).strip().lower()
+        if not v:
+            continue
+        if is_chat:
+            if not (is_valid_email(v) or is_valid_chat_handle(v)):
+                continue
+        else:
+            v = unwrap_tracking(v)
+            if not is_valid_email(v):
+                continue
+        rec = idx.correspondents.setdefault(v, {"first_cid": cid, "sources": []})
+        if _IDENTITY_NOISE_RE.search(v) or v in bulk_set:
+            # kept and FLAGGED, never dropped: a bulk-class address (bounce
+            # daemons included) can carry decisive evidence — it is
+            # inventoried, just never a mandatory disposition.
+            rec["bulk"] = True
+        if src and src not in rec["sources"]:
+            rec["sources"].append(src)
+        if is_chat:
+            if v in chat_owners:
+                rec["store_owner"] = True
+            elif chat_engaged is not None:
+                if v in chat_engaged:
+                    rec["chat_engaged"] = True
+            elif not is_chat_system_handle(v):
+                # legacy chat stamp: every non-system, non-owner participant
+                rec["chat_engaged"] = True
+            continue
+        st = stats.get(str(raw).strip().lower()) or stats.get(v)
+        if not isinstance(st, dict) or superseded:
+            continue
+        rec["from"] = rec.get("from", 0) + int(st.get("from") or 0)
+        rec["to"] = rec.get("to", 0) + int(st.get("to") or 0)
+        if direction:
+            rec["owner_to"] = rec.get("owner_to", 0) + int(st.get("owner_to") or 0)
+            rec["direction_known"] = True
+        else:
+            rec["legacy_from"] = rec.get("legacy_from", 0) + int(st.get("from") or 0)
+            rec["legacy_to"] = rec.get("legacy_to", 0) + int(st.get("to") or 0)
+    if e.get("correspondents_partial"):
+        idx.correspondents_complete = False
 
 
 def _extract_tool_from_entry(entry: dict) -> str:
@@ -510,6 +624,11 @@ class ExecutionLog:
             if self._cached_index is not None and self._cached_index[0] == self._index_version:
                 return self._cached_index[1]
             idx = LogIndex()
+            # Mail stores that carry at least one owner-direction (v2) roster
+            # stamp: their legacy stamps are superseded, not merged.
+            _v2_stores = {_mail_store_of(e) for e in self._entries
+                          if e.get("type") == "tool_call"
+                          and e.get("correspondent_direction")}
             for e in self._entries:
                 cid = e.get("call_id")
                 if cid is not None:
@@ -534,42 +653,7 @@ class ExecutionLog:
                     idx.dispositions.setdefault(key, []).append(e)
                 if t == "tool_call":
                     # Evidence registries from annotate_tool_call markers.
-                    oc = e.get("observed_correspondents")
-                    if isinstance(oc, list) and oc:
-                        src = ""
-                        if e.get("cmd"):
-                            src = str(e["cmd"]).split()[0]
-                        stats = e.get("observed_correspondent_stats")
-                        stats = stats if isinstance(stats, dict) else {}
-                        # RFC bulk-header senders (List-Unsubscribe / List-Id /
-                        # Precedence: bulk) — flagged bulk so inbound volume is
-                        # never read as engagement.
-                        bulk_set = e.get("observed_correspondent_bulk")
-                        bulk_set = {str(a).strip().lower()
-                                    for a in bulk_set} if isinstance(bulk_set, list) else set()
-                        for v in oc:
-                            v = str(v).strip().lower()
-                            if not v:
-                                continue
-                            rec = idx.correspondents.setdefault(
-                                v, {"first_cid": cid, "sources": []})
-                            if _IDENTITY_NOISE_RE.search(v) or v in bulk_set:
-                                # kept and FLAGGED, never dropped: a bulk-class
-                                # address (bounce daemons included) can carry
-                                # decisive evidence — it is inventoried, just
-                                # never a mandatory disposition.
-                                rec["bulk"] = True
-                            if src and src not in rec["sources"]:
-                                rec["sources"].append(src)
-                            # Direction counts only when the feeder stamped
-                            # them — a registry without stats stays conservative
-                            # (every leftover blocks) in the pre-report check.
-                            st = stats.get(v)
-                            if isinstance(st, dict):
-                                rec["from"] = rec.get("from", 0) + int(st.get("from") or 0)
-                                rec["to"] = rec.get("to", 0) + int(st.get("to") or 0)
-                        if e.get("correspondents_partial"):
-                            idx.correspondents_complete = False
+                    _add_correspondent_stamp(idx, e, cid, _v2_stores)
                     kr = e.get("knowns_roster")
                     if isinstance(kr, list):
                         for v in kr:
