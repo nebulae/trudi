@@ -143,6 +143,13 @@ classes:
     cmd: 'malfind|hollowprocesses|ldrmodules|suspicious_threads|unhooked|callbacks|ssdt|vadyarascan'
     tools: [vol.malfind, vol.hollowprocesses, vol.ldrmodules]
     label: memory injection / hooking record
+  implant_config:
+    # Stamped only when misc.cs_beacon_config DECODED a config (a negative run
+    # carries no class). A decoded config proves the implant's bytes are present
+    # and names its intended C2 — it does not show traffic, so it is c2_weak.
+    marker: implant_config
+    tools: [misc.cs_beacon_config]
+    label: decoded implant configuration (Cobalt Strike beacon)
   file_content:
     # strings.grep / strings.extract record the executed binary ('strings -a -n
     # 4 <file>'), strings.file_identify records 'file <path>', and read.output
@@ -207,7 +214,7 @@ groups:
   # ANY = every class (used by act=other)
   execution_primary: [prefetch, userassist, amcache, bam, event_logs_security, memory_process, live_host, srum, jump_lists, unix_shell_history, unix_auth_log, macos_artifacts]
   execution_weak: [shimcache, mft, lnk_files, shellbags, registry, file_content, timeline, yara, av, usn_journal, filesystem_listing]
-  presence_primary: [mft, filesystem_listing, usn_journal, file_content, hash_match, memory_process, recycle_bin, memory_injection]
+  presence_primary: [mft, filesystem_listing, usn_journal, file_content, hash_match, memory_process, recycle_bin, memory_injection, implant_config]
   presence_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, prefetch, registry, timeline, yara, av, userassist]
   timeline_primary: [mft, usn_journal, event_logs_security, prefetch, timeline, srum, logon_session, registry, network_capture, terminalservices, device_install, unix_auth_log, unix_syslog, macos_artifacts]
   timeline_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, file_content, userassist, mail_store, chat_store]
@@ -228,7 +235,7 @@ groups:
   persistence_weak: [file_content, yara, av, mft, prefetch, amcache, shimcache, timeline, filesystem_listing]
   network_evidence: [memory_network, network_capture, srum, live_host]
   process_evidence: [memory_process, memory_injection, prefetch, userassist, amcache, bam, event_logs_security]
-  c2_weak: [yara, av, enrichment, file_content, memory_injection, registry, timeline]
+  c2_weak: [yara, av, enrichment, file_content, memory_injection, registry, timeline, implant_config]
   lateral_primary: [logon_session, network_capture, terminalservices, unix_auth_log]
   lateral_corroborator: [registry, prefetch, userassist, srum, memory_process, event_logs_security, jump_lists, shellbags, lnk_files, terminalservices, memory_network]
   lateral_weak: [registry, lnk_files, shellbags, jump_lists, file_content, timeline]
