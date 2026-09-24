@@ -1326,9 +1326,28 @@ def assess_readiness(log, include_synthesis=True):
         print(f"[TRUDI WARN] IOC coverage check failed: {_e}", file=_sys.stderr)
 
     ready = len(issues) == 0
+    # Dispositions a reader should check (warning + report section, never a blocker).
+    disposition_review: list = []
+    try:
+        from tools._gates._disposition_review import dispositions_to_review
+        disposition_review = dispositions_to_review(entries)
+        if disposition_review:
+            warnings.append(
+                f"{len(disposition_review)} disposition(s) settle a question with little or no "
+                f"supporting evidence (a challenge closed out_of_scope, or cited evidence that "
+                f"barely mentions the claim): "
+                + "; ".join(f"#{d['call_id']} {d['target_id'][:60]}" for d in disposition_review[:5])
+                + (" …" if len(disposition_review) > 5 else "")
+                + ". Re-examine with evidence that addresses the claim, or leave them for the "
+                  "report's 'Dispositions to review' section.")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] disposition review failed: {_e}", file=_sys.stderr)
+
     return {
         "ready_to_report": ready if include_synthesis else False,
         "ioc_inventory": ioc_inventory,
+        "disposition_review": disposition_review,
         "unshown_review_details": unshown_details,
         "ready_for_synthesis": ready if not include_synthesis else None,
         "issues": issue_records(issues),

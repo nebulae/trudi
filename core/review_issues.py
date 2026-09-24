@@ -1,4 +1,5 @@
 """Durable synthesis issues. New review rounds cannot erase unresolved objections."""
+import re
 from core.findings import active_findings
 from core.readiness import digest
 
@@ -79,16 +80,28 @@ def normalize_review(result, entries):
     return issues, resolutions, rejected
 
 
+_CID = re.compile(r"^\s*(?:cid|call|f)?[\s#:-]*(\d+)\s*$", re.I)
+
+
+def _cid(v):
+    """A call ID as the reviewer wrote it: 137, "137", "cid 137", "F-137"."""
+    if type(v) is int:
+        return v
+    m = _CID.match(str(v)) if isinstance(v, (str, float)) else None
+    return int(m.group(1)) if m else None
+
+
 def _check_issue(raw, by_id, prior):
     if not isinstance(raw, dict) or raw.get('kind') not in KINDS or not isinstance(raw.get('message'), str) or not raw['message'].strip():
         raise ValueError('Each synthesis issue needs a valid kind and message')
     fids, eids = raw.get('finding_call_ids', []), raw.get('evidence_call_ids', [])
     if not isinstance(fids, list) or not isinstance(eids, list):
         raise ValueError('Issue references must be lists of call IDs')
-    if any(not isinstance(cid, int) or cid not in by_id for cid in fids + eids):
-        raise ValueError('Synthesis issue references an unknown call ID')
-    if any(by_id[cid].get('type') != 'finding' for cid in fids):
-        raise ValueError('finding_call_ids must reference findings')
+    # 2026-09-24: an objection written with "137" (a string) was rejected as an
+    # unknown call ID and never tracked, so a factual error reached the report.
+    # References are coerced; an unresolvable one is dropped, never the objection.
+    fids = [c for c in map(_cid, fids) if c in by_id and by_id[c].get('type') == 'finding']
+    eids = [c for c in map(_cid, eids) if c in by_id]
     it = {'kind': raw['kind'], 'message': raw['message'],
           'finding_call_ids': sorted(set(fids)), 'evidence_call_ids': sorted(set(eids))}
     it['issue_id'] = issue_id_for(it['kind'], it['finding_call_ids'], it['message'])
@@ -105,8 +118,9 @@ def _check_resolution(r, by_id, prior):
     refs = r.get('call_ids') or []
     if (not old or not isinstance(r.get('reason'), str) or not r['reason'].strip()
             or not isinstance(refs, list) or not refs
-            or any(type(c) is not int or c not in by_id for c in refs)):
+            or any(_cid(c) not in by_id for c in refs)):
         raise ValueError('Resolution needs an existing issue, reason and real supporting call IDs')
+    refs = [_cid(c) for c in refs]
     fresh = [by_id[c] for c in refs if c > (old.get('raised_call_id') or 0)]
     if not any(e.get('type') in ('finding', 'tool_call', 'disposition', 'finding_retracted') for e in fresh):
         raise ValueError('Resolution needs new evidence, a corrected finding or a typed disposition')
@@ -154,4 +168,5 @@ def _check_resolution(r, by_id, prior):
                           ('evidence_unavailable', 'absent_from_evidence', 'out_of_scope') for e in fresh)
         if not narrowed or not unavailable:
             raise ValueError('A limitation needs a reviewed narrowed finding and an evidence disposition')
-    return {**r, 'status': 'limitation' if basis == 'qualified_limitation' else 'resolved'}
+    return {**r, 'call_ids': refs,
+            'status': 'limitation' if basis == 'qualified_limitation' else 'resolved'}

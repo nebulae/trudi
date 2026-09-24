@@ -1859,6 +1859,8 @@ def write_final_report(output_path: str, content: str) -> dict:
     lifecycle: dict = {}
     ioc_inv: dict = {}
     unshown: list = []
+    disp_review: list = []
+    advisories: list = []
     try:
         for e in reversed(log._entries):
             if e.get("type") == "reason_call" and e.get("tool") == "reason_pre_report_check":
@@ -1866,6 +1868,15 @@ def write_final_report(output_path: str, content: str) -> dict:
                 lifecycle = dict(e.get("lifecycle_coverage") or {})
                 ioc_inv = dict(e.get("ioc_inventory") or {})
                 unshown = list(e.get("unshown_review_details") or [])
+                disp_review = list(e.get("disposition_review") or [])
+                break
+        # The latest successful cross-finding review's advisories: non-blocking
+        # by the reviewer's own classification, but a reader should see them.
+        for e in reversed(log._entries):
+            if (e.get("type") == "reason_call" and e.get("tool") == "reason_synthesize"
+                    and e.get("success") is not False):
+                advisories = [str(a) for a in ((e.get("result_block") or {}).get("advisories")
+                                               or e.get("advisories") or []) if str(a).strip()]
                 break
     except Exception:
         inventory = {}
@@ -1959,6 +1970,21 @@ def write_final_report(output_path: str, content: str) -> dict:
                            f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
                            f"{', '.join((i.get('examine_with') or [])[:4])} | "
                            f"{('disposition: ' + str(i.get('disposition'))) if i.get('disposition') else 'open'} |")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if disp_review and "## dispositions to review" not in content.lower():
+        sec = ["\n\n## Dispositions to review",
+               "These questions were settled by a typed disposition rather than a finding, with "
+               "little or no evidence addressing the claim itself (term overlap is shown). They "
+               "are not findings; check each before relying on it."]
+        for d in disp_review:
+            sec.append(f"- #{d.get('call_id')} {d.get('target_kind')} `{d.get('target_id')}` → "
+                       f"{d.get('reason')} — {d.get('why')}")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if advisories and "## reviewer advisories" not in content.lower():
+        sec = ["\n\n## Reviewer advisories",
+               "Points the cross-finding reviewer raised as advisories (not blockers) in its "
+               "latest round."]
+        sec += [f"- {a}" for a in advisories[:20]]
         content = content.rstrip() + "\n".join(sec) + "\n"
     if unshown and "## details the reviewer could not see" not in content.lower():
         sec = ["\n\n## Details the reviewer could not see",
