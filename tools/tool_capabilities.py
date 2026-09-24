@@ -11,7 +11,7 @@ import copy
 import shutil
 
 
-MANIFEST_VERSION = "2026-09-19.1"
+MANIFEST_VERSION = "2026-09-24.1"
 
 
 _CAPABILITIES: list[dict] = [
@@ -51,7 +51,7 @@ _CAPABILITIES: list[dict] = [
         "id": "memory_process_network",
         "phases": ["Triage", "Analyze", "Scan"],
         "evidence": ["memory"],
-        "purpose": "Enumerate processes, command lines, sessions, injected memory, and network sockets from memory.",
+        "purpose": "Enumerate processes, command lines, sessions, injected memory (and decode Cobalt Strike beacon configs from it), and network sockets from memory.",
         "tools": [
             "vol.psscan",
             "vol.pslist",
@@ -61,6 +61,7 @@ _CAPABILITIES: list[dict] = [
             "vol.netscan",
             "vol.netstat",
             "vol.malfind",
+            "misc.cs_beacon_config",
             "vol.filescan",
             "vol.dumpfiles",
             "vol.yarascan",

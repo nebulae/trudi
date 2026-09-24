@@ -752,6 +752,118 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
     }
 
 
+# ── Cobalt Strike beacon config ───────────────────────────────────────────────
+
+def _cs_summary_lines(res: dict) -> list:
+    lines = []
+    for m in res.get("matches", []):
+        s = m.get("summary", {})
+        lines.append(f"[{m.get('form')} {m.get('file')} @{m.get('offset_hex')} "
+                     f"key={m.get('xor_key')} ver={m.get('version_guess')} "
+                     f"config_id={m.get('config_id')}]")
+        for k, v in s.items():
+            if v not in (None, ""):
+                lines.append(f"  {k}: {v}")
+        if m.get("pointers_unresolved"):
+            lines.append(f"  pointers_unresolved: {m['pointers_unresolved']} "
+                         f"({m.get('pointer_resolution')})")
+    return lines
+
+
+@mcp.tool()
+@output_safe
+def cs_beacon_config(path: str, output_path: Optional[str] = None,
+                     memmap_listing: str = "", max_seconds: int = 600) -> dict:
+    """Extract Cobalt Strike beacon configs (C2, port, sleep, jitter, watermark, spawnto, UA, URIs, public-key hash) from memory dumps, a carved beacon, or a raw memory image.
+
+    path: file or directory (malfind/vadinfo/memmap dumps, raw image; scanned in
+    chunks, bounded by max_seconds). Finds the XOR-encoded settings block (any
+    single-byte key) and the runtime settings table; runtime string settings are
+    heap pointers, resolved from sibling vadinfo/malfind dumps or from
+    memmap_listing (vol windows.memmap -r json output of the process).
+    output_path: optional full JSON under analysis/ or exports/.
+    found=False with the scan inventory is a valid negative.
+    """
+    import json
+    from core.executor import _log_tool
+    from core.cs_beacon import extract
+
+    if output_path:
+        assert_output_safe(output_path)
+        if not {"analysis", "exports", "reports"} & {s.lower() for s in
+                                                    os.path.abspath(output_path).split(os.sep)}:
+            raise ValueError("output_path must be under analysis/, exports/ or reports/")
+    err = None
+    if not os.path.exists(path):
+        err = f"input not found: {path}"
+    elif memmap_listing and not os.path.isfile(memmap_listing):
+        err = f"memmap_listing not found: {memmap_listing}"
+    res = extract(path, memmap_listing=memmap_listing, max_seconds=max_seconds) \
+        if err is None else {"success": False, "error": err}
+    ok = bool(res.get("success"))
+
+    if ok and res.get("found"):
+        head = (f"{len(res['matches'])} beacon config match(es), "
+                f"{res['distinct_configs']} distinct")
+    elif ok:
+        head = "NO beacon config found"
+    else:
+        head = res.get("error", "cs_beacon_config failed")
+    if ok:
+        head += (f" — scanned {res['files_scanned']}/{res['files_total']} file(s), "
+                 f"{res['bytes_scanned']} bytes in {res['elapsed_seconds']}s"
+                 + (" (TIMED OUT: partial)" if res.get("timed_out") else "")
+                 + f"; searched: {res['searched_for']}")
+    summary = "\n".join([head] + _cs_summary_lines(res))
+    full = json.dumps(res, indent=1, default=str)
+
+    if ok and output_path:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as fh:
+                fh.write(full)
+        except OSError as e:
+            res["warning"] = f"JSON write failed: {e}"
+            output_path = None
+
+    # Self-log: cmd carries the SOURCE path; the full decoded JSON goes to the
+    # stdout sidecar so a reviewer can fetch every setting of the cited call.
+    tc = {"success": ok, "stdout": summary[:4000], "_stdout_full": summary + "\n\n" + full,
+          "stderr": "" if ok else res.get("error", ""), "exit_code": 0 if ok else 1,
+          "truncated": False, "retries": 0,
+          "elapsed_seconds": float(res.get("elapsed_seconds") or 0.0),
+          "timed_out": bool(res.get("timed_out")),
+          "cmd": f"misc.cs_beacon_config {path}"
+                 + (f" --memmap-listing {memmap_listing}" if memmap_listing else ""),
+          "output_path": output_path if ok else None}
+    _log_tool(tc)
+    cid = tc.get("_trudi_call_id")
+    if cid and ok and res.get("found"):
+        try:
+            from core.execution_log import log
+            first = res["matches"][0]["summary"]
+            log.annotate_tool_call(
+                cid, implant_config=True, implant_family="cobalt_strike",
+                beacon_c2=sorted({c for m in res["matches"]
+                                  if isinstance(c := m["summary"].get("c2_server"), str)
+                                  and c})[:20] or None,
+                beacon_watermark=first.get("watermark"))
+        except Exception:
+            pass
+
+    return {
+        "success": ok, "error": res.get("error"), "warning": res.get("warning"),
+        "_trudi_call_id": cid, "found": bool(res.get("found")),
+        "distinct_configs": res.get("distinct_configs", 0),
+        "matches": res.get("matches", [])[:10],
+        "match_count": len(res.get("matches", [])),
+        "files_scanned": res.get("files_scanned", 0), "bytes_scanned": res.get("bytes_scanned", 0),
+        "timed_out": bool(res.get("timed_out")), "searched_for": res.get("searched_for"),
+        "elapsed_seconds": res.get("elapsed_seconds"), "summary": summary[:4000],
+        "output_path": output_path if ok else None,
+    }
+
+
 # ── Scheduled tasks (disk) ────────────────────────────────────────────────────
 
 @mcp.tool()
