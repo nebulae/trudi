@@ -44,6 +44,11 @@ API_PREFIX = "/_dashboard/api/"
 TRACE_RE = re.compile(r".*_trace\.json$", re.IGNORECASE)
 # /_dashboard/api/output serves produced output ONLY from these case subdirs.
 OUTPUT_ROOTS = (os.path.join("analysis", ".tool_output"), "exports")
+# Image previews may also come from the evidence and its mounts (read-only
+# viewing of a picture a tool pointed at; nothing is written anywhere).
+IMAGE_ROOTS = OUTPUT_ROOTS + ("evidence", "mnt")
+IMAGE_MAX_BYTES = 25 * 1024 * 1024
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
 OUTPUT_DEFAULT_BYTES = 2 * 1024 * 1024
 OUTPUT_MAX_BYTES = 16 * 1024 * 1024
 # Mirrors core.paths.trudi_cache_dir() (this script runs standalone).
@@ -148,6 +153,34 @@ def _build_handler(cases_root: str) -> type:
         def _handle_api(self, endpoint: str, qs: dict | None = None):
             if endpoint == "output":
                 return self._serve_output(qs or {})
+            if endpoint == "image":
+                q = qs or {}
+                full, ctype, err = resolve_image_file(cases_root, q.get("trace", [""])[0],
+                                                      q.get("path", [""])[0])
+                if not full:
+                    self.send_error(404 if err == "not found" else 403, err)
+                    return
+                try:
+                    with open(full, "rb") as f:
+                        body = f.read(IMAGE_MAX_BYTES + 1)
+                except OSError as e:
+                    self.send_error(500, f"read failed: {e}")
+                    return
+                if len(body) > IMAGE_MAX_BYTES:
+                    self.send_error(413, "image too large to preview")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Cache-Control", "private, max-age=300")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if endpoint == "images":
+                q = qs or {}
+                return self._send_json(list_images(cases_root, q.get("trace", [""])[0],
+                                                   q.get("dir", [""])[0]))
             if endpoint == "reports":
                 return self._send_json(list_reports(cases_root, (qs or {}).get("trace", [""])[0]))
             if endpoint == "report":
@@ -341,6 +374,89 @@ def render_report(cases_root: str, trace: str, name: str) -> tuple[str | None, s
         import html as _h
         with open(full, encoding="utf-8", errors="replace") as fh:
             return f"<pre>{_h.escape(fh.read(8 * 1024 * 1024))}</pre>", ""
+
+
+_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
+          (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"), (b"BM", "image/bmp"))
+
+
+def _image_type(path: str) -> str:
+    """Content type from the file's own header bytes, '' if not an image a
+    browser can show. The extension alone is never trusted."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return ""
+    for magic, ctype in _MAGIC:
+        if head.startswith(magic):
+            return ctype
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def _case_candidates(case_dir: str, want: str, roots) -> list:
+    """Where a recorded path may live now: as given, or re-rooted by its
+    <root>/… tail (a copied or moved case)."""
+    out = []
+    if os.path.isabs(want):
+        out.append(want)
+        norm = want.replace("\\", "/")
+        for rel in roots:
+            marker = "/" + rel.replace(os.sep, "/") + "/"
+            i = norm.rfind(marker)
+            if i >= 0:
+                out.append(os.path.join(case_dir, rel, norm[i + len(marker):]))
+    else:
+        out.append(os.path.join(case_dir, want))
+    return out
+
+
+def resolve_image_file(cases_root: str, trace: str, want: str) -> tuple[str | None, str, str]:
+    """(real path, content type, '') for an image the trace's case may preview,
+    else (None, '', reason). Allowed under the case's tool output, exports,
+    evidence and mnt dirs (symlinks resolved), header bytes must be an image."""
+    case_dir, err = case_dir_for_trace(cases_root, trace)
+    if not case_dir:
+        return None, "", err
+    want = (want or "").strip()
+    if not want or "\x00" in want:
+        return None, "", "bad path"
+    allowed = [os.path.realpath(os.path.join(case_dir, r)) for r in IMAGE_ROOTS]
+    for c in _case_candidates(case_dir, want, IMAGE_ROOTS):
+        real = os.path.realpath(c)
+        if any(_within(real, a) and real != a for a in allowed) and os.path.isfile(real):
+            ctype = _image_type(real)
+            return (real, ctype, "") if ctype else (None, "", "not an image")
+    return None, "", "not found"
+
+
+def list_images(cases_root: str, trace: str, want_dir: str, limit: int = 48) -> dict:
+    """Image files (by header bytes) directly in, or one level under, a
+    directory a tool wrote — e.g. a carver's output folder."""
+    case_dir, err = case_dir_for_trace(cases_root, trace)
+    if not case_dir:
+        return {"images": [], "error": err}
+    allowed = [os.path.realpath(os.path.join(case_dir, r)) for r in IMAGE_ROOTS]
+    for c in _case_candidates(case_dir, (want_dir or "").strip(), IMAGE_ROOTS):
+        real = os.path.realpath(c)
+        if not (os.path.isdir(real) and any(_within(real, a) for a in allowed)):
+            continue
+        found, total = [], 0
+        for root, dirs, files in os.walk(real):
+            dirs.sort()
+            if root.count(os.sep) - real.count(os.sep) > 1:
+                dirs[:] = []
+                continue
+            for name in sorted(files):
+                if not name.lower().endswith(IMAGE_EXTS):
+                    continue
+                total += 1
+                if len(found) < limit:
+                    found.append(os.path.join(root, name))
+        return {"images": found, "total": total}
+    return {"images": [], "error": "not found"}
 
 
 def resolve_output_file(cases_root: str, trace: str, want: str) -> tuple[str | None, str]:

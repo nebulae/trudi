@@ -146,6 +146,13 @@
     margin-top: 6px; padding: 4px 6px; border: 1px solid var(--accent); border-radius: 4px;
     font-size: 11px; color: var(--accent); display: flex; align-items: center; gap: 6px;
   }
+  .img-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+  .img-thumb { display: flex; flex-direction: column; align-items: center; width: 150px;
+               background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px;
+               padding: 4px; text-decoration: none; color: var(--fg-dim); font-size: 11px; }
+  .img-thumb img { max-width: 140px; max-height: 110px; object-fit: contain; background: #fff1; }
+  .img-thumb span { margin-top: 3px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .img-thumb.img-missing { display: none; }
   .ioc-focus button, .detail .btn {
     background: var(--bg-3); color: var(--accent); border: 1px solid var(--border);
     border-radius: 4px; font-size: 11px; padding: 2px 8px; cursor: pointer;
@@ -926,6 +933,7 @@ function renderDetail(e) {
 function hydrateDetail(e) {
   const cid = e.call_id;
   $$('#detail [data-load-path][data-autoload]').forEach(el => loadInto(el, cid));
+  _hydrateImageDirs();
 }
 
 async function loadInto(el, cid) {
@@ -984,6 +992,7 @@ function renderToolCall(e) {
       ${e.session_artifact ? `<span class="k">session artifact</span><span class="v">yes${Array.isArray(e.session_event_ids) ? ' (' + e.session_event_ids.join(', ') + ')' : ''}</span>` : ''}
     </div>
     ${renderToolOutput(e)}
+    ${_imagePreviews(e)}
     ${e.stderr ? `<h3>stderr</h3><pre>${escapeHtml(e.stderr)}</pre>` : ''}
     ${_findingsLinkedHere(e.call_id)}
     ${_iocsCitingHere(e.call_id)}
@@ -1016,6 +1025,63 @@ function renderToolOutput(e) {
   html += `<h3>${escapeHtml(label)}${full ? '' : ' excerpt'}</h3>`;
   html += full ? _loadBox(e.stdout_path, inner, { auto: true, cmd: e.cmd }) : inner;
   return html;
+}
+
+// ── Image previews ───────────────────────────────────────────────────────────
+// A tool that wrote or pointed at a picture (icat/carvers/exports, a
+// screenshot, an evidence photo) shows it here. Paths come from the command,
+// output_path/output_file and the tool's own output text; the server checks
+// each is inside the case (tool output, exports, evidence, mnt) and that its
+// header bytes really are an image.
+const _IMG_RE = /(?:^|[\s'"=(,])((?:\/|[A-Za-z]:\\)[^\s'"<>|,;()]*?\.(?:png|jpe?g|gif|bmp|webp))(?=$|[\s'"),;])/gi;
+function _tracePathParam() {
+  try { return new URL(State.traceUrl, location.href).pathname; } catch (_) { return State.traceUrl || ''; }
+}
+function _imgUrl(path) {
+  return `/_dashboard/api/image?trace=${encodeURIComponent(_tracePathParam())}&path=${encodeURIComponent(path)}`;
+}
+function _imageCandidates(e) {
+  const found = new Set();
+  const scan = (txt) => { if (!txt) return; for (const m of String(txt).matchAll(_IMG_RE)) found.add(m[1]); };
+  scan(e.cmd); scan(e.stdout_excerpt);
+  for (const k of ['output_path', 'output_file']) {
+    const v = e[k];
+    if (v && /\.(png|jpe?g|gif|bmp|webp)$/i.test(v)) found.add(v);
+  }
+  return [...found].slice(0, 12);
+}
+function _imagePreviews(e) {
+  const files = _imageCandidates(e);
+  const dir = e.output_path && !/\.[A-Za-z0-9]{1,5}$/.test(e.output_path) ? e.output_path : '';
+  if (!files.length && !dir) return '';
+  const thumbs = files.map(p => _imgThumb(p)).join('');
+  return `<div class="img-previews"${dir ? ` data-img-dir="${escapeHtml(dir)}"` : ''}>`
+    + (files.length ? `<h3>images</h3><div class="img-grid">${thumbs}</div>` : '')
+    + `</div>`;
+}
+function _imgThumb(p) {
+  const name = p.split(/[\\/]/).pop();
+  return `<a class="img-thumb" href="${_imgUrl(p)}" target="_blank" title="${escapeHtml(p)}">`
+    + `<img loading="lazy" src="${_imgUrl(p)}" alt="${escapeHtml(name)}" `
+    + `onerror="this.closest('.img-thumb').classList.add('img-missing')">`
+    + `<span>${escapeHtml(name)}</span></a>`;
+}
+async function _hydrateImageDirs() {
+  for (const box of $$('#detail [data-img-dir]')) {
+    const dir = box.dataset.imgDir;
+    box.removeAttribute('data-img-dir');
+    try {
+      const u = `/_dashboard/api/images?trace=${encodeURIComponent(_tracePathParam())}&dir=${encodeURIComponent(dir)}`;
+      const r = await fetch(u, { cache: 'no-store' });
+      if (!r.ok) continue;
+      const data = await r.json();
+      const imgs = (data.images || []).filter(p => !box.querySelector(`[title="${CSS.escape(p)}"]`));
+      if (!imgs.length) continue;
+      const more = data.total > (data.images || []).length ? ` (showing ${data.images.length} of ${data.total})` : '';
+      box.insertAdjacentHTML('beforeend',
+        `<h3>images in output folder${escapeHtml(more)}</h3><div class="img-grid">${imgs.map(_imgThumb).join('')}</div>`);
+    } catch (_) { /* preview is best-effort */ }
+  }
 }
 
 function _iocsCitingHere(cid) {

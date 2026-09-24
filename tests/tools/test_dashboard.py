@@ -488,3 +488,47 @@ class TestReportViewer:
         for bad in ("../evidence/secret.md", "C1_report.txt", "/etc/passwd", ""):
             assert render_report(root, trace, bad)[0] is None
         assert render_report(root, "/c1/evidence/secret.md", "C1_report.md")[0] is None
+
+
+class TestImagePreview:
+    """Image preview endpoints: case-scoped paths, header-byte type check."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    def _case(self, tmp_path):
+        root = tmp_path / "cases"
+        case = root / "c1"
+        (case / "analysis" / ".tool_output").mkdir(parents=True)
+        (case / "analysis" / "C1_trace.json").write_text("{}")
+        (case / "exports" / "carve" / "png").mkdir(parents=True)
+        (case / "exports" / "carve" / "png" / "00001.png").write_bytes(self.PNG)
+        (case / "exports" / "fake.png").write_text("not an image")
+        shared = tmp_path / "shared_evidence"
+        (shared / "DCIM").mkdir(parents=True)
+        (shared / "DCIM" / "IMG_0001.JPG").write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 16)
+        (case / "evidence").symlink_to(shared)                       # evidence as a symlink
+        (tmp_path / "outside.png").write_bytes(self.PNG)
+        return str(root), "/c1/analysis/C1_trace.json", case
+
+    def test_serves_real_images_from_case_roots(self, tmp_path):
+        from dashboard.serve import resolve_image_file
+        root, trace, case = self._case(tmp_path)
+        full, ctype, err = resolve_image_file(root, trace, str(case / "exports/carve/png/00001.png"))
+        assert full and ctype == "image/png" and not err
+        full, ctype, _ = resolve_image_file(root, trace, str(case / "evidence/DCIM/IMG_0001.JPG"))
+        assert full and ctype == "image/jpeg"
+
+    def test_refuses_non_images_and_paths_outside_the_case(self, tmp_path):
+        from dashboard.serve import resolve_image_file
+        root, trace, case = self._case(tmp_path)
+        assert resolve_image_file(root, trace, str(case / "exports/fake.png"))[0] is None
+        assert resolve_image_file(root, trace, str(tmp_path / "outside.png"))[0] is None
+        assert resolve_image_file(root, trace, "../../outside.png")[0] is None
+        assert resolve_image_file(root, trace, str(case / "analysis/C1_trace.json"))[0] is None
+
+    def test_lists_images_in_an_output_folder(self, tmp_path):
+        from dashboard.serve import list_images
+        root, trace, case = self._case(tmp_path)
+        res = list_images(root, trace, str(case / "exports/carve"))
+        assert res["total"] == 1 and res["images"][0].endswith("00001.png")
+        assert list_images(root, trace, str(tmp_path))["images"] == []
