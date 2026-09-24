@@ -303,3 +303,18 @@ class TestFailedToolNameMatching:
         es = [self._failed("/usr/local/bin/pe-scanner /x", "misc_pe_scanner"),
               _disp("misc.pe_carver")]
         assert len(wo.unretried_blocks(es)) == 1
+
+
+def test_yara_tools_have_distinct_work_order_signatures():
+    from tools._gates import work_order as wo
+    entries = [
+        {"type": "tool_call", "success": True, "cmd": "vol -f m windows.psscan", "mcp_tool": "vol_psscan"},
+        {"type": "disposition", "target_kind": "tool", "target_id": "yara.scan_memory_image",
+         "target_norm": "yara.scan_memory_image", "reason": "inapplicable"},
+    ]
+    unrun = wo.unrun_from_list(entries, ["yara.scan_strings", "yara.scan_memory_image"])
+    assert any("scan_strings" in u for u in unrun)            # not settled by psscan or the other disposition
+    assert not any("scan_memory_image" in u for u in unrun)
+    entries.append({"type": "tool_call", "success": True, "cmd": "<py>:yara_scan_strings",
+                    "mcp_tool": "yara_scan_strings"})
+    assert wo.unrun_from_list(entries, ["yara.scan_strings"]) == []

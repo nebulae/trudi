@@ -291,6 +291,8 @@ _EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
     "correlate.network_to_process": frozenset({"memory"}),
     "yara.scan_memory_image": frozenset({"memory"}),
     "yara.scan_process_memory": frozenset({"memory"}),
+    # beacon configs come from memory dumps, or from beacons carved off a disk
+    "misc.cs_beacon_config": frozenset({"memory", "disk_image", "triage"}),
     "plaso.create_timeline": frozenset({"disk_image", "triage", "mobile"}),
     "plaso.create_targeted": frozenset({"disk_image", "triage", "mobile"}),
     "misc.chat_db_export": frozenset({"disk_image", "triage", "mobile"}),

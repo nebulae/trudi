@@ -64,6 +64,12 @@ def _binary_sig(tool: str) -> str:
     n = _fk.normalize_tool_name(raw.lower().replace(".", "_"))
     if n in _BINARY_ALIASES:
         return _BINARY_ALIASES[n]
+    # Every yara.* tool's first segment is 'scan', which also sits inside
+    # psscan/netscan/filescan: one yara disposition or any *scan run settled
+    # them all (VANKO trace, 2026-09-24). Use the full tool name; the MCP
+    # tool stamp on each call matches it exactly.
+    if n.startswith("yara_"):
+        return n
     parts = [p for p in n.split("_") if p]
     if len(parts) >= 2:
         return parts[1]
