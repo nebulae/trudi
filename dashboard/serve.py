@@ -30,7 +30,7 @@ import re
 import signal
 import socketserver
 import sys
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 DEFAULT_PORT = int(os.environ.get("TRUDI_DASHBOARD_PORT", "8765"))
@@ -42,6 +42,10 @@ DASHBOARD_SRC = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD_PREFIX = "/_dashboard/"
 API_PREFIX = "/_dashboard/api/"
 TRACE_RE = re.compile(r".*_trace\.json$", re.IGNORECASE)
+# /_dashboard/api/output serves produced output ONLY from these case subdirs.
+OUTPUT_ROOTS = (os.path.join("analysis", ".tool_output"), "exports")
+OUTPUT_DEFAULT_BYTES = 2 * 1024 * 1024
+OUTPUT_MAX_BYTES = 16 * 1024 * 1024
 # Mirrors core.paths.trudi_cache_dir() (this script runs standalone).
 DISCOVERY_FILE = os.path.join(
     os.path.expanduser(os.environ.get("TRUDI_CACHE_DIR") or "~/.cache/trudi"),
@@ -127,7 +131,8 @@ def _build_handler(cases_root: str) -> type:
                 self.end_headers()
                 return
             if path.startswith(API_PREFIX):
-                return self._handle_api(path[len(API_PREFIX):])
+                return self._handle_api(path[len(API_PREFIX):],
+                                        parse_qs(urlparse(self.path).query))
             if path.startswith(DASHBOARD_PREFIX):
                 return self._serve_dashboard_asset(path[len(DASHBOARD_PREFIX):])
             return super().do_GET()
@@ -140,7 +145,9 @@ def _build_handler(cases_root: str) -> type:
                 return
             return super().do_HEAD()
 
-        def _handle_api(self, endpoint: str):
+        def _handle_api(self, endpoint: str, qs: dict | None = None):
+            if endpoint == "output":
+                return self._serve_output(qs or {})
             if endpoint == "cases":
                 payload = {
                     "cases_root": cases_root,
@@ -155,6 +162,39 @@ def _build_handler(cases_root: str) -> type:
                 self.wfile.write(body)
                 return
             self.send_error(404, f"unknown API endpoint: {endpoint}")
+
+        def _serve_output(self, qs: dict):
+            """Read-only view of one produced-output file (a tool's stdout
+            sidecar, an evidence-fetch result, an exported CSV) for the trace
+            viewer. Only files under the trace's case analysis/.tool_output/
+            or exports/ are served; see resolve_output_file."""
+            trace = (qs.get("trace") or [""])[0]
+            want = (qs.get("path") or [""])[0]
+            try:
+                limit = int((qs.get("max") or [OUTPUT_DEFAULT_BYTES])[0])
+            except ValueError:
+                limit = OUTPUT_DEFAULT_BYTES
+            limit = max(1, min(limit, OUTPUT_MAX_BYTES))
+            full, err = resolve_output_file(cases_root, trace, want)
+            if not full:
+                self.send_error(403 if err != "not found" else 404, err)
+                return
+            try:
+                size = os.path.getsize(full)
+                with open(full, "rb") as f:
+                    body = f.read(limit)
+            except OSError as e:
+                self.send_error(500, f"read failed: {e}")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Trudi-Size", str(size))
+            self.send_header("X-Trudi-Truncated", "1" if size > len(body) else "0")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _serve_dashboard_asset(self, rel: str):
             if rel in ("", "/"):
@@ -183,6 +223,60 @@ def _build_handler(cases_root: str) -> type:
             self.wfile.write(body)
 
     return TrudiDashboardHandler
+
+
+def _within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def resolve_output_file(cases_root: str, trace: str, want: str) -> tuple[str | None, str]:
+    """Map (trace URL path, requested file) to a real file the output endpoint
+    may serve, or (None, reason).
+
+    The trace must be a *_trace.json under cases_root/<case>/analysis/. The
+    file may be named absolutely (as the trace records it — stdout_path,
+    result_path, a read.output file) or relative to the case dir. It is
+    served only when its real path (symlinks resolved) lies under that case's
+    analysis/.tool_output/ or exports/. A recorded absolute path from where
+    the case used to live is re-rooted by its analysis/.tool_output/… or
+    exports/… tail, so a copied or moved case still resolves."""
+    root = os.path.realpath(cases_root)
+    tpath = unquote(urlparse(trace or "").path or "").lstrip("/")
+    if not tpath or not TRACE_RE.match(tpath) or ".." in tpath.split("/"):
+        return None, "bad trace"
+    tfull = os.path.realpath(os.path.join(root, tpath))
+    if not _within(tfull, root) or not os.path.isfile(tfull):
+        return None, "bad trace"
+    analysis = os.path.dirname(tfull)
+    if os.path.basename(analysis) != "analysis":
+        return None, "trace is not under a case analysis/ dir"
+    case_dir = os.path.dirname(analysis)
+    allowed = [os.path.realpath(os.path.join(case_dir, r)) for r in OUTPUT_ROOTS]
+    want = (want or "").strip()
+    if not want or "\x00" in want:
+        return None, "bad path"
+    candidates = []
+    if os.path.isabs(want):
+        candidates.append(want)
+        norm = want.replace("\\", "/")
+        for rel in OUTPUT_ROOTS:
+            marker = "/" + rel.replace(os.sep, "/") + "/"
+            i = norm.rfind(marker)
+            if i >= 0:
+                candidates.append(os.path.join(case_dir, rel, norm[i + len(marker):]))
+    else:
+        candidates.append(os.path.join(case_dir, want))
+    for c in candidates:
+        real = os.path.realpath(c)
+        if any(_within(real, a) and real != a for a in allowed):
+            if os.path.isfile(real):
+                return real, ""
+    if any(any(_within(os.path.realpath(c), a) for a in allowed) for c in candidates):
+        return None, "not found"
+    return None, "path outside the case's analysis/.tool_output/ and exports/"
 
 
 def _guess_content_type(rel: str) -> str:

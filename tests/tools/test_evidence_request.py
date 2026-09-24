@@ -196,6 +196,44 @@ class TestRoundTrip:
         assert fetches and fetches[0]["requests"][0]["rows_returned"] == 1
         assert fetches[0]["reason_call_id"] == evals[0]["call_id"]
 
+    def test_fetch_entry_keeps_returned_rows_in_a_sidecar(self, pull_env):
+        # The dashboard shows the exact rows the reviewer got back: each
+        # request carries result_path (full text) + a short result_excerpt.
+        import os
+        cid = pull_env["cid"]
+        http = MagicMock(side_effect=[_http(_REQ % cid), _http(_SUPPORTED)])
+        with patch("httpx.post", http):
+            R.reason_evaluate_finding("Account defaultprinter was created (EID 4720)",
+                                      f"Security.evtx (cid{cid}): 4720", input_call_ids=[cid])
+        log = pull_env["log"]
+        fetch = [e for e in log._entries if e.get("type") == "reason_evidence_fetch"][0]
+        req = fetch["requests"][0]
+        path = req["result_path"]
+        assert os.path.basename(path) == f"fetch-{fetch['call_id']}-1.txt"
+        assert os.path.dirname(path) == log.stdout_sidecar_dir()
+        text = open(path, encoding="utf-8").read()
+        assert "TargetUserName: defaultprinter" in text      # the returned row
+        assert text in _payload(http, 1)                     # exactly what the reviewer saw
+        assert req["result_chars"] == len(text)
+        assert req["result_excerpt"] == text[:300]
+        assert len(json.dumps(fetch)) < 2000                 # entry stays small
+
+    def test_record_fetch_results_optional_and_aligned(self):
+        import os
+        from core.execution_log import log
+        reqs = [{"call_id": 1, "query": "a", "status": "ok", "rows_returned": 1},
+                {"call_id": 2, "query": "b", "status": "missing"}]
+        fid = log.record_reason_evidence_fetch(7, reqs, results=["A,B\n1," + "x" * 500, ""])
+        e = log.index().by_call_id[fid]
+        r1, r2 = e["requests"]
+        assert open(r1["result_path"]).read() == "A,B\n1," + "x" * 500
+        assert len(r1["result_excerpt"]) == 300
+        assert "result_path" not in r2 and "result_excerpt" not in r2
+        # No results → legacy shape, nothing written.
+        fid2 = log.record_reason_evidence_fetch(7, reqs)
+        assert all("result_path" not in r for r in log.index().by_call_id[fid2]["requests"])
+        assert not os.path.exists(os.path.join(log.stdout_sidecar_dir(), f"fetch-{fid2}-1.txt"))
+
     def test_round_one_pushes_the_matching_rows_and_supported_stands(self, pull_env):
         # J-2 push-then-pull: the 4720 row (past the excerpt, deep in a 40-row
         # CSV) is in the ROUND-1 message with its totals; a SUPPORTED that

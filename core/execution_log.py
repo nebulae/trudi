@@ -27,6 +27,9 @@ _TRACE_FSYNC = os.environ.get("TRUDI_TRACE_FSYNC", "1") != "0"
 # Shared call_id counter — single monotonic sequence across MCP server + hook
 # so call_ids are dense and reflect global write order.
 _CALL_ID_COUNTER_FILE = os.path.join(trudi_cache_dir(), "call_id.counter")
+# Inline excerpt kept on each reason_evidence_fetch request; the full text
+# returned to the reviewer lives in the result_path sidecar.
+FETCH_RESULT_EXCERPT_CHARS = 300
 
 # The MCP tool whose handler is running (set by core.middleware around each
 # call). record_tool_call stamps it on the entry as `mcp_tool`, because a
@@ -1186,11 +1189,17 @@ class ExecutionLog:
         reason_call_id: int,
         requests: list[dict],
         input_call_ids: list[int] | None = None,
+        results: list[str] | None = None,
     ) -> int:
         """One entry per EVIDENCE_REQUEST round: what the reviewer asked for and
         what came back (call_id, query, columns, file, rows_returned,
         total_rows, status). This is the grounding record behind a verdict —
         "CHALLENGED after inspecting the 4720 rows" vs "on a 600-char excerpt".
+
+        `results[i]` is the text returned to the reviewer for `requests[i]`.
+        It is persisted as a sidecar (`.tool_output/fetch-<cid>-<n>.txt`,
+        `result_path` on the request) with a short inline `result_excerpt`,
+        so the entry stays small and the dashboard can show the exact rows.
         Fail-open: never breaks a reviewer call."""
         try:
             with self._lock:
@@ -1212,6 +1221,21 @@ class ExecutionLog:
                         for r in (requests or []) if isinstance(r, dict)
                     ],
                 }
+                texts = list(results or [])
+                for i, req in enumerate(entry["requests"]):
+                    text = texts[i] if i < len(texts) else ""
+                    if not isinstance(text, str) or not text:
+                        continue
+                    req["result_excerpt"] = text[:FETCH_RESULT_EXCERPT_CHARS]
+                    req["result_chars"] = len(text)
+                    path, partial, err = self._write_sidecar_text(
+                        f"fetch-{cid}-{i + 1}.txt", text)
+                    if path:
+                        req["result_path"] = path
+                        if partial:
+                            req["result_partial"] = True
+                    elif err:
+                        req["result_sidecar_error"] = err
                 if input_call_ids:
                     entry["input_call_ids"] = [int(c) for c in input_call_ids if c]
                 elif self._last_dair_cid:
@@ -1444,20 +1468,33 @@ class ExecutionLog:
         write and the filename is unique per cid, so the _flush re-entrancy
         hazard does not apply. Never raises: a failed sidecar is recorded on
         the entry (`stdout_sidecar_error`) and the entry is still written."""
+        final, partial, err = self._write_sidecar_text(f"{cid}.txt", text)
+        if final:
+            entry["stdout_path"] = final
+            if partial:
+                entry["stdout_partial"] = True
+        elif err:
+            _warn(f"stdout sidecar for call {cid} failed: {err}")
+            entry["stdout_sidecar_error"] = err
+
+    def _write_sidecar_text(self, name: str, text: str) -> tuple[str | None, bool, str]:
+        """Atomically write `text` to `.tool_output/<name>` (capped at
+        STDOUT_SIDECAR_CAP). Returns (path, partial, error); never raises."""
         try:
             from core.paths import STDOUT_SIDECAR_CAP
             d = self.stdout_sidecar_dir()
             if not d:
-                return
+                return None, False, ""
             os.makedirs(d, exist_ok=True)
             partial = len(text) > STDOUT_SIDECAR_CAP
             body = text[:STDOUT_SIDECAR_CAP]
             import tempfile
-            fd, tmp = tempfile.mkstemp(prefix=f".{cid}-", suffix=".tmp", dir=d)
+            stem = os.path.splitext(name)[0]
+            fd, tmp = tempfile.mkstemp(prefix=f".{stem}-", suffix=".tmp", dir=d)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
                     fh.write(body)
-                final = os.path.join(d, f"{cid}.txt")
+                final = os.path.join(d, name)
                 os.replace(tmp, final)
             except Exception:
                 try:
@@ -1465,12 +1502,9 @@ class ExecutionLog:
                 except OSError:
                     pass
                 raise
-            entry["stdout_path"] = final
-            if partial:
-                entry["stdout_partial"] = True
+            return final, partial, ""
         except Exception as e:
-            _warn(f"stdout sidecar for call {cid} failed: {e}")
-            entry["stdout_sidecar_error"] = str(e)[:200]
+            return None, False, str(e)[:200]
 
     def record_reason_call(
         self,
