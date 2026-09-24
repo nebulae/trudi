@@ -314,6 +314,74 @@ def exiftool_batch(directory: str, recursive: bool = True) -> dict:
 
 @mcp.tool()
 @output_safe
+def png_acropalypse(path: str, output_dir: str = "", max_seconds: int = 900) -> dict:
+    """Detect Acropalypse-cropped PNG screenshots and rebuild the uncropped original.
+
+    CVE-2023-21036 / CVE-2023-28303: data after the cropped PNG's IEND. path:
+    file or directory.
+
+    Recovered PNGs + acropalypse.csv go to output_dir (default
+    ./exports/acropalypse/). JPEGs: trailing data after EOI, detection only.
+    Detection is reported even when recovery fails. Read-only on the input.
+    """
+    import csv
+    from core.acropalypse import scan
+    from core.executor import _log_tool
+    from core.paths import assert_case_output_path
+
+    out_dir = output_dir or os.path.join(".", "exports", "acropalypse")
+    assert_case_output_path(out_dir)
+    res = scan(path, out_dir, max_seconds=max_seconds)
+    ok = bool(res.get("success"))
+    results = res.get("results", [])
+    csv_path = None
+    if ok:
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            csv_path = os.path.join(out_dir, "acropalypse.csv")
+            fields = ["path", "format", "size", "trailing_bytes", "detected", "recovered",
+                      "cropped_width", "cropped_height", "recovered_width",
+                      "recovered_height", "output_path", "note"]
+            with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=fields)
+                w.writeheader()
+                w.writerows(results)
+        except OSError as e:
+            res["warning"] = f"CSV write failed: {e}"
+            csv_path = None
+        hits = [r for r in results if r["detected"] or r["trailing_bytes"]]
+        lines = [f"{res['detected']} Acropalypse-suspect file(s), {res['recovered']} recovered, "
+                 f"of {res['files_scanned']}/{res['files_total']} image(s) scanned"
+                 + (" (PARTIAL: file/time cap)" if res.get("truncated") else "")]
+        lines += [f"{'DETECTED' if r['detected'] else 'trailing'} {r['path']}: "
+                  f"{r['trailing_bytes']} bytes after end-of-image, cropped "
+                  f"{r['cropped_width']}x{r['cropped_height']}"
+                  + (f", RECOVERED {r['recovered_width']}x{r['recovered_height']} -> "
+                     f"{r['output_path']}" if r["recovered"] else "")
+                  + (f" ({r['note']})" if r["note"] else "") for r in hits]
+        summary = "\n".join(lines)
+    else:
+        summary = res.get("error", "png_acropalypse failed")
+    tc = {"success": ok, "stdout": summary[:4000], "_stdout_full": summary,
+          "stderr": "" if ok else res.get("error", ""), "exit_code": 0 if ok else 1,
+          "truncated": bool(res.get("truncated")), "retries": 0,
+          "elapsed_seconds": float(res.get("elapsed_seconds") or 0.0),
+          "cmd": f"strings.png_acropalypse {path}", "output_path": csv_path}
+    _log_tool(tc)
+    return {
+        "success": ok, "error": res.get("error"), "warning": res.get("warning"),
+        "_trudi_call_id": tc.get("_trudi_call_id"),
+        "files_total": res.get("files_total", 0), "files_scanned": res.get("files_scanned", 0),
+        "truncated": bool(res.get("truncated")), "detected": res.get("detected", 0),
+        "recovered": res.get("recovered", 0),
+        "findings": [r for r in results if r["detected"] or r["trailing_bytes"]][:100],
+        "output_csv": csv_path, "elapsed_seconds": res.get("elapsed_seconds"),
+        "summary": summary[:4000],
+    }
+
+
+@mcp.tool()
+@output_safe
 def stat_file(file_path: str) -> dict:
     """Display filesystem metadata for a file: timestamps, permissions, inode, size."""
     return run(["stat", file_path])

@@ -49,7 +49,9 @@ def _sniff_event_log(path: str) -> str:
 @output_safe
 def evtx_dump(evtx_file: str, output_path: Optional[str] = None) -> dict:
     """
-    Dump a Windows event log to text. EVTX (Vista+) is rendered to XML via
+    Dump a Windows event log to text: EVTX via python-evtx, legacy EVT via evtexport.
+
+    EVTX (Vista+) is rendered to XML via
     python-evtx; legacy EVT (NT/2000/XP/2003, "LfLe" header) is routed to
     libevt's `evtexport`, because python-evtx parses only the binary-XML
     EVTX format and, handed an EVT file, exits 0 with an empty <Events/>
@@ -861,6 +863,92 @@ def cs_beacon_config(path: str, output_path: Optional[str] = None,
         "timed_out": bool(res.get("timed_out")), "searched_for": res.get("searched_for"),
         "elapsed_seconds": res.get("elapsed_seconds"), "summary": summary[:4000],
         "output_path": output_path if ok else None,
+    }
+
+
+# ── SQLite deleted-record recovery ────────────────────────────────────────────
+
+@mcp.tool()
+@output_safe
+def sqlite_recover(db_path: str, output_dir: str = "", max_seconds: int = 600) -> dict:
+    """Recover deleted SQLite records (freelist, freeblocks, unallocated, WAL) from a copy.
+
+    Plus a sqlite-carver pass. Parses a temp COPY of the db and its -wal/-shm (sqlite never opens the
+    evidence); rows still live in the db are dropped. recovered.csv columns:
+    source, status, page, offset, table, table_guess, rowid, method, text,
+    values_json. method intact_cell/freed_page_cell = exact cell;
+    freeblock_* = header partly overwritten, first column may be inferred.
+    output_dir default ./exports/sqlite_recover/<db name>/.
+    """
+    import hashlib
+    from core.executor import _log_tool
+    from core.paths import assert_case_output_path
+    from core.sqlite_recover import recover
+
+    tag = hashlib.sha1(db_path.encode("utf-8", "replace")).hexdigest()[:8]
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(db_path.rstrip("/"))) or "db"
+    out_dir = output_dir or os.path.join(".", "exports", "sqlite_recover", f"{base}_{tag}")
+    assert_case_output_path(out_dir)
+
+    res = recover(db_path, out_dir, max_seconds=max_seconds)
+    rows = res.pop("_rows", [])
+    ok = bool(res.get("success"))
+    carver = res.get("carver") or {}
+    if ok:
+        records = [r for r in rows if r["method"] != "strings"]
+        lines = [f"{len(records)} recovered record(s) no longer live in the db "
+                 f"(+{len(rows) - len(records)} residual string region(s)); by source "
+                 f"{res.get('records_by_source')}; by table {res.get('records_by_table')}",
+                 f"freelist pages {res.get('freelist_pages')}, wal {res.get('wal')}, "
+                 f"dropped as live duplicates {res.get('dropped_as_live_duplicates')}",
+                 f"sqlite-carver: {carver.get('rows', 0)} row(s)" if carver.get("success")
+                 else f"sqlite-carver: {carver.get('note') or carver.get('error') or carver.get('stderr')}"]
+        if res.get("timed_out") or res.get("row_cap_hit"):
+            lines.append("PARTIAL: time/row cap hit")
+        lines += [f"[{r['source']} p{r['page']}@{r['offset']} {r['table'] or r['table_guess']} "
+                  f"{r['method']}] {r['text'][:200]}" for r in rows[:40] if r["text"]]
+        summary = "\n".join(lines)
+        full = "\n".join([summary] + [f"[{r['source']} p{r['page']}@{r['offset']} "
+                                      f"{r['table'] or r['table_guess']} {r['method']} "
+                                      f"rowid={r['rowid']}] {r['text']}" for r in rows])
+    else:
+        summary = full = res.get("error", "sqlite_recover failed")
+
+    # Self-log: cmd carries the SOURCE db path; the full recovered text goes to
+    # the stdout sidecar so a reviewer can fetch any recovered row.
+    tc = {"success": ok, "stdout": summary[:4000], "_stdout_full": full[:4_000_000],
+          "stderr": "" if ok else res.get("error", ""), "exit_code": 0 if ok else 1,
+          "truncated": bool(res.get("timed_out") or res.get("row_cap_hit")), "retries": 0,
+          "elapsed_seconds": float(res.get("elapsed_seconds") or 0.0),
+          "timed_out": bool(res.get("timed_out")),
+          "cmd": f"misc.sqlite_recover {db_path}",
+          "output_path": res.get("output_csv") if ok else None}
+    _log_tool(tc)
+    cid = tc.get("_trudi_call_id")
+    if cid and ok:
+        try:
+            from core.execution_log import log
+            log.annotate_tool_call(cid, deleted_record_recovery=True,
+                                   recovered_record_count=res.get("recovered_records", 0),
+                                   source_sha256=res.get("source_sha256"))
+        except Exception:
+            pass
+    output_paths = {k: v for k, v in (("recovered_csv", res.get("output_csv")),
+                                      ("summary_json", res.get("output_json")),
+                                      ("carver_tsv", carver.get("output_path"))) if v}
+    return {
+        "success": ok, "error": res.get("error"), "_trudi_call_id": cid,
+        "recovered_records": res.get("recovered_records", 0),
+        "residual_string_regions": res.get("residual_string_regions", 0),
+        "records_by_source": res.get("records_by_source", {}),
+        "records_by_table": res.get("records_by_table", {}),
+        "freelist_pages": res.get("freelist_pages"), "wal": res.get("wal"),
+        "dropped_as_live_duplicates": res.get("dropped_as_live_duplicates"),
+        "carver": carver, "timed_out": bool(res.get("timed_out")),
+        "source_sha256": res.get("source_sha256"),
+        "source_unchanged": res.get("source_unchanged"),
+        "output_paths": output_paths, "elapsed_seconds": res.get("elapsed_seconds"),
+        "summary": summary[:4000],
     }
 
 

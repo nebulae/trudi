@@ -12,7 +12,7 @@ import re
 import shutil
 
 
-MANIFEST_VERSION = "2026-09-24.1"
+MANIFEST_VERSION = "2026-09-24.2"
 
 
 _CAPABILITIES: list[dict] = [
@@ -127,12 +127,15 @@ _CAPABILITIES: list[dict] = [
         "purpose": ("Extract and enumerate communications stores — mail OST/PST "
                     "(readpst/pff_export) and chat/messenger sqlite "
                     "(chat_db_export: messages, file-transfer trail, full "
-                    "sender/recipient roster). Mandatory before any "
-                    "recipient/dissemination conclusion."),
+                    "sender/recipient roster; sqlite_recover: deleted records "
+                    "from freelist/freeblocks/unallocated/WAL of any sqlite "
+                    "store). Mandatory before any recipient/dissemination "
+                    "conclusion."),
         "tools": [
             "misc.readpst_extract",
             "misc.pff_export",
             "misc.chat_db_export",
+            "misc.sqlite_recover",
         ],
     },
     {
@@ -156,12 +159,14 @@ _CAPABILITIES: list[dict] = [
         "id": "static_file_triage",
         "phases": ["Triage", "Analyze", "Scan"],
         "evidence": ["file", "mounted_fs"],
-        "purpose": "Identify, hash, grep, inspect, and classify files or extracted payloads.",
+        "purpose": ("Identify, hash, grep, inspect, and classify files or extracted "
+                    "payloads; detect/recover Acropalypse-cropped screenshots."),
         "tools": [
             "strings.stat_file",
             "strings.file_identify",
             "strings.grep",
             "strings.floss_extract",
+            "strings.png_acropalypse",
             "hash.file",
             "hash.directory",
             "hash.verify_evidence_hash",
@@ -296,6 +301,8 @@ _EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
     "plaso.create_timeline": frozenset({"disk_image", "triage", "mobile"}),
     "plaso.create_targeted": frozenset({"disk_image", "triage", "mobile"}),
     "misc.chat_db_export": frozenset({"disk_image", "triage", "mobile"}),
+    "misc.sqlite_recover": frozenset({"disk_image", "triage", "mobile"}),
+    "strings.png_acropalypse": frozenset({"disk_image", "triage", "mobile"}),
     **{t: _WINDOWS_ARTIFACTS for t in (
         "misc.evtx_filter", "misc.evtx_dump", "misc.chainsaw_hunt", "misc.regripper_hive",
         "misc.usnparser_parse", "misc.analyzemft_parse", "misc.srum_export",
