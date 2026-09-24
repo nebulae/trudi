@@ -1452,10 +1452,13 @@ def _entry_kind(e: dict, authored: set | None = None) -> str:
 
 
 def _resolve_evidence_requests(requests: list[dict], input_call_ids, budget_chars: int,
-                               evidence_packet: dict | None = None) -> tuple[str, list[dict]]:
+                               evidence_packet: dict | None = None,
+                               texts_out: list | None = None) -> tuple[str, list[dict]]:
     """Resolve the reviewer's EVIDENCE_REQUEST items from the CITED call_ids only
     (provenance invariant — no browsing the wider trace), using the MODEL's own
-    query terms. Returns (block text, fetch records)."""
+    query terms. Returns (block text, fetch records). When `texts_out` is a
+    list it receives the text returned for each request, aligned with the
+    fetch records (the trace persists it for the dashboard)."""
     from tools._output_reader import entry_text_sources, read_relevant_stats
     allowed = {int(c) for c in (input_call_ids or []) if c}
     try:
@@ -1665,6 +1668,9 @@ def _resolve_evidence_requests(requests: list[dict], input_call_ids, budget_char
             if sib_note:
                 blocks[-1] += sib_note
         recs.append(rec)
+    if texts_out is not None:
+        # One block per request on every path above; align defensively.
+        texts_out.extend(blocks if len(blocks) == len(recs) else [""] * len(recs))
     return "\n\n".join(blocks), recs
 
 
@@ -1691,14 +1697,16 @@ def _evidence_round_trip(result: dict, call, user: str, tool_name: str, input_ca
     tok_out = int(result.get("output_tokens") or 0)
     user_r = user
     while reqs and rounds < COMPAT_EVIDENCE_ROUNDS:
+        texts: list[str] = []
         block, recs = _resolve_evidence_requests(reqs, input_call_ids, COMPAT_EVIDENCE_ROUND_CHARS,
-                                                evidence_packet=evidence_packet)
+                                                evidence_packet=evidence_packet, texts_out=texts)
         rounds += 1
         fetches.extend(recs)
         try:
             log.record_reason_evidence_fetch(
                 cid, recs,
-                input_call_ids=[r["call_id"] for r in recs if r.get("status") == "ok"] or None)
+                input_call_ids=[r["call_id"] for r in recs if r.get("status") == "ok"] or None,
+                results=texts)
         except Exception:
             pass
         user_r += (f"\n\nEVIDENCE_REQUEST RESULTS (round {rounds}/{COMPAT_EVIDENCE_ROUNDS}; "

@@ -345,3 +345,107 @@ class TestTraceNameFidelity:
         assert r["log_path"].endswith("EXT-TEST_trace.json")
         assert (case / "analysis" / "EXT-TEST_trace.json").exists()
         assert not (case / "analysis" / "EXT-TEST_trace").exists()
+
+
+class TestOutputEndpoint:
+    """/_dashboard/api/output serves a trace's produced output (stdout
+    sidecars, evidence-fetch results, exports) read-only — nothing else."""
+
+    def _get(self, port, trace, path, extra=""):
+        from urllib.parse import quote
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        conn.request("GET", f"/_dashboard/api/output?trace={quote(trace)}&path={quote(path)}{extra}")
+        resp = conn.getresponse()
+        return resp.status, resp.read(), resp
+
+    def _seed(self, cases_root):
+        case = _seed_case(cases_root, "c1", "C-1", "C-1_trace.json")
+        (case / "analysis" / ".tool_output").mkdir()
+        (case / "analysis" / ".tool_output" / "7.txt").write_text("A,B\n1,2\n")
+        (case / "exports" / "mft").mkdir(parents=True)
+        (case / "exports" / "mft" / "mft.csv").write_text("x" * 5000)
+        (case / "analysis" / "secret.txt").write_text("nope")
+        (case / "evidence").mkdir()
+        (case / "evidence" / "disk.raw").write_text("evidence")
+        (case / "exports" / "link").symlink_to(case / "evidence" / "disk.raw")
+        return case
+
+    def test_serves_sidecar_and_export(self, standalone_server):
+        root, port = standalone_server["cases_root"], standalone_server["port"]
+        case = self._seed(root)
+        trace = "/c1/analysis/C-1_trace.json"
+        st, body, _ = self._get(port, trace, str(case / "analysis" / ".tool_output" / "7.txt"))
+        assert st == 200 and body == b"A,B\n1,2\n"
+        st, body, resp = self._get(port, trace, "exports/mft/mft.csv", "&max=100")
+        assert st == 200 and len(body) == 100
+        assert resp.getheader("X-Trudi-Truncated") == "1"
+        assert resp.getheader("X-Trudi-Size") == "5000"
+
+    def test_relocated_case_path_is_rerooted(self, standalone_server):
+        root, port = standalone_server["cases_root"], standalone_server["port"]
+        self._seed(root)
+        st, body, _ = self._get(port, "/c1/analysis/C-1_trace.json",
+                                "/old/home/cases/orig/analysis/.tool_output/7.txt")
+        assert st == 200 and body.startswith(b"A,B")
+
+    @pytest.mark.parametrize("path", [
+        "analysis/secret.txt",
+        "analysis/.tool_output/../secret.txt",
+        "exports/../evidence/disk.raw",
+        "exports/link",                       # symlink out of exports/
+        "/etc/passwd",
+        "/x/analysis/.tool_output/../../../../etc/passwd",
+        "analysis/C-1_trace.json",
+    ])
+    def test_refuses_everything_else(self, standalone_server, path):
+        root, port = standalone_server["cases_root"], standalone_server["port"]
+        self._seed(root)
+        st, body, _ = self._get(port, "/c1/analysis/C-1_trace.json", path)
+        assert st in (403, 404) and b"evidence" not in body and b"nope" not in body
+
+    def test_refuses_bad_trace(self, standalone_server):
+        root, port = standalone_server["cases_root"], standalone_server["port"]
+        self._seed(root)
+        for trace in ("/c1/analysis/../../c1/analysis/C-1_trace.json", "/c1/CLAUDE.md", ""):
+            st, _, _ = self._get(port, trace, "exports/mft/mft.csv")
+            assert st == 403
+
+
+def test_trace_viewer_type_filters_are_written_types():
+    """Every type filter in the trace view names an entry type the code base
+    writes (no dead filters), and the newer written types have filters."""
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    tv = open(os.path.join(root, "dashboard", "trace_viewer.html")).read()
+    offered = set(re.findall(r'class="type-filter" value="([a-z_]+)"', tv))
+    written = set()
+    for sub in ("core", "tools", "claude"):
+        for dp, _dn, fns in os.walk(os.path.join(root, sub)):
+            for fn in fns:
+                if fn.endswith(".py"):
+                    src = open(os.path.join(dp, fn), encoding="utf-8").read()
+                    written |= set(re.findall(r"""["']type["']\s*:\s*["']([a-z_]+)["']""", src))
+    assert offered, "no type filters found"
+    assert offered <= written, f"dead filters: {sorted(offered - written)}"
+    for t in ("phase_transition", "finding_submission", "ioc", "reason_evidence_fetch"):
+        assert t in offered, f"missing filter for {t}"
+    assert "phase_work" not in tv and "FOLLOW-UP" not in tv
+
+
+def test_views_share_the_finding_renderer(standalone_server):
+    """trace view and chain view load the same trace_render.js, which renders
+    the finding detail (typed claim, tier, gate) and read.* output tables."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for page in ("trace_viewer.html", "chain_view.html"):
+        body = open(os.path.join(root, "dashboard", page), encoding="utf-8").read()
+        assert '<script src="trace_render.js"></script>' in body, page
+        assert "findingDetailHtml(" in body, page
+    js = open(os.path.join(root, "dashboard", "trace_render.js"), encoding="utf-8").read()
+    for fn in ("findingDetailHtml", "parseDelimited", "parseReadCmd", "parseMailLines",
+               "outputHtml", "fetchOutput"):
+        assert f"TR.{fn} = " in js, fn
+    conn = http.client.HTTPConnection("127.0.0.1", standalone_server["port"], timeout=2)
+    conn.request("GET", "/_dashboard/trace_render.js")
+    resp = conn.getresponse()
+    assert resp.status == 200 and b"TrudiRender" in resp.read()
+    assert resp.getheader("Content-Type").startswith("application/javascript")

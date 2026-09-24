@@ -399,6 +399,7 @@
 </div>
 
 <script src="vendor/dagre.min.js"></script>
+<script src="trace_render.js"></script>
 <script>
 'use strict';
 
@@ -1295,7 +1296,33 @@ function renderDetail(b) {
   detail.innerHTML = lines.join('');
 }
 
+function _chainLink(cid, label, title) {
+  const bid = State.blockOfCid && State.blockOfCid.get(cid);
+  const t = title ? ` title="${escapeHtml(title)}"` : '';
+  return bid
+    ? `<a class="d-link"${t} onclick="focusBlock('${escapeHtml(bid)}')">${escapeHtml(label || '#' + cid)}</a>`
+    : `<span class="d-link" style="cursor:default;color:var(--fg-dim)"${t}>${escapeHtml(label || '#' + cid)}</span>`;
+}
+
 function renderEntryDetail(e, kind, lines) {
+  if (kind === 'finding' && window.TrudiRender) {
+    // Shared with the trace view (trace_render.js): same finding data in both.
+    const fetchesByReview = new Map();
+    for (const x of State.byCid.values()) {
+      if (x.type === 'reason_evidence_fetch' && x.reason_call_id) {
+        if (!fetchesByReview.has(x.reason_call_id)) fetchesByReview.set(x.reason_call_id, []);
+        fetchesByReview.get(x.reason_call_id).push(x);
+      }
+    }
+    lines.push(window.TrudiRender.findingDetailHtml(e, {
+      byId: State.byCid, fetchesByReview, link: _chainLink,
+    }));
+    if (e.dair_phase) {
+      lines.push(`<div class="d-section">Phase context</div>`);
+      lines.push(`<div class="d-row">phase: <b>${escapeHtml(e.dair_phase)}</b> (depth ${e.dair_depth ?? '?'})</div>`);
+    }
+    return;
+  }
   // INPUTS
   lines.push('<div class="d-section">Inputs</div>');
   if (e.inputs && Object.keys(e.inputs).length) {
