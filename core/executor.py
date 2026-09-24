@@ -252,6 +252,10 @@ async def run_with_progress(
         )
 
         async def _drain_stderr() -> None:
+            # `ctx` is cleared below once progress reporting fails; without
+            # nonlocal that assignment made it local here, so the first stderr
+            # line raised UnboundLocalError and every vol.* call failed.
+            nonlocal ctx
             # Read in chunks and split on \r or \n — Volatility writes progress
             # with \r (carriage return), not \n, so line-based iteration misses them.
             buf = b""
