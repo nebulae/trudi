@@ -219,7 +219,7 @@ BACKGROUND_IF_SLOW = frozenset({
     "tsk_fls", "ez_evtxecmd", "ez_lecmd", "ez_jlecmd", "ez_pecmd", "ez_recmd_batch",
     "ez_mftecmd", "ez_mftecmd_dir", "ez_sqlecmd", "misc_evtx_dump", "misc_evtx_filter",
     "misc_chainsaw_hunt", "misc_hindsight_chrome", "misc_pff_export",
-    "misc_readpst_extract", "misc_usnparser_parse",
+    "misc_readpst_extract", "misc_usnparser_parse", "misc_usbdeviceforensics",
 })
 INLINE_WAIT = float(os.environ.get("TRUDI_JOB_INLINE_WAIT") or "30")
 MAX_CONCURRENT = int(os.environ.get("TRUDI_JOB_SLOTS") or "3")

@@ -215,7 +215,9 @@ class TestPeTools:
     def test_pe_scanner(self, mock_run):
         from tools.misc import pe_scanner
         pe_scanner("/malware/sample.exe")
-        assert mock_run.called
+        # pe-scanner requires -f/--file (a bare positional is an argparse error)
+        assert mock_run.call_args[0][0] == [
+            "/usr/local/bin/pe-scanner", "-f", "/malware/sample.exe"]
 
     def test_pe_carver(self, mock_run, tmp_path):
         from tools.misc import pe_carver
@@ -292,6 +294,23 @@ class TestHindsight:
         from tools.misc import hindsight_chrome
         hindsight_chrome("/p", str(tmp_path), output_format="pdf")
         assert self._hs_fmt(mock_run) == "jsonl"
+
+    def test_hindsight_env_carries_py310_utc_shim(self, mock_run, tmp_path, monkeypatch):
+        # /opt/pyhindsight is Python 3.10; pyhindsight uses datetime.UTC (3.11+).
+        import subprocess, sys
+        from tools.misc import hindsight_chrome
+        monkeypatch.setenv("PYTHONPATH", "/prior")
+        hindsight_chrome("/p", str(tmp_path))
+        cmd, kw = mock_run.call_args[0][0], mock_run.call_args[1]
+        assert cmd[0] == "/usr/local/bin/hindsight.py" and cmd[cmd.index("-i") + 1] == "/p"
+        shim, prior = kw["env"]["PYTHONPATH"].split(os.pathsep)
+        assert prior == "/prior" and kw["env"]["PATH"] == os.environ["PATH"]
+        assert os.path.isfile(os.path.join(shim, "sitecustomize.py"))
+        # the shim really defines datetime.UTC in a child interpreter
+        out = subprocess.run(
+            [sys.executable, "-c", "import datetime; print(datetime.UTC is datetime.timezone.utc)"],
+            env={**os.environ, "PYTHONPATH": shim}, capture_output=True, text=True)
+        assert out.stdout.strip() == "True"
 
     def test_hindsight_valid_format_passthrough(self, mock_run, tmp_path):
         from tools.misc import hindsight_chrome
@@ -760,22 +779,73 @@ class TestMraptorScan:
 
 
 class TestUsbDeviceForensics:
-    def test_registry_passed_with_r_flag_and_output_honoured(self, mock_run, tmp_path):
-        from tools.misc import usbdeviceforensics
-        hives = tmp_path / "config"
-        hives.mkdir()
-        (hives / "SYSTEM").write_bytes(b"regf")
-        out = str(tmp_path / "exports" / "usb.tsv")
-        r = usbdeviceforensics(str(hives / "SYSTEM"), output_path=out)
-        cmd = mock_run.call_args[0][0]
-        assert cmd[:3] == ["/usr/local/bin/usbdeviceforensics", "-r", str(hives)]
-        assert cmd[cmd.index("-o") + 1] == out and cmd[cmd.index("-f") + 1] == "tsv"
-        assert r["output_path"] == out
+    """-r is walked recursively and every file loaded as a hive 3x: the wrapper
+    stages symlinks to SYSTEM + SOFTWARE (+ INF/setupapi.dev.log) only."""
 
-    def test_directory_without_output(self, mock_run, tmp_path):
+    @staticmethod
+    def _capture(mock_run):
+        seen = {}
+
+        def _side(cmd, **kw):
+            stage = cmd[cmd.index("-r") + 1]
+            seen["cmd"], seen["kw"] = list(cmd), kw
+            seen["files"] = {n: os.readlink(os.path.join(stage, n))
+                             for n in os.listdir(stage)} if os.path.isdir(stage) else None
+            seen["stage"] = stage
+            return {"success": True, "stdout": "", "stderr": "", "exit_code": 0,
+                    "truncated": False, "cmd": " ".join(cmd)}
+        mock_run.side_effect = _side
+        return seen
+
+    def _win(self, tmp_path):
+        cfg = tmp_path / "Windows" / "System32" / "config"
+        cfg.mkdir(parents=True)
+        for n in ("SYSTEM", "SOFTWARE", "COMPONENTS", "SAM"):
+            (cfg / n).write_bytes(b"regf")
+        (cfg / "RegBack").mkdir()
+        (cfg / "RegBack" / "SYSTEM").write_bytes(b"regf")
+        inf = tmp_path / "Windows" / "INF"
+        inf.mkdir()
+        (inf / "setupapi.dev.log").write_text("x")
+        return cfg, inf
+
+    def test_config_dir_staged_with_timeout_and_output(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        cfg, inf = self._win(tmp_path)
+        seen = self._capture(mock_run)
+        out = str(tmp_path / "exports" / "usb.tsv")
+        r = usbdeviceforensics(str(cfg), output_path=out)
+        cmd = seen["cmd"]
+        assert cmd[:2] == ["/usr/local/bin/usbdeviceforensics", "-r"]
+        assert seen["stage"] != str(cfg)
+        assert seen["files"] == {"SYSTEM": str(cfg / "SYSTEM"),
+                                 "SOFTWARE": str(cfg / "SOFTWARE"),
+                                 "setupapi.dev.log": str(inf / "setupapi.dev.log")}
+        assert seen["kw"]["timeout"] >= 600
+        r0 = {"stdout": "x", "_stdout_full": "x"}
+        seen["kw"]["classify"](r0, "x", "")        # names the evidence read
+        assert r0["_stdout_full"].startswith(f"Staged input: {cfg / 'SYSTEM'}\n")
+        assert cmd[cmd.index("-o") + 1] == out and cmd[cmd.index("-f") + 1] == "tsv"
+        assert r["output_path"] == out and len(r["staged_inputs"]) == 3
+        assert not os.path.exists(seen["stage"])          # scratch cleaned up
+        assert (cfg / "SYSTEM").exists()                  # never the targets
+
+    def test_hive_file_staged(self, mock_run, tmp_path):
+        from tools.misc import usbdeviceforensics
+        cfg, _ = self._win(tmp_path)
+        seen = self._capture(mock_run)
+        usbdeviceforensics(str(cfg / "SYSTEM"))
+        assert set(seen["files"]) == {"SYSTEM", "SOFTWARE", "setupapi.dev.log"}
+
+    def test_directory_without_system_passed_through(self, mock_run, tmp_path):
         from tools.misc import usbdeviceforensics
         usbdeviceforensics(str(tmp_path))
         assert mock_run.call_args[0][0] == ["/usr/local/bin/usbdeviceforensics", "-r", str(tmp_path)]
+        assert mock_run.call_args[1]["timeout"] >= 600
+
+    def test_runs_as_background_job_when_slow(self):
+        from core.jobs import background_mode
+        assert background_mode("misc_usbdeviceforensics") == "if_slow"
 
     def test_output_into_evidence_refused(self):
         from tools.misc import usbdeviceforensics

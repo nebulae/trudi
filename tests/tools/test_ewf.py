@@ -271,3 +271,64 @@ class TestCaseInsensitiveMount:
              patch("tools.ewf._lowntfs_available", return_value=False):
             mount_ntfs("/mnt/ewf/ewf1", str(tmp_path / "ntfs"), offset_bytes=0)
         assert m.call_args[0][0][:2] == ["mount", "-o"]
+
+
+_EWFVERIFY_FAIL = (
+    "ewfverify 20140816\n\nVerify started at: Sep 23, 2026 18:10:44\n"
+    "Status: at 99%.\n\nVerify completed at: Sep 23, 2026 18:20:56\n\n"
+    "Read: 116 GiB (125069950976 bytes) in 10 minute(s).\n\n"
+    "Sector validation errors:\n\ttotal number: 1\n"
+    "\tat sector(s): 70565120 - 70565183 (number: 64) in segment file(s): "
+    "/ev/surface_physical.E10\n\n"
+    "MD5 hash stored in file:\t\t4032d556cc866c23f1e797410e95603c\n"
+    "MD5 hash calculated over data:\t\ta60c963641c86ec090169ff7beded264\n\n"
+    "Additional hash values:\nSHA1:\te0e72dfcef167dd358813726e82f6c235bc85ce7\n\n"
+    "ewfverify: FAILURE\n")
+
+
+def _proc(rc, out, err=b""):
+    from unittest.mock import MagicMock
+    m = MagicMock()
+    m.returncode, m.stdout, m.stderr = rc, out, err
+    return m
+
+
+class TestEwfVerifyClassification:
+    """ewfverify exit 1 = mismatch found (a result) OR cannot run (a failure)."""
+
+    def _run(self, rc, out, err=b""):
+        from core.execution_log import log
+        import core.executor as ex
+        from tools.ewf import ewf_verify
+        with patch("tools.ewf.run", ex.run), \
+             patch("core.executor.subprocess.run", return_value=_proc(rc, out, err)):
+            r = ewf_verify("/ev/image.E01")
+        return r, log._entries[-1]
+
+    def test_completed_mismatch_is_successful_negative_result(self):
+        r, entry = self._run(1, _EWFVERIFY_FAIL.encode(), b"Unable to verify input.")
+        assert r["success"] is True and entry["success"] is True
+        assert r["verified"] is False
+        assert r["status"] == "verification_failed"
+        assert r["stored_md5"] == "4032d556cc866c23f1e797410e95603c"
+        assert r["computed_md5"] == "a60c963641c86ec090169ff7beded264"
+        assert r["stored_sha1"] == "e0e72dfcef167dd358813726e82f6c235bc85ce7"
+        assert r["sector_errors"] == [{"start": 70565120, "end": 70565183,
+                                       "count": 64,
+                                       "segment": "/ev/surface_physical.E10"}]
+        assert "FAILED" in entry["exit_meaning"]
+        assert "ewfverify: FAILURE" in r["stdout"]
+
+    def test_success(self):
+        out = ("Verify completed at: x\n"
+               "MD5 hash stored in file:\t\tabc\nMD5 hash calculated over data:\t\tabc\n"
+               "ewfverify: SUCCESS\n")
+        r, entry = self._run(0, out.encode())
+        assert r["success"] is True and r["verified"] is True
+        assert r["status"] == "verified" and r["sector_errors"] == []
+
+    def test_cannot_open_stays_failure(self):
+        r, entry = self._run(1, b"ewfverify 20140816\n",
+                             b"Unable to open EWF file(s).")
+        assert r["success"] is False and entry["success"] is False
+        assert r["status"] == "error" and r["verified"] is None

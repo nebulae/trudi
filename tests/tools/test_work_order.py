@@ -261,3 +261,45 @@ class TestUnrunPriorityTools:
         entries = [_dair(["strings.grep"]),
                    {**_call("strings -a -n 4 /x", success=False), "mcp_tool": "strings_grep"}]
         assert wo.unrun_from_list(entries, ["strings.grep"]) == ["strings.grep"]
+
+
+class TestFailedToolNameMatching:
+    """A failed call is identified by its BINARY; the agent dispositions the MCP
+    name. Either spelling (and hyphen/underscore) must settle it."""
+
+    @staticmethod
+    def _failed(cmd, mcp_tool):
+        return {"type": "tool_call", "call_id": 3, "success": False,
+                "cmd": cmd, "mcp_tool": mcp_tool, "exit_code": 2}
+
+    CASES = [
+        ("/usr/local/bin/pe-scanner /mnt/x/a.exe", "misc_pe_scanner",
+         ["misc.pe_scanner", "misc_pe_scanner", "pe-scanner", "pe_scanner"]),
+        ("ewfverify /ev/image.E01", "ewf_verify",
+         ["ewf_verify", "ewf.verify", "ewfverify"]),
+        ("dotnet /opt/zimmermantools/SQLECmd/SQLECmd.dll -f /x/History --csv /o",
+         "ez_sqlecmd", ["ez.sqlecmd", "ez_sqlecmd", "SQLECmd", "SQLECmd.dll"]),
+    ]
+
+    def test_unclosed_failure_blocks_and_names_mcp_tool(self):
+        for cmd, mcp, _ in self.CASES:
+            issues = wo.unretried_blocks([self._failed(cmd, mcp)])
+            assert len(issues) == 1, cmd
+            assert wo._display(mcp) in issues[0]
+
+    def test_any_spelling_disposition_settles(self):
+        for cmd, mcp, spellings in self.CASES:
+            for sp in spellings:
+                es = [self._failed(cmd, mcp), _disp(sp, reason="inapplicable")]
+                assert wo.unretried_blocks(es) == [], (cmd, sp)
+
+    def test_later_success_of_same_mcp_tool_settles(self):
+        es = [self._failed("/usr/local/bin/pe-scanner /x", "misc_pe_scanner"),
+              {"type": "tool_call", "call_id": 4, "success": True,
+               "cmd": "/usr/local/bin/pe-scanner -f /x", "mcp_tool": "misc_pe_scanner"}]
+        assert wo.unretried_blocks(es) == []
+
+    def test_unrelated_disposition_does_not_settle(self):
+        es = [self._failed("/usr/local/bin/pe-scanner /x", "misc_pe_scanner"),
+              _disp("misc.pe_carver")]
+        assert len(wo.unretried_blocks(es)) == 1
