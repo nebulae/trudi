@@ -728,7 +728,12 @@ def _compat_chat(url: str, api_key: str, model: str, system: str, user: str,
                 headers=headers,
                 timeout=timeout,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as he:
+                # The server's own reason ("the request exceeds the available
+                # context size") — a bare "400 Bad Request" left the agent guessing.
+                raise RuntimeError(f"{he} — server said: {he.response.text[:500]}") from he
             body = resp.json()
             choice = body["choices"][0]
             message = choice.get("message") or {}

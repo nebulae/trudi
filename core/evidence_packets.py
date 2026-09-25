@@ -14,7 +14,9 @@ from core.readiness import digest
 
 VERSION = 1
 MAX_SOURCE_BYTES = 64 * 1024 * 1024
-MAX_PACKET_CHARS = 32000
+# Selected-row budget. Rendered JSON adds ~50% on top; a 32k-context
+# backend needs a smaller budget (TRUDI_REASON_PACKET_CHARS).
+MAX_PACKET_CHARS = int(os.environ.get("TRUDI_REASON_PACKET_CHARS") or "32000")
 MAX_SCAN_BYTES = 256 * 1024 * 1024
 MAX_SOURCES = 32
 # Binary output (icat of a container, a carved blob) selected as rows: JSON
