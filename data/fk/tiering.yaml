@@ -157,8 +157,11 @@ classes:
     # kept for existing traces). The tool-name keywords never appear in those
     # command lines, so match the recorded binary as well. New entries also
     # carry mcp_tool, matched against `mcp_tools` in _tiering.classify_entry.
-    cmd: 'strings_extract|strings_grep|^strings\s|^file\s|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.(read_)?output\b|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
-    mcp_tools: [strings.grep, strings.extract, strings.hexdump, strings.xxd_dump, tsk.icat, read.output]
+    # misc.sqlite_recover / strings.png_acropalypse read residual bytes of a
+    # file (deleted sqlite records, the uncropped tail of a screenshot): the
+    # same evidential weight as any other read of file content — no more.
+    cmd: 'strings_extract|strings_grep|^strings\s|^file\s|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.(read_)?output\b|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa|sqlite_recover|png_acropalypse'
+    mcp_tools: [strings.grep, strings.extract, strings.hexdump, strings.xxd_dump, tsk.icat, read.output, misc.sqlite_recover, strings.png_acropalypse]
     tools: [strings.grep, tsk.icat, read.output, misc.capa_analyze]
     label: file content read
   hash_match:
