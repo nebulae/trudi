@@ -578,6 +578,8 @@ def xlsx_export(xlsx_path: str, output_dir: str) -> dict:
               "elapsed_seconds": 0.0,
               "cmd": f"misc.xlsx_export {xlsx_path} -> {output_dir}"}
     _log_tool(result)
+    from tools import _parsed_outputs
+    _parsed_outputs.stamp(result, output_dir)
     return {"success": ok, "_trudi_call_id": result.get("_trudi_call_id"),
             "error": None if ok else result["stderr"], "sheets": written,
             "output_dir": output_dir, "summary": summary,
@@ -2269,6 +2271,7 @@ def write_final_report(output_path: str, content: str) -> dict:
     ioc_inv: dict = {}
     unshown: list = []
     disp_review: list = []
+    unread_out: list = []
     advisories: list = []
     try:
         for e in reversed(log._entries):
@@ -2278,6 +2281,7 @@ def write_final_report(output_path: str, content: str) -> dict:
                 ioc_inv = dict(e.get("ioc_inventory") or {})
                 unshown = list(e.get("unshown_review_details") or [])
                 disp_review = list(e.get("disposition_review") or [])
+                unread_out = list(e.get("unread_outputs") or [])
                 break
         # The latest successful cross-finding review's advisories: non-blocking
         # by the reviewer's own classification, but a reader should see them.
@@ -2380,6 +2384,16 @@ def write_final_report(output_path: str, content: str) -> dict:
                            f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
                            f"{', '.join((i.get('examine_with') or [])[:4])} | "
                            f"{('disposition: ' + str(i.get('disposition'))) if i.get('disposition') else 'open'} |")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if unread_out and "## parsed output not examined" not in content.lower():
+        sec = ["\n\n## Parsed output not examined",
+               "Tables a parser produced that hold records but were never opened with "
+               "read.output or settled by a disposition. Nothing in them was checked; any "
+               "of them may hold relevant evidence."]
+        sec.append("\n| file | records | produced by |\n|---|---|---|")
+        for u in unread_out:
+            sec.append(f"| `{u.get('file')}` | {u.get('rows')} | {u.get('tool')} (call "
+                       f"{u.get('call_id')}) |")
         content = content.rstrip() + "\n".join(sec) + "\n"
     if disp_review and "## dispositions to review" not in content.lower():
         sec = ["\n\n## Dispositions to review",

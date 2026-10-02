@@ -28,6 +28,8 @@ import tempfile
 from fastmcp import FastMCP
 
 from core import run, output_safe
+from tools import _parsed_outputs as _parsed
+from tools._parsed_outputs import count_rows as _count_rows
 from tools.tool_capabilities import tool_unavailable_result
 
 mcp = FastMCP("mobile")
@@ -51,7 +53,6 @@ IOS_APT_PLUGINS = ("APPS", "BASICINFO", "DOCUMENTREVISIONS", "FSEVENTS", "INETAC
                    "NETUSAGE", "NETWORKING", "NOTES", "SAFARI", "SCREENTIME", "SPOTLIGHT",
                    "TERMSESSIONS", "WIFI")
 
-_ROWS_MAX_BYTES = 64 * 1024 * 1024       # count rows only in files this small
 _MAX_LISTED = 80                         # output files listed in the result
 
 # Artifact families (tier-contract markers, data/fk/tiering.yaml) by produced
@@ -178,36 +179,6 @@ def _cmd_names_evidence(result: dict, stage: str, src: str) -> None:
     """The recorded cmd names the evidence tree, not the transient stage."""
     if isinstance(result.get("cmd"), str):
         result["cmd"] = result["cmd"].replace(stage, src)
-
-
-def _count_rows(path: str) -> int | None:
-    """Records in a produced file: JSON array length, CSV/TSV rows (header
-    excluded), JSONL lines. None for binary/large files."""
-    low = path.lower()
-    try:
-        size = os.path.getsize(path)
-    except OSError:
-        return None
-    if size > _ROWS_MAX_BYTES:
-        return None
-    try:
-        if low.endswith(".json"):
-            with open(path, "r", errors="replace") as fh:
-                data = json.load(fh)
-            return len(data) if isinstance(data, list) else None
-        if low.endswith(".jsonl"):
-            with open(path, "rb") as fh:
-                return sum(1 for ln in fh if ln.strip())
-        if low.endswith((".csv", ".tsv")):
-            import csv
-            csv.field_size_limit(min(2**31 - 1, 512 * 1024 * 1024))
-            with open(path, "r", errors="replace", newline="") as fh:
-                rdr = csv.reader((ln.replace("\x00", "") for ln in fh),
-                                 delimiter="\t" if low.endswith(".tsv") else ",")
-                return max(0, sum(1 for _ in rdr) - 1)
-    except (OSError, ValueError, Exception):
-        return None
-    return None
 
 
 def _inventory(out_dir: str, skip_dirs: tuple = ()) -> tuple[list[dict], int]:
@@ -405,8 +376,10 @@ def mvt_ios_check_fs(fs_path: str, output_dir: str, modules: str = "") -> dict:
             if mod:
                 cmd += ["-m", mod]
             cmd.append(stage)
+            t0 = _parsed.now()
             r = run(cmd, timeout=MVT_FS_TIMEOUT, output_dir=output_dir,
                     classify=_mvt_classify(output_dir, holder, stage, fs_path))
+            _parsed.stamp(r, output_dir, t0)
             runs.append(_mvt_result(r, output_dir, holder, fs_path, unreadable, staged))
     finally:
         _unstage(stage)
@@ -436,8 +409,10 @@ def mvt_ios_check_backup(backup_path: str, output_dir: str) -> dict:
     stage, staged = _stage(backup_path)
     try:
         cmd = [MVT_IOS, *_MVT_OFFLINE, "check-backup", "-o", output_dir, stage]
+        t0 = _parsed.now()
         r = run(cmd, timeout=MVT_BACKUP_TIMEOUT, output_dir=output_dir,
                 classify=_mvt_classify(output_dir, holder, stage, backup_path))
+        _parsed.stamp(r, output_dir, t0)
     finally:
         _unstage(stage)
     return _mvt_result(r, output_dir, holder, backup_path, None, staged)
@@ -621,7 +596,9 @@ def ios_apt(fs_path: str, output_dir: str, plugins: str = "ALL") -> dict:
         _stamp(result, _summary_text("ios_apt output summary (rows per CSV):", csvs, extra))
 
     try:
+        t0 = _parsed.now()
         r = run(cmd, timeout=IOS_APT_TIMEOUT, output_dir=output_dir, classify=classify)
+        _parsed.stamp(r, output_dir, t0, skip_dirs=("Export",))
     finally:
         _unstage(stage)
     files = holder.get("files") or []

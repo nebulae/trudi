@@ -993,6 +993,16 @@ def dair_assess(
     ioc_leads = _ioc_coverage_block(current)
     if ioc_leads:
         user_parts.append(ioc_leads)
+    try:
+        from core.execution_log import log as _plog
+        from tools._parsed_outputs import dair_block as _unread_block, unread as _unread
+        _plog_entries = getattr(_plog, "_entries", None) or []
+        unread_leads = _unread_block(_plog_entries, current)
+        unread_items = _unread(_plog_entries) if unread_leads else []
+    except Exception:
+        unread_leads, unread_items = "", []
+    if unread_leads:
+        user_parts.append(unread_leads)
     user = "\n".join(user_parts)
 
     # Capture exactly what was sent to the DAIR model so the trace can be
@@ -1491,6 +1501,8 @@ def dair_assess(
         result["server_filtered_challenges"] = _filtered_challenges
     if candidate_pivots:
         result["candidate_pivots"] = candidate_pivots
+    if unread_items:
+        result["unread_outputs"] = unread_items[:40]
     if ioc_leads:
         # The same leads the director saw, so the agent can act on them.
         try:
