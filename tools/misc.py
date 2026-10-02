@@ -539,6 +539,54 @@ def srum_export(srudb_path: str, output_dir: str) -> dict:
 
 @mcp.tool()
 @output_safe
+def xlsx_export(xlsx_path: str, output_dir: str) -> dict:
+    """Excel workbook (.xlsx/.xlsm) -> one CSV per sheet, for read.output.
+
+    read.output cannot open a workbook, and a workbook on evidence is not
+    produced output. Cells keep Excel's cached values; date-formatted cells
+    become ISO timestamps. The workbook is only read.
+    """
+    import csv
+    from core.executor import _log_tool
+    from core.xlsx import read_workbook
+
+    assert_output_safe(output_dir)
+    wb = read_workbook(xlsx_path)
+    written, lines = [], []
+    if wb.get("success"):
+        os.makedirs(output_dir, exist_ok=True)
+        stem = re.sub(r"[^\w.-]+", "_", os.path.splitext(os.path.basename(xlsx_path))[0])
+        for i, sh in enumerate(wb["sheets"], 1):
+            name = re.sub(r"[^\w.-]+", "_", sh["name"]).strip("_") or f"sheet{i}"
+            out = os.path.join(output_dir, f"{stem}__{name}.csv")
+            width = max((len(r) for r in sh["rows"]), default=0)
+            with open(out, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                for r in sh["rows"]:
+                    w.writerow(r + [""] * (width - len(r)))
+            written.append({"sheet": sh["name"], "csv": out, "rows": len(sh["rows"]),
+                            "columns": width, **({"error": sh["error"]} if sh.get("error") else {})})
+            head = " | ".join(c for c in (sh["rows"][0] if sh["rows"] else []) if c)[:200]
+            lines.append(f"  {sh['name']}: {len(sh['rows'])} rows x {width} cols -> {out}"
+                         + (f"\n    first row: {head}" if head else ""))
+    ok = bool(wb.get("success")) and bool(written)
+    summary = (f"xlsx_export {xlsx_path}: {len(written)} sheet(s)\n" + "\n".join(lines)) if ok \
+        else ""
+    result = {"success": ok, "stdout": summary,
+              "stderr": "" if ok else (wb.get("error") or "workbook has no sheets"),
+              "exit_code": 0 if ok else 1, "truncated": False, "retries": 0,
+              "elapsed_seconds": 0.0,
+              "cmd": f"misc.xlsx_export {xlsx_path} -> {output_dir}"}
+    _log_tool(result)
+    return {"success": ok, "_trudi_call_id": result.get("_trudi_call_id"),
+            "error": None if ok else result["stderr"], "sheets": written,
+            "output_dir": output_dir, "summary": summary,
+            "hint": "Read each sheet CSV with read.output (query / where / columns) and cite "
+                    "that call; the first row is the sheet's own first row (often a header)."}
+
+
+@mcp.tool()
+@output_safe
 def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -> dict:
     """Export a chat/messenger sqlite store (Skype main.db, WhatsApp
     msgstore.db) to normalized CSVs — the comms channel the mail extractors

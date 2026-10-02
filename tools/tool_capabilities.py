@@ -175,13 +175,15 @@ _CAPABILITIES: list[dict] = [
         "phases": ["Triage", "Analyze", "Scan"],
         "evidence": ["file", "mounted_fs"],
         "purpose": ("Identify, hash, grep, inspect, and classify files or extracted "
-                    "payloads; detect/recover Acropalypse-cropped screenshots."),
+                    "payloads; detect/recover Acropalypse-cropped screenshots; export "
+                    "spreadsheets (xlsx_export) to CSV for read.output."),
         "tools": [
             "strings.stat_file",
             "strings.file_identify",
             "strings.grep",
             "strings.floss_extract",
             "strings.png_acropalypse",
+            "misc.xlsx_export",
             "hash.file",
             "hash.directory",
             "hash.verify_evidence_hash",
@@ -319,6 +321,7 @@ _EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
     "misc.chat_db_export": frozenset({"disk_image", "triage", "mobile"}),
     "misc.sqlite_recover": frozenset({"disk_image", "triage", "mobile"}),
     "strings.png_acropalypse": frozenset({"disk_image", "triage", "mobile"}),
+    "misc.xlsx_export": frozenset({"disk_image", "triage", "mobile"}),
     **{t: _WINDOWS_ARTIFACTS for t in (
         "misc.evtx_filter", "misc.evtx_dump", "misc.chainsaw_hunt", "misc.regripper_hive",
         "misc.usnparser_parse", "misc.analyzemft_parse", "misc.srum_export",
