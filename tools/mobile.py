@@ -8,11 +8,14 @@ code AND on output presence, decided before the trace entry is written, so the
 trace never records a run that produced nothing as a success. The produced
 files are read with read.output (JSON arrays are read record-per-row).
 
-Evidence stays read-only: the parsers only read the input tree. When the
-extraction hides the iOS version file ios_apt needs (a mode-000 system
-container), the run goes through a temporary SYMLINK overlay that points the
-expected SystemVersion.plist at the device's own LastBuildInfo.plist — nothing
-is copied or written into evidence, and the overlay is removed afterwards.
+Evidence stays read-only: no parser ever opens the input tree's SQLite stores.
+Each run goes through a temporary WORKING TREE (see _stage): every SQLite store
+and its -wal/-shm/-journal is a private copy (sqlite checkpoints a WAL into the
+main file and deletes the sidecars on close), everything else a symlink to the
+evidence. The traced cmd names the evidence path; the stage is removed
+afterwards. When the extraction hides the iOS version file ios_apt needs (a
+mode-000 system container), the stage's SystemVersion.plist is a symlink to
+the device's own LastBuildInfo.plist.
 """
 from __future__ import annotations
 
@@ -92,6 +95,89 @@ def _unreadable_dirs(root: str, seconds: float = 5.0) -> dict:
             break
     rel = [os.path.relpath(b, root) for b in bad]
     return {"count": len(rel), "sample": rel[:8], "walk_complete": complete}
+
+
+# ── working tree ─────────────────────────────────────────────────────────────
+#
+# Opening a WAL-mode SQLite store checkpoints the -wal into the main file and
+# deletes -wal/-shm on close: MVT run straight on an extraction rewrote ~60
+# evidence databases (Bogus Bill, 2026-09-24). Every parser therefore runs on a
+# staged tree: each SQLite store and its sidecars is a private writable COPY,
+# every other file a symlink to the evidence, every evidence symlink recreated
+# with its own target (so a relative link resolves inside the stage, never
+# back into evidence). Unlistable (mode-000) directories are linked as-is —
+# no parser can read them either way.
+
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
+
+
+def _is_sqlite(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(16) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def _stage(src: str) -> tuple[str, dict]:
+    """(stage_root, stats) — the parser's working tree for evidence `src`."""
+    src = os.path.realpath(src)
+    root = tempfile.mkdtemp(prefix="trudi-iosstage-")
+    copied, nbytes, links = 0, 0, 0
+    try:
+        for dp, dn, fn in os.walk(src):
+            rel = os.path.relpath(dp, src)
+            dst_dir = root if rel == "." else os.path.join(root, rel)
+            walk = []
+            for d in dn:
+                s, d_dst = os.path.join(dp, d), os.path.join(dst_dir, d)
+                if os.path.islink(s):
+                    os.symlink(os.readlink(s), d_dst)
+                elif not os.access(s, os.R_OK | os.X_OK):
+                    os.symlink(s, d_dst)
+                else:
+                    os.mkdir(d_dst)
+                    walk.append(d)
+                links += d not in walk
+            dn[:] = walk
+            for n in fn:
+                s, f_dst = os.path.join(dp, n), os.path.join(dst_dir, n)
+                if os.path.islink(s):
+                    os.symlink(os.readlink(s), f_dst)
+                    links += 1
+                elif n.endswith(_SQLITE_SIDECARS) or _is_sqlite(s):
+                    shutil.copy2(s, f_dst)
+                    os.chmod(f_dst, 0o644)
+                    copied += 1
+                    nbytes += os.path.getsize(f_dst)
+                else:
+                    os.symlink(s, f_dst)
+                    links += 1
+    except OSError:
+        _unstage(root)
+        raise
+    return root, {"sqlite_files_copied": copied, "sqlite_bytes_copied": nbytes,
+                  "symlinks": links}
+
+
+def _unstage(root: str) -> None:
+    """Remove a stage: unlink links and the stage's own copies, rmdir its dirs.
+    Never follows a link, so nothing under the evidence tree can be touched."""
+    for dp, dn, fn in os.walk(root, topdown=False):
+        for n in fn + dn:
+            p = os.path.join(dp, n)
+            if os.path.islink(p) or not os.path.isdir(p):
+                os.unlink(p)
+            else:
+                os.rmdir(p)
+    os.rmdir(root)
+
+
+def _cmd_names_evidence(result: dict, stage: str, src: str) -> None:
+    """The recorded cmd names the evidence tree, not the transient stage."""
+    if isinstance(result.get("cmd"), str):
+        result["cmd"] = result["cmd"].replace(stage, src)
 
 
 def _count_rows(path: str) -> int | None:
@@ -230,11 +316,13 @@ def _fresh(out_dir: str, rel: str, since: float) -> bool:
         return False
 
 
-def _mvt_classify(out_dir: str, holder: dict):
+def _mvt_classify(out_dir: str, holder: dict, stage: str = "", src: str = ""):
     import time
     since = time.time()
 
     def classify(result: dict, _stdout: str, _stderr: str) -> None:
+        if stage:
+            _cmd_names_evidence(result, stage, src)
         files, total = _inventory(out_dir)
         log_sum = _mvt_log_summary(out_dir)
         data = [f for f in files if f["file"].endswith(".json") and f["file"] != "info.json"]
@@ -257,7 +345,7 @@ def _mvt_classify(out_dir: str, holder: dict):
 
 
 def _mvt_result(r: dict, out_dir: str, holder: dict, input_path: str,
-                unreadable: dict | None) -> dict:
+                unreadable: dict | None, staged: dict | None = None) -> dict:
     files = holder.get("files") or []
     fams = _families(files)
     _annotate(r, **{f: True for f in fams})
@@ -277,6 +365,8 @@ def _mvt_result(r: dict, out_dir: str, holder: dict, input_path: str,
                  "are expected; module_errors lists modules that crashed on this iOS "
                  "version."),
     }
+    if staged:
+        extra["working_copy"] = staged
     if unreadable and unreadable.get("count"):
         extra["unreadable_dirs"] = unreadable
         extra["coverage_warning"] = (
@@ -307,15 +397,19 @@ def mvt_ios_check_fs(fs_path: str, output_dir: str, modules: str = "") -> dict:
     os.makedirs(output_dir, exist_ok=True)
     unreadable = _unreadable_dirs(fs_path)
     runs = []
-    for mod in (mods or [""]):
-        holder: dict = {}
-        cmd = [MVT_IOS, *_MVT_OFFLINE, "check-fs", "-o", output_dir]
-        if mod:
-            cmd += ["-m", mod]
-        cmd.append(fs_path)
-        r = run(cmd, timeout=MVT_FS_TIMEOUT, output_dir=output_dir,
-                classify=_mvt_classify(output_dir, holder))
-        runs.append(_mvt_result(r, output_dir, holder, fs_path, unreadable))
+    stage, staged = _stage(fs_path)
+    try:
+        for mod in (mods or [""]):
+            holder: dict = {}
+            cmd = [MVT_IOS, *_MVT_OFFLINE, "check-fs", "-o", output_dir]
+            if mod:
+                cmd += ["-m", mod]
+            cmd.append(stage)
+            r = run(cmd, timeout=MVT_FS_TIMEOUT, output_dir=output_dir,
+                    classify=_mvt_classify(output_dir, holder, stage, fs_path))
+            runs.append(_mvt_result(r, output_dir, holder, fs_path, unreadable, staged))
+    finally:
+        _unstage(stage)
     if len(runs) == 1:
         return runs[0]
     last = dict(runs[-1])
@@ -339,10 +433,14 @@ def mvt_ios_check_backup(backup_path: str, output_dir: str) -> dict:
         return missing
     os.makedirs(output_dir, exist_ok=True)
     holder: dict = {}
-    cmd = [MVT_IOS, *_MVT_OFFLINE, "check-backup", "-o", output_dir, backup_path]
-    r = run(cmd, timeout=MVT_BACKUP_TIMEOUT, output_dir=output_dir,
-            classify=_mvt_classify(output_dir, holder))
-    return _mvt_result(r, output_dir, holder, backup_path, None)
+    stage, staged = _stage(backup_path)
+    try:
+        cmd = [MVT_IOS, *_MVT_OFFLINE, "check-backup", "-o", output_dir, stage]
+        r = run(cmd, timeout=MVT_BACKUP_TIMEOUT, output_dir=output_dir,
+                classify=_mvt_classify(output_dir, holder, stage, backup_path))
+    finally:
+        _unstage(stage)
+    return _mvt_result(r, output_dir, holder, backup_path, None, staged)
 
 
 @mcp.tool()
@@ -363,6 +461,7 @@ def mvt_ios_decrypt_backup(backup_path: str, output_dir: str, password: str = ""
     if missing:
         return missing
     os.makedirs(output_dir, exist_ok=True)
+    stage, staged = _stage(backup_path)
     cmd = [MVT_IOS, *_MVT_OFFLINE, "decrypt-backup", "-d", output_dir]
     env = None
     if key_file:
@@ -371,9 +470,10 @@ def mvt_ios_decrypt_backup(backup_path: str, output_dir: str, password: str = ""
         # MVT reads MVT_IOS_BACKUP_PASSWORD when -p is absent: the secret never
         # reaches argv (ps) or the traced cmd.
         env = {**os.environ, "MVT_IOS_BACKUP_PASSWORD": password}
-    cmd.append(backup_path)
+    cmd.append(stage)
 
     def classify(result: dict, _stdout: str, _stderr: str) -> None:
+        _cmd_names_evidence(result, stage, backup_path)
         result["output_path"] = output_dir
         has_manifest = os.path.isfile(os.path.join(output_dir, "Manifest.db"))
         if result.get("success") and not has_manifest:
@@ -384,10 +484,14 @@ def mvt_ios_decrypt_backup(backup_path: str, output_dir: str, password: str = ""
             if password and isinstance(result.get(k), str):
                 result[k] = result[k].replace(password, "[REDACTED]")
 
-    r = run(cmd, timeout=MVT_DECRYPT_TIMEOUT, output_dir=output_dir, env=env,
-            classify=classify)
+    try:
+        r = run(cmd, timeout=MVT_DECRYPT_TIMEOUT, output_dir=output_dir, env=env,
+                classify=classify)
+    finally:
+        _unstage(stage)
     files, total = _inventory(output_dir)
     return _finish(r, {"output_dir": output_dir, "input_path": backup_path,
+                       "working_copy": staged,
                        "output_file_count": total,
                        "manifest_db": os.path.isfile(os.path.join(output_dir, "Manifest.db")),
                        "password_source": "env" if password else "key_file",
@@ -408,49 +512,42 @@ def _readable_file(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.R_OK)
 
 
-def _version_overlay(fs_path: str) -> tuple[str | None, str]:
-    """(overlay_root, note). overlay_root is None when ios_apt can read a version
-    file itself (no overlay needed) or when no substitute exists."""
+def _version_link(stage: str, fs_path: str) -> str:
+    """When the extraction hides the iOS version file ios_apt needs (a mode-000
+    system container), point the stage's SystemVersion.plist at the device's own
+    LastBuildInfo.plist. Returns a note ("" when no link was needed)."""
     if any(_readable_file(os.path.join(fs_path, v)) for v in _VERSION_FILES):
-        return None, ""
+        return ""
     src = os.path.join(fs_path, _LAST_BUILD_INFO)
     if not _readable_file(src):
-        return None, ("no readable iOS version file (SystemVersion.plist, IconsCache "
-                      "__system_version_info__, LastBuildInfo.plist)")
-    root = tempfile.mkdtemp(prefix="trudi-iosroot-")
+        return ("no readable iOS version file (SystemVersion.plist, IconsCache "
+                "__system_version_info__, LastBuildInfo.plist)")
     target = "System/Library/CoreServices/SystemVersion.plist".split("/")
-    cur_src, cur_dst = os.path.realpath(fs_path), root
+    cur = stage
     try:
         for depth, seg in enumerate(target):
-            try:
-                names = os.listdir(cur_src) if os.path.isdir(cur_src) else []
-            except OSError:
-                names = []
-            for n in names:                   # mirror siblings as symlinks
-                if n != seg:
-                    os.symlink(os.path.join(cur_src, n), os.path.join(cur_dst, n))
-            cur_src = os.path.join(cur_src, seg)
-            cur_dst = os.path.join(cur_dst, seg)
-            if depth < len(target) - 1:
-                os.mkdir(cur_dst)
-        os.symlink(os.path.realpath(src), cur_dst)
+            cur = os.path.join(cur, seg)
+            last = depth == len(target) - 1
+            if os.path.islink(cur):
+                # a staged link (unreadable dir / evidence symlink): replace it with
+                # a real dir whose listable children are mirrored as links
+                real = os.path.realpath(cur)
+                os.unlink(cur)
+                if last:
+                    break
+                os.mkdir(cur)
+                try:
+                    names = os.listdir(real) if os.path.isdir(real) else []
+                except OSError:
+                    names = []
+                for n in names:
+                    os.symlink(os.path.join(real, n), os.path.join(cur, n))
+            elif not last and not os.path.isdir(cur):
+                os.mkdir(cur)
+        os.symlink(os.path.realpath(src), cur)
     except OSError as e:
-        _remove_overlay(root)
-        return None, f"version overlay failed: {e}"
-    return root, f"SystemVersion.plist -> {_LAST_BUILD_INFO} (symlink overlay)"
-
-
-def _remove_overlay(root: str) -> None:
-    """Unlink the overlay's symlinks and rmdir its own dirs — never follows a
-    link, so nothing under the evidence tree can be touched."""
-    for dp, dn, fn in os.walk(root, topdown=False):
-        for n in fn + dn:
-            p = os.path.join(dp, n)
-            if os.path.islink(p):
-                os.unlink(p)
-            elif os.path.isdir(p):
-                os.rmdir(p)
-    os.rmdir(root)
+        return f"version link failed: {e}"
+    return f"SystemVersion.plist -> {_LAST_BUILD_INFO} (symlink in working copy)"
 
 
 _APT_RUNNING = re.compile(r"Running plugin (\w+)")
@@ -498,15 +595,14 @@ def ios_apt(fs_path: str, output_dir: str, plugins: str = "ALL") -> dict:
                 "valid": list(IOS_APT_PLUGINS) + ["ALL"]}
     os.makedirs(output_dir, exist_ok=True)
     unreadable = _unreadable_dirs(fs_path)
-    overlay, overlay_note = _version_overlay(fs_path)
-    in_root = overlay or fs_path
-    cmd = [IOS_APT_PYTHON, IOS_APT, "-i", in_root, "-o", output_dir, "-c", *wanted]
+    stage, staged = _stage(fs_path)
+    overlay_note = _version_link(stage, fs_path)
+    overlay = overlay_note.startswith("SystemVersion.plist")
+    cmd = [IOS_APT_PYTHON, IOS_APT, "-i", stage, "-o", output_dir, "-c", *wanted]
     holder: dict = {}
 
     def classify(result: dict, stdout: str, stderr: str) -> None:
-        if overlay:
-            # The recorded cmd names the evidence tree, not the transient overlay.
-            result["cmd"] = result["cmd"].replace(overlay, fs_path)
+        _cmd_names_evidence(result, stage, fs_path)
         result["output_path"] = output_dir
         files, total = _inventory(output_dir, skip_dirs=("Export",))
         log_sum = _apt_log_summary(output_dir)
@@ -527,15 +623,15 @@ def ios_apt(fs_path: str, output_dir: str, plugins: str = "ALL") -> dict:
     try:
         r = run(cmd, timeout=IOS_APT_TIMEOUT, output_dir=output_dir, classify=classify)
     finally:
-        if overlay:
-            _remove_overlay(overlay)
+        _unstage(stage)
     files = holder.get("files") or []
     fams = _families(files)
     _annotate(r, version_overlay=overlay_note if overlay else "",
               **{f: True for f in fams})
     rows = {f["file"]: f["rows"] for f in files if f["file"].endswith(".csv") and "rows" in f}
     extra = {
-        "output_dir": output_dir, "input_path": fs_path, "rows_by_csv": rows,
+        "output_dir": output_dir, "input_path": fs_path, "working_copy": staged,
+        "rows_by_csv": rows,
         "plugins_run": holder.get("plugins_run", []),
         "plugins_failed": holder.get("plugins_failed", []),
         "output_files": files[:_MAX_LISTED], "output_file_count": holder.get("total", 0),

@@ -115,9 +115,11 @@ class TestArgv:
         cmd = fake.calls[0].cmd
         assert cmd[0].endswith("mvt-ios")
         assert cmd[1:3] == ["--disable-update-check", "--disable-indicator-update-check"]
-        assert cmd[3] == "check-fs" and _flag(cmd, "-o") == out and cmd[-1] == str(ios_tree)
+        assert cmd[3] == "check-fs" and _flag(cmd, "-o") == out
+        assert cmd[-1] != str(ios_tree) and "trudi-iosstage-" in cmd[-1]   # a working copy
         assert "-m" not in cmd
         assert r["success"] is True and r["_trudi_call_id"]
+        assert _entry(live_log, r["_trudi_call_id"])["cmd"].endswith(str(ios_tree))
 
     def test_check_fs_one_run_per_module(self, live_log, ios_tree, tmp_path):
         from tools.mobile import mvt_ios_check_fs
@@ -144,7 +146,8 @@ class TestArgv:
         with patch("core.executor.subprocess.run", fake):
             _tool(mvt_ios_check_backup)(str(backup), out)
         cmd = fake.calls[0].cmd
-        assert "check-backup" in cmd and _flag(cmd, "-o") == out and cmd[-1] == str(backup)
+        assert "check-backup" in cmd and _flag(cmd, "-o") == out
+        assert "trudi-iosstage-" in cmd[-1]
         assert "--disable-update-check" in cmd
 
     def test_ios_apt_argv_plugins_uppercased(self, live_log, ios_tree, tmp_path):
@@ -157,7 +160,7 @@ class TestArgv:
             r = _tool(ios_apt)(str(ios_tree), out, plugins="wifi, safari")
         cmd = fake.calls[0].cmd
         assert cmd[:2] == [IOS_APT_PYTHON, IOS_APT]
-        assert _flag(cmd, "-i") == str(ios_tree) and _flag(cmd, "-o") == out
+        assert "trudi-iosstage-" in _flag(cmd, "-i") and _flag(cmd, "-o") == out
         assert cmd[cmd.index("-c") + 1:] == ["WIFI", "SAFARI"]
         assert r["success"] is True and "version_source" not in r
 
@@ -315,8 +318,8 @@ class TestSuccessDetection:
 
     def test_ios_apt_version_overlay(self, live_log, ios_tree, tmp_path):
         """No readable SystemVersion.plist but a LastBuildInfo.plist: ios_apt runs
-        on a symlink overlay; the traced cmd names the evidence root; the overlay
-        is removed and the evidence tree is untouched."""
+        on the working copy with a version symlink; the traced cmd names the
+        evidence root; the stage is removed and the evidence tree is untouched."""
         from tools.mobile import ios_apt, _LAST_BUILD_INFO
         lbi = ios_tree / _LAST_BUILD_INFO
         lbi.parent.mkdir(parents=True)
@@ -329,15 +332,15 @@ class TestSuccessDetection:
             seen["root"] = root
             sv = os.path.join(root, "System/Library/CoreServices/SystemVersion.plist")
             seen["version"] = open(sv).read()
-            seen["private"] = os.path.realpath(os.path.join(root, "private"))
+            seen["lbi"] = os.path.realpath(os.path.join(root, _LAST_BUILD_INFO))
             _apt_writer()(cmd, env)
 
         with patch("core.executor.subprocess.run", FakeProc(writer)):
             r = _tool(ios_apt)(str(ios_tree), str(tmp_path / "analysis" / "apt"))
         assert r["success"] is True
         assert seen["root"] != str(ios_tree) and seen["version"] == "<plist>16.3</plist>"
-        assert seen["private"] == os.path.realpath(ios_tree / "private")
-        assert not os.path.exists(seen["root"])                    # overlay removed
+        assert seen["lbi"] == os.path.realpath(lbi)                  # plain files link to evidence
+        assert not os.path.exists(seen["root"])                    # stage removed
         assert sorted(str(p) for p in ios_tree.rglob("*")) == before   # evidence untouched
         e = _entry(live_log, r["_trudi_call_id"])
         assert seen["root"] not in e["cmd"] and str(ios_tree) in e["cmd"]
@@ -465,3 +468,130 @@ class TestReadJsonRecords:
         arr = tmp_path / "arr.json"
         arr.write_text(json.dumps([{"x": 1}, {"x": 2}, {"x": 3}], indent=4))
         assert _file_inventory(str(arr))["total_rows"] == 3
+
+
+# ── evidence integrity: parsers only ever see a working copy ─────────────────
+
+def _wal_store(dest_dir, name="sms.db"):
+    """A WAL-mode SQLite store whose newest row lives only in the -wal (as on a
+    seized phone). Opening it with sqlite merges the WAL and deletes the sidecars."""
+    import shutil
+    import sqlite3
+    import tempfile
+    work = tempfile.mkdtemp()
+    src = os.path.join(work, name)
+    con = sqlite3.connect(src)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+    con.execute("CREATE TABLE message (text TEXT)")
+    con.commit()
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    con.execute("INSERT INTO message VALUES ('only-in-wal')")
+    con.commit()
+    os.makedirs(dest_dir, exist_ok=True)
+    for sfx in ("", "-wal", "-shm"):
+        shutil.copyfile(src + sfx, os.path.join(dest_dir, name + sfx))
+    con.close()
+    shutil.rmtree(work)
+    return os.path.join(dest_dir, name)
+
+
+def _snapshot(root):
+    import hashlib
+    snap = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink():
+            snap[str(p)] = ("link", os.readlink(p))
+        elif p.is_file():
+            snap[str(p)] = hashlib.sha256(p.read_bytes()).hexdigest()
+        else:
+            snap[str(p)] = "dir"
+    return snap
+
+
+def _sqlite_opening_writer(seen, then):
+    """A parser that opens every SQLite store under its input with sqlite3 (the
+    WAL merge + sidecar delete that rewrote evidence on 2026-09-24), follows the
+    tree's relative symlink, then writes its normal output."""
+    import sqlite3
+
+    def w(cmd, env):
+        root = _flag(cmd, "-i") if "-i" in cmd else cmd[-1]
+        seen["root"] = root
+        for dp, _dn, fn in os.walk(root):
+            for n in fn:
+                if n.endswith(".db"):
+                    con = sqlite3.connect(os.path.join(dp, n))
+                    seen.setdefault("rows", []).extend(
+                        r[0] for r in con.execute("SELECT text FROM message"))
+                    con.close()
+        link = os.path.join(root, "var")
+        if os.path.lexists(link):
+            seen["var"] = os.path.realpath(link)
+        then(cmd, env)
+    return w
+
+
+class TestEvidenceIntegrity:
+    @pytest.fixture
+    def phone(self, ios_tree):
+        db = _wal_store(str(ios_tree / "private" / "var" / "mobile" / "Library" / "SMS"))
+        (ios_tree / "private" / "var" / "mobile" / "Library" / "notes.txt").write_text("plain")
+        os.symlink("private/var", ios_tree / "var")              # as in a real iOS root
+        return db
+
+    @pytest.mark.parametrize("tool", ["check_fs", "check_backup", "ios_apt"])
+    def test_sqlite_open_never_touches_evidence(self, live_log, ios_tree, phone, tmp_path, tool):
+        from tools import mobile
+        fn, writer = {
+            "check_fs": (mobile.mvt_ios_check_fs, _mvt_writer()),
+            "check_backup": (mobile.mvt_ios_check_backup, _mvt_writer()),
+            "ios_apt": (mobile.ios_apt, _apt_writer()),
+        }[tool]
+        before = _snapshot(ios_tree)
+        seen = {}
+        with patch("core.executor.subprocess.run", FakeProc(_sqlite_opening_writer(seen, writer))):
+            r = _tool(fn)(str(ios_tree), str(tmp_path / "analysis" / tool))
+        assert r["success"] is True
+        assert _snapshot(ios_tree) == before                         # byte-identical, sidecars kept
+        assert os.path.exists(phone + "-wal") and os.path.exists(phone + "-shm")
+        assert seen["rows"] == ["only-in-wal"]                       # the copy kept the WAL rows
+        assert seen["root"] != str(ios_tree)
+        assert seen["var"].startswith(seen["root"])                  # relative link stays in stage
+        assert not os.path.exists(seen["root"])                      # stage removed
+        assert r["working_copy"]["sqlite_files_copied"] == 3
+        assert seen["root"] not in _entry(live_log, r["_trudi_call_id"])["cmd"]
+
+    def test_decrypt_backup_runs_on_working_copy(self, live_log, tmp_path):
+        from tools.mobile import mvt_ios_decrypt_backup
+        backup = tmp_path / "evidence" / "backup"
+        _wal_store(str(backup), "Manifest.db")
+        before = _snapshot(backup)
+        seen = {}
+
+        def writer(cmd, env):
+            seen["root"] = cmd[-1]
+            open(os.path.join(_flag(cmd, "-d"), "Manifest.db"), "w").close()
+
+        with patch("core.executor.subprocess.run",
+                   FakeProc(_sqlite_opening_writer(seen, writer))):
+            r = _tool(mvt_ios_decrypt_backup)(str(backup), str(tmp_path / "analysis" / "d"),
+                                               password="pw")
+        assert r["success"] is True and seen["rows"] == ["only-in-wal"]
+        assert _snapshot(backup) == before and not os.path.exists(seen["root"])
+        assert str(backup) in _entry(live_log, r["_trudi_call_id"])["cmd"]
+
+    def test_stage_removed_when_parser_fails(self, live_log, ios_tree, phone, tmp_path):
+        from tools.mobile import mvt_ios_check_fs
+        seen = {}
+
+        def boom(cmd, env):
+            seen["root"] = cmd[-1]
+            raise OSError("parser crashed")
+
+        with patch("core.executor.subprocess.run", FakeProc(boom)):
+            try:
+                _tool(mvt_ios_check_fs)(str(ios_tree), str(tmp_path / "analysis" / "m"))
+            except OSError:
+                pass
+        assert seen["root"] and not os.path.exists(seen["root"])
