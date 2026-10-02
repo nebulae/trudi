@@ -62,6 +62,9 @@ MANIFESTS: dict = {
             ("device_inventory", _rx(r"device_install_inventory"),
              "a complete device-install inventory from setupapi.dev.log "
              "(misc.device_install_inventory) — enumerate every device, don't grep"),
+            ("usb_registry", _rx(r"rip\.pl usb|usbdeviceforensics|enum\\usb"),
+             "the SYSTEM hive's Enum\\USB / Enum\\USBSTOR history, merged into "
+             "misc.device_install_inventory (setupapi.dev.log rotates and can be cleared)"),
             ("scheduled_tasks", _rx(r"parse_scheduled_tasks|scheduled_task|taskcache|[\\/]Tasks[\\/]"),
              "scheduled tasks / autoruns — a keystroke injector commonly plants a "
              "hidden task (\Windows\System32\Tasks, no 4698 event when auditing is off)"),

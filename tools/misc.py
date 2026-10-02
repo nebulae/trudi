@@ -659,9 +659,53 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
     }
 
 
+def _archived_setupapi_logs(log_path: str) -> list:
+    """Rotated setupapi.dev.YYYYMMDD_hhmmss.log files beside the live log."""
+    import glob
+    d = os.path.dirname(log_path) or "."
+    live = os.path.basename(log_path).lower()
+    return sorted(p for p in glob.glob(os.path.join(d, "*"))
+                  if re.fullmatch(r"setupapi\.dev\.\d{8}_\d{6}\.log", os.path.basename(p).lower())
+                  and os.path.basename(p).lower() != live)
+
+
+def _system_hive_beside(log_path: str) -> Optional[str]:
+    """<Windows>/System32/config/SYSTEM for a <Windows>/INF/setupapi.dev.log,
+    matched case-insensitively (mounted NTFS keeps the on-disk case)."""
+    inf = os.path.dirname(os.path.abspath(log_path))
+    win = os.path.dirname(inf)
+    cur = win
+    for seg in ("system32", "config", "system"):
+        try:
+            hit = next((n for n in os.listdir(cur) if n.lower() == seg), None)
+        except OSError:
+            return None
+        if not hit:
+            return None
+        cur = os.path.join(cur, hit)
+    return cur if os.path.isfile(cur) else None
+
+
+def _regripper_usb(hive: str) -> tuple:
+    """(text, error) — RegRipper usb + usbstor plugin output for a SYSTEM hive."""
+    import subprocess
+    out = []
+    for plugin in ("usb", "usbstor"):
+        try:
+            p = subprocess.run(["/usr/local/bin/rip.pl", "-r", hive, "-p", plugin],
+                               capture_output=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "", f"rip.pl -p {plugin}: {exc}"
+        if p.returncode != 0:
+            return "", f"rip.pl -p {plugin} exit {p.returncode}: {p.stderr.decode(errors='replace')[:200]}"
+        out.append(p.stdout.decode(errors="replace"))
+    return "\n".join(out), ""
+
+
 @mcp.tool()
 @output_safe
-def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] = None) -> dict:
+def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] = None,
+                             system_hive_path: Optional[str] = None) -> dict:
     """COMPLETE structured inventory of every device from the Windows device-install
     log (setupapi.dev.log) — the BadUSB / removable-media ingress lens.
 
@@ -675,22 +719,54 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
     negative or an 'interactive human authorship' finding must be grounded on
     (enforced by the broad attribution / completeness gates).
 
+    The install log rotates and can be cleared, so it is NOT a complete device
+    history on its own: archived setupapi.dev.*.log rotations beside it are
+    parsed too, and the SYSTEM hive's Enum\\USB / Enum\\USBSTOR keys (RegRipper
+    usb/usbstor) are merged in. A device the registry holds but no install log
+    mentions is listed as REGISTRY-ONLY.
+
     setupapi_log_path: path to setupapi.dev.log on the mounted image / triage set.
     output_path: optional CSV of the FULL inventory (must be under analysis/ etc.).
+    system_hive_path: SYSTEM hive; default <Windows>/System32/config/SYSTEM derived
+        from the log path.
     """
     from core.executor import _log_tool
-    from core.device_inventory import parse_device_install_log
+    from core.device_inventory import (merge_registry_devices, parse_device_install_logs,
+                                       parse_registry_usb)
 
     if output_path:
         assert_output_safe(output_path)
 
-    inv = parse_device_install_log(setupapi_log_path)
+    logs = [setupapi_log_path] + _archived_setupapi_logs(setupapi_log_path)
+    inv = parse_device_install_logs(logs)
+    hive = system_hive_path or _system_hive_beside(setupapi_log_path)
+    registry_checked, registry_error = False, ""
+    if inv.get("success") and hive:
+        rr_text, registry_error = _regripper_usb(hive)
+        if not registry_error:
+            merge_registry_devices(inv, parse_registry_usb(rr_text))
+            registry_checked = True
+    elif inv.get("success"):
+        registry_error = "SYSTEM hive not found beside the log; pass system_hive_path"
     cov = inv.get("coverage_window")
     flagged = inv.get("flagged", [])
+    registry_only = inv.get("registry_only", [])
 
     # Summary — flagged devices FIRST so they're unmissable even if the client
     # truncates the result display.
     lines = []
+    if registry_only:
+        lines.append(f"⚠ {len(registry_only)} device(s) in the SYSTEM hive USB history are "
+                     f"ABSENT from setupapi — the install log is NOT a complete device history:")
+        for d in registry_only:
+            ident = (f"VID_{d['vid'].upper()}&PID_{d['pid'].upper()}" if d.get("vid")
+                     else f"Ven_{d.get('vendor')}&Prod_{d.get('product')}")
+            lines.append(f"  {d.get('device_class')} {ident} interfaces="
+                         f"{','.join(d.get('interfaces') or []) or '-'} "
+                         f"key LastWrite {d.get('registry_last_write')}")
+    if not registry_checked and inv.get("success"):
+        lines.append(f"⚠ registry USB history NOT checked ({registry_error}) — the inventory "
+                     f"covers the install log only")
     if flagged:
         lines.append(f"⚠ {len(flagged)} FLAGGED device(s):")
         for d in flagged:
@@ -709,12 +785,14 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
             with open(output_path, "w", newline="", encoding="utf-8") as fh:
                 w = csv.writer(fh)
                 w.writerow(["first_seen", "last_seen", "device_class", "vendor",
-                            "product", "vid", "pid", "interfaces", "actions", "flagged"])
+                            "product", "vid", "pid", "interfaces", "actions", "flagged",
+                            "sources", "registry_last_write"])
                 for d in inv.get("devices", []):
                     w.writerow([d.get("first_seen"), d.get("last_seen"), d.get("device_class"),
                                 d.get("vendor"), d.get("product"), d.get("vid"), d.get("pid"),
                                 "|".join(d.get("interfaces", [])), "|".join(d.get("actions", [])),
-                                "YES" if d.get("identity") in flag_ids else ""])
+                                "YES" if d.get("identity") in flag_ids else "",
+                                "|".join(d.get("sources", [])), d.get("registry_last_write", "")])
         except OSError:
             pass
 
@@ -724,7 +802,8 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
               "stderr": inv.get("error", "") if not inv.get("success") else "",
               "exit_code": 0 if inv.get("success") else 1, "truncated": False,
               "retries": 0, "elapsed_seconds": 0.0,
-              "cmd": f"misc.device_install_inventory {setupapi_log_path}"}
+              "cmd": f"misc.device_install_inventory {setupapi_log_path}"
+                     + (f" + rip.pl usb/usbstor {hive}" if registry_checked else "")}
     _log_tool(result)
     cid = result.get("_trudi_call_id")
     if cid and inv.get("success"):
@@ -736,6 +815,10 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
                 coverage_window=cov,
                 device_count=inv.get("device_count"),
                 flagged_count=len(flagged),
+                registry_checked=registry_checked,
+                registry_only=[f"{d['vid']}:{d['pid']}" if d.get("vid")
+                               else f"{d.get('vendor')}:{d.get('product')}"
+                               for d in registry_only],
             )
         except Exception:
             pass
@@ -748,6 +831,9 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
         "event_count": inv.get("event_count", 0),
         "coverage_window": cov,
         "flagged": flagged,
+        "registry_checked": registry_checked,
+        "registry_only": registry_only,
+        "logs_parsed": inv.get("logs_parsed", []),
         "devices": inv.get("devices", []),
         "summary": summary,
         "output_path": output_path,
