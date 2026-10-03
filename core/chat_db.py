@@ -1,16 +1,14 @@
-"""Read-only chat/messenger sqlite parsers (Skype main.db, WhatsApp msgstore.db).
+"""Read-only chat/messenger sqlite parsers (Skype main.db, WhatsApp msgstore.db,
+Telegram iOS Postbox db_sqlite — see core/telegram_postbox.py).
 
-First direct-sqlite code in the repo — the access contract matters because the
-source db usually lives on a read-only evidence mount:
+The access contract matters because the source db lives on evidence:
 
-* Open with ``file:<path>?mode=ro&immutable=1`` (uri=True). Plain ``mode=ro``
-  still attempts ``-wal``/``-shm`` sidecar access, which fails (or worse, tries
-  to create files) on a read-only mount; ``immutable=1`` promises sqlite the
-  file cannot change, so no sidecars are touched and no locks are taken.
-* Immutable mode will NOT see frames in an uncheckpointed ``-wal`` sibling. A
-  frozen forensic image is normally checkpointed; when a ``-wal`` file exists
-  next to the db we surface ``wal_present: True`` + a warning, never a silent
-  partial read.
+* The evidence file is NEVER opened by sqlite. Opening a WAL database in place
+  checkpoints the WAL into the main file and deletes the sidecars (this once
+  destroyed ~60 evidence DBs). ``parse_chat_db`` copies the db plus its
+  ``-wal``/``-shm``/``-journal`` sidecars to a private tempdir, parses the copy
+  (so uncheckpointed WAL frames are replayed into the copy only), and checks
+  the source sha256 before/after.
 * Column selection is PRAGMA table_info-driven — chat schemas vary by app
   version; missing columns degrade to empty fields with ``partial: True``,
   never a hard failure.
@@ -24,17 +22,10 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timezone
-from urllib.request import pathname2url
 
 _TAG_RE = re.compile(r"<[^>]+>")
 
 _BODY_CAP = 4000
-
-
-def open_ro(db_path: str) -> sqlite3.Connection:
-    """Open a sqlite db strictly read-only: no -wal/-shm sidecars, no locks."""
-    uri = f"file:{pathname2url(os.path.abspath(db_path))}?mode=ro&immutable=1"
-    return sqlite3.connect(uri, uri=True)
 
 
 def _utc(ts) -> str:
@@ -211,23 +202,69 @@ def parse_whatsapp(conn) -> dict:
             "coverage_window": cov}
 
 
+_SIDECARS = ("-wal", "-shm", "-journal")
+
+
+def _sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def parse_chat_db(db_path: str, chat_app: str = "auto") -> dict:
-    """Top-level entry: open read-only, detect schema, parse. Structured error
-    (never an exception) on missing/corrupt/unsupported dbs."""
-    if not os.path.exists(db_path):
+    """Top-level entry: copy the store (+ -wal/-shm sidecars) to a private
+    tempdir, open ONLY the copy, detect schema, parse. The evidence file is
+    never opened by sqlite (opening a WAL db in place checkpoints and deletes
+    its sidecars); its sha256 is checked before/after. Structured error (never
+    an exception) on missing/corrupt/unsupported dbs."""
+    import shutil
+    import tempfile
+    if not os.path.isfile(db_path):
         return {"success": False, "error": f"db not found: {db_path}"}
     wal = os.path.exists(db_path + "-wal")
+    before = _sha256(db_path)
+    work = tempfile.mkdtemp(prefix="trudi_chatdb_")
     try:
-        conn = open_ro(db_path)
+        copy = os.path.join(work, "store.db")
+        shutil.copyfile(db_path, copy)
+        for sfx in _SIDECARS:
+            if os.path.isfile(db_path + sfx):
+                shutil.copyfile(db_path + sfx, copy + sfx)
+        out = _parse_copy(copy, chat_app, wal)
+    except OSError as e:
+        out = {"success": False, "wal_present": wal, "error": f"cannot copy db: {e}"}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    out["source_sha256"] = before
+    out["source_unchanged"] = _sha256(db_path) == before
+    if not out["source_unchanged"]:
+        out["success"] = False
+        out["error"] = "source db hash changed during export"
+    return out
+
+
+def _parse_copy(copy: str, chat_app: str, wal: bool) -> dict:
+    try:
+        # The private copy is opened normally so a copied -wal is replayed.
+        conn = sqlite3.connect(copy)
     except sqlite3.Error as e:
         return {"success": False, "wal_present": wal,
-                "error": f"cannot open db read-only: {e}"}
+                "error": f"cannot open db copy: {e}"}
     try:
-        app = chat_app if chat_app in ("skype", "whatsapp") else detect_schema(conn)
+        from core import telegram_postbox
+        if chat_app in ("skype", "whatsapp", "telegram"):
+            app = chat_app
+        else:
+            app = detect_schema(conn) or ("telegram" if telegram_postbox.is_postbox(conn) else "")
         if app == "skype":
             out = parse_skype(conn)
         elif app == "whatsapp":
             out = parse_whatsapp(conn)
+        elif app == "telegram":
+            out = telegram_postbox.parse_postbox(conn)
         else:
             return {"success": False, "wal_present": wal,
                     "error": ("unsupported chat schema — tables found: "
@@ -239,7 +276,8 @@ def parse_chat_db(db_path: str, chat_app: str = "auto") -> dict:
         conn.close()
     out["wal_present"] = wal
     if wal:
-        out["warning"] = ("-wal sibling present: immutable read-only mode cannot "
-                          "see uncheckpointed WAL frames; the most recent rows "
-                          "may be absent from this export")
+        w = ("-wal sibling present: parsed from a private copy with the WAL "
+             "replayed (uncheckpointed frames included); the evidence file was "
+             "not opened")
+        out["warning"] = f"{out['warning']}; {w}" if out.get("warning") else w
     return out

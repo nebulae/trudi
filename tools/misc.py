@@ -591,22 +591,20 @@ def xlsx_export(xlsx_path: str, output_dir: str) -> dict:
 @output_safe
 def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -> dict:
     """Export a chat/messenger sqlite store (Skype main.db, WhatsApp
-    msgstore.db) to normalized CSVs — the comms channel the mail extractors
-    (readpst/pff_export) do not cover, and a first-class exfil channel
-    (message bodies AND the Transfers file-transfer trail).
+    msgstore.db, Telegram iOS postbox db_sqlite) to normalized CSVs — the
+    comms channel the mail extractors do not cover, and an exfil channel.
 
     ENUMERATE, DON'T SEARCH: the whole Messages/Transfers tables are exported
-    (one row each), plus a participants roster, so a correspondent or file
-    transfer cannot be missed by grepping the wrong string. The db is opened
-    STRICTLY read-only (sqlite immutable URI — no -wal/-shm sidecars, no
-    locks), safe against read-only evidence mounts; an uncheckpointed -wal
-    sibling is surfaced as a warning.
+    (one row each), plus a participants roster (Telegram: usernames, names,
+    phones, peer type), so a correspondent or file transfer cannot be missed.
+    The store is parsed from a private copy (db + -wal/-shm, WAL replayed in
+    the copy); the evidence file is never opened by sqlite and its hash is
+    checked before/after.
 
-    db_path:   the store on the mounted image (e.g. .../AppData/Roaming/Skype/
-               <account>/main.db). Read-only.
+    db_path:   the store on the mounted image / extraction. Read-only.
     output_dir: CSV destination (default ./exports/chat/); must be under
                analysis/exports/reports.
-    chat_app:  auto | skype | whatsapp.
+    chat_app:  auto | skype | whatsapp | telegram.
 
     Read the produced CSVs with read.output. Returns _trudi_call_id for
     record_finding; participants are annotated onto the trace entry so
@@ -619,11 +617,14 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
     out_dir = output_dir or os.path.join(".", "exports", "chat")
     assert_output_safe(out_dir)
 
+    from tools import _parsed_outputs
+    t0 = _parsed_outputs.now()
     parsed = parse_chat_db(db_path, chat_app=chat_app)
     output_paths: dict = {}
     if parsed.get("success"):
         try:
             os.makedirs(out_dir, exist_ok=True)
+            fields = parsed.get("fields") or {}  # app-specific (Telegram) columns
             specs = (
                 ("messages.csv", parsed.get("messages", []),
                  ["ts_utc", "author", "author_display", "chat", "partner", "body"]),
@@ -631,10 +632,12 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                  ["start_utc", "finish_utc", "partner", "partner_display",
                   "filename", "filesize", "status"]),
                 ("participants.csv",
-                 [{"participant": p} for p in parsed.get("participants", [])],
+                 parsed.get("participant_rows")
+                 or [{"participant": p} for p in parsed.get("participants", [])],
                  ["participant"]),
             )
             for name, rows, header in specs:
+                header = fields.get(name) or header
                 p = os.path.join(out_dir, name)
                 with open(p, "w", newline="", encoding="utf-8") as fh:
                     w = _csv.DictWriter(fh, fieldnames=header)
@@ -652,6 +655,12 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                    f"{parsed.get('transfer_count', 0)} file transfers, "
                    f"{len(parts)} participants, coverage "
                    f"{(cov or {}).get('start', '?')} -> {(cov or {}).get('end', '?')}")
+        if parsed.get("app") == "telegram":
+            unames = sorted({r.get("username") for r in parsed.get("participant_rows") or []
+                             if r.get("username")})
+            summary += (f"\npeers: {parsed.get('peer_count', 0)}; usernames: "
+                        + (", ".join("@" + u for u in unames[:60]) or "none")
+                        + f"\npostbox tables: {parsed.get('postbox_tables')}")
         if parsed.get("warning"):
             summary += f"\n⚠ {parsed['warning']}"
     else:
@@ -690,6 +699,7 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
             )
         except Exception:
             pass
+    _parsed_outputs.stamp(result, out_dir, t0)
 
     return {
         "success": parsed.get("success", False),
@@ -699,6 +709,8 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
         "app": parsed.get("app"),
         "partial": parsed.get("partial", False),
         "wal_present": parsed.get("wal_present", False),
+        "source_sha256": parsed.get("source_sha256"),
+        "source_unchanged": parsed.get("source_unchanged"),
         "message_count": parsed.get("message_count", 0),
         "transfer_count": parsed.get("transfer_count", 0),
         "participant_count": len(parts),
