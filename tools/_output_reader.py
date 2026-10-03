@@ -366,6 +366,11 @@ def _scan_lines(path: str, terms: list[str], budget: int) -> ScanResult:
     head, head_len = [], 0
     scanned = 0
     records = _json_record_lines(path)
+    # Only a delimited FILE has a header line. A stdout sidecar (.txt) whose
+    # first line holds a comma is data: a one-line JSON result (every enrich.*
+    # lookup) was taken as a header and scanned as 0 rows, so the reviewer
+    # judged a correct finding unsupported.
+    has_header = records is None and path.lower().endswith(_DELIMITED_EXTS)
     try:
         with (open(path, "r", errors="replace") if records is None
               else _nullctx(records)) as fh:
@@ -375,7 +380,7 @@ def _scan_lines(path: str, terms: list[str], budget: int) -> ScanResult:
                     res._note_trunc("scan_cap")
                     break
                 s = ln.rstrip("\n")
-                if i == 0 and records is None and ("," in s or "\t" in s):
+                if i == 0 and has_header and ("," in s or "\t" in s):
                     header = s
                     delim = "\t" if ("\t" in s and s.count("\t") >= s.count(",")) else ","
                     continue

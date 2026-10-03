@@ -123,6 +123,19 @@ class TestReader:
         assert r2.matched_rows == 40
         assert all(len(ln) <= OR._ROW_CHARS + 20 for ln in r2.body.splitlines())  # per-row cap
 
+    def test_stdout_sidecar_first_line_is_data_not_a_header(self, tmp_path):
+        # A one-line enrich.* result (JSON object, commas included) stored as a
+        # .txt sidecar: it is a row, not a CSV header. Nitroba run 2 had the
+        # reviewer told "0 rows scanned" and a correct finding retracted.
+        side = tmp_path / "163.txt"
+        side.write_text('{"success": true, "ip": "140.247.62.34", "asn": 1742, '
+                        '"as_owner": "Harvard University"}')
+        r = OR.read_relevant_stats(str(side), ["harvard", "1742"], 4000)
+        assert r.total_rows == 1 and r.matched_rows == 1 and "Harvard" in r.body
+        multi = tmp_path / "ngrep.txt"
+        multi.write_text("T 1.2.3.4:80 -> 5.6.7.8:80, Host: a.example\nT x\n")
+        assert OR.read_relevant_stats(str(multi), ["a.example"], 4000).matched_rows == 1
+
     def test_column_projection_via_stats(self, pull_env):
         r = OR.read_relevant_stats(str(pull_env["csv"]), ["4720"], 4000,
                                    columns=["TimeCreated", "EventId", "PayloadData1"])
