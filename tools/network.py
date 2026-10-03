@@ -660,10 +660,11 @@ def tcpxtract_streams(
     import os
     os.makedirs(output_dir, exist_ok=True)
     cmd = ["tcpxtract", "-f", pcap_file, "-o", output_dir]
-    # Carve-class BACKGROUND JOB: a full-pcap carve runs 30+ minutes and must
-    # not block the driver's turn (or invite a client-side cancellation). The
-    # job runs detached with an 1800s hard budget; carved files appear in
-    # output_dir incrementally and survive a timeout as usable partials.
+    # Carve-class BACKGROUND JOB. tcpxtract signature-carves every session and
+    # does not converge on a busy capture: a 45 MB PCAP gave 6,666 fragments in
+    # 5 min and was still going at the 30-min budget, then counted as a FAILED
+    # tool needing closure. A 600 s budget; files carved by then are a
+    # truncated success (partial_ok), never grounds for an absence claim.
     from core.jobs import start_job
-    return start_job(cmd, tool="net.tcpxtract_streams", timeout=1800,
-                     output_dir=output_dir, needs_sudo=True)
+    return start_job(cmd, tool="net.tcpxtract_streams", timeout=600,
+                     output_dir=output_dir, needs_sudo=True, partial_ok=True)

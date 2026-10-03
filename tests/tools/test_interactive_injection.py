@@ -25,6 +25,7 @@ _INVENTORY_CLEAN = {
     "device_install_inventory": True,
     "coverage_window": {"start": "2021-01-02 07:08:52", "end": "2021-12-31 06:05:50"},
     "device_count": 80, "flagged_count": 0,
+    "registry_checked": True, "registry_only": [],
 }
 # Same inventory, but it flagged a keystroke-injector (a composite HID+storage device).
 _INVENTORY_FLAGGED = {**_INVENTORY_CLEAN, "call_id": 4243, "flagged_count": 1}
@@ -251,4 +252,51 @@ class TestDeviceInitialAccessManifest:
         ctx.idx.dispositions = {("source", "device_inventory"): [
             {"type": "disposition", "call_id": 7, "target_kind": "source",
              "target_id": "device_inventory", "reason": "absent_from_evidence"}]}
+        assert nc.check(ctx) is None
+
+
+class TestDeviceNegativeRegistryHistory:
+    """setupapi.dev.log rotates and can be cleared: Bogus Bill's install log held 7
+    virtual devices while SYSTEM Enum\\USB held the HP printer (VID_03F0&PID_042A),
+    and a "no printer on this laptop" negative was recorded over the log alone."""
+
+    _PRINTER_ONLY_IN_REGISTRY = {**_INVENTORY_CLEAN, "call_id": 4250,
+                                 "registry_only": ["03f0:042a"]}
+
+    def test_inventory_without_registry_history_refused(self):
+        legacy = {k: v for k, v in _INVENTORY_CLEAN.items()
+                  if k not in ("registry_checked", "registry_only")}
+        out = nc.check(_ctx("No printer or USB device", tier="UNCONFIRMED",
+                            tool_calls=[legacy], claim=_NEG_DEVICE))
+        assert out is not None and out["missing_sources"] == ["usb_registry"]
+
+    def test_no_system_hive_settled_by_typed_disposition(self):
+        legacy = {k: v for k, v in _INVENTORY_CLEAN.items()
+                  if k not in ("registry_checked", "registry_only")}
+        ctx = _ctx("No printer or USB device", tier="UNCONFIRMED",
+                   tool_calls=[legacy], claim=_NEG_DEVICE)
+        ctx.idx.dispositions = {("source", "usb_registry"): [
+            {"type": "disposition", "call_id": 8, "target_kind": "source",
+             "target_id": "usb_registry", "reason": "absent_from_evidence"}]}
+        assert nc.check(ctx) is None
+
+    def test_registry_only_device_refuses_the_negative(self):
+        out = nc.check(_ctx("No printer or USB device", tier="UNCONFIRMED",
+                            tool_calls=[self._PRINTER_ONLY_IN_REGISTRY], claim=_NEG_DEVICE))
+        assert out is not None and out["registry_only_devices"] == ["03f0:042a"]
+        assert "absent from setupapi" in out["error"]
+
+    def test_registry_only_device_addressed_by_disposition(self):
+        ctx = _ctx("No BadUSB", tier="UNCONFIRMED",
+                   tool_calls=[self._PRINTER_ONLY_IN_REGISTRY], claim=_NEG_DEVICE)
+        ctx.idx.dispositions = {("device", "03f0:042a"): [
+            {"type": "disposition", "call_id": 9, "target_kind": "device",
+             "target_id": "03f0:042a", "reason": "ruled_out"}]}
+        assert nc.check(ctx) is None
+
+    def test_registry_only_device_addressed_by_finding_entity(self):
+        ctx = _ctx("No BadUSB", tier="UNCONFIRMED",
+                   tool_calls=[self._PRINTER_ONLY_IN_REGISTRY], claim=_NEG_DEVICE)
+        ctx.idx.by_type["finding"] = [{"type": "finding", "call_id": 10, "claim": {
+            "entities": ["VID_03F0&PID_042A", "HP LaserJet M1132"]}}]
         assert nc.check(ctx) is None

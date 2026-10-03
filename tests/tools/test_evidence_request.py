@@ -67,6 +67,29 @@ class TestGrammar:
         raw = 'EVIDENCE_REQUEST:\n```json\n[{"call_id": "x", "query": "q"}, {"call_id": 3, "query": ""}, {"call_id": 4, "query": "ok"}]\n```'
         assert R._parse_evidence_request(raw) == [{"call_id": 4, "query": "ok", "columns": []}]
 
+    def test_query_as_a_list_of_terms_is_joined_not_rejected(self):
+        # DeepSeek sent query as a list in 4 reviews across 3 cases; each failed
+        # the round as "Invalid evidence_request" and forced a retry.
+        from tools._llm_parse import validate_result
+        rb = {"schema_version": 1, "evidence_request": [
+            {"call_id": 192, "query": ["69.80.225.91", "wscale 3"], "columns": []},
+            {"call_id": "115", "query": "gausr"}]}
+        assert validate_result({"result_block": rb, "_raw": "RESULT:"},
+                               "reason_evaluate_finding") == ""
+        assert R._parse_evidence_request_items(rb["evidence_request"]) == [
+            {"call_id": 192, "query": "69.80.225.91 wscale 3", "columns": []},
+            {"call_id": 115, "query": "gausr", "columns": []}]
+        raw = 'EVIDENCE_REQUEST:\n[{"call_id": 9, "query": ["a b", "c"]}]'
+        assert R._parse_evidence_request(raw) == [{"call_id": 9, "query": "a b c", "columns": []}]
+
+    def test_unusable_request_still_invalid(self):
+        from tools._llm_parse import validate_result
+        for bad in ({"call_id": "x", "query": "q"}, {"call_id": 3, "query": [{"a": 1}]},
+                    {"call_id": True, "query": "q"}, {"call_id": 3, "query": []}):
+            rb = {"schema_version": 1, "evidence_request": [bad]}
+            assert validate_result({"result_block": rb, "_raw": "RESULT:"},
+                                   "reason_evaluate_finding") == "Invalid evidence_request", bad
+
     def test_marker_lost_in_thinking_fallback(self):
         # A thinking model may leave the header in <think> and emit only the
         # array — accept a bare array whose items all carry call_id + query.
@@ -122,6 +145,19 @@ class TestReader:
         r2 = OR.read_relevant_stats(str(pull_env["csv"]), ["4799"], 4000)
         assert r2.matched_rows == 40
         assert all(len(ln) <= OR._ROW_CHARS + 20 for ln in r2.body.splitlines())  # per-row cap
+
+    def test_stdout_sidecar_first_line_is_data_not_a_header(self, tmp_path):
+        # A one-line enrich.* result (JSON object, commas included) stored as a
+        # .txt sidecar: it is a row, not a CSV header. Nitroba run 2 had the
+        # reviewer told "0 rows scanned" and a correct finding retracted.
+        side = tmp_path / "163.txt"
+        side.write_text('{"success": true, "ip": "140.247.62.34", "asn": 1742, '
+                        '"as_owner": "Harvard University"}')
+        r = OR.read_relevant_stats(str(side), ["harvard", "1742"], 4000)
+        assert r.total_rows == 1 and r.matched_rows == 1 and "Harvard" in r.body
+        multi = tmp_path / "ngrep.txt"
+        multi.write_text("T 1.2.3.4:80 -> 5.6.7.8:80, Host: a.example\nT x\n")
+        assert OR.read_relevant_stats(str(multi), ["a.example"], 4000).matched_rows == 1
 
     def test_column_projection_via_stats(self, pull_env):
         r = OR.read_relevant_stats(str(pull_env["csv"]), ["4720"], 4000,

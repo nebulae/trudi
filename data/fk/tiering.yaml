@@ -157,8 +157,11 @@ classes:
     # kept for existing traces). The tool-name keywords never appear in those
     # command lines, so match the recorded binary as well. New entries also
     # carry mcp_tool, matched against `mcp_tools` in _tiering.classify_entry.
-    cmd: 'strings_extract|strings_grep|^strings\s|^file\s|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.(read_)?output\b|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa'
-    mcp_tools: [strings.grep, strings.extract, strings.hexdump, strings.xxd_dump, tsk.icat, read.output]
+    # misc.sqlite_recover / strings.png_acropalypse read residual bytes of a
+    # file (deleted sqlite records, the uncropped tail of a screenshot): the
+    # same evidential weight as any other read of file content — no more.
+    cmd: 'strings_extract|strings_grep|^strings\s|^file\s|hexdump|\bxxd\b|\bicat\b|floss|exiftool|file_identify|read\.(read_)?output\b|blkcat|tsk_recover|densityscout|olevba|mraptor|pdf|pe_scanner|packerid|capa|sqlite_recover|png_acropalypse|xlsx_export'
+    mcp_tools: [strings.grep, strings.extract, strings.hexdump, strings.xxd_dump, tsk.icat, read.output, misc.sqlite_recover, strings.png_acropalypse, misc.xlsx_export]
     tools: [strings.grep, tsk.icat, read.output, misc.capa_analyze]
     label: file content read
   hash_match:
@@ -209,28 +212,55 @@ classes:
     cmd: 'fseventsd|\.logarchive|log show|unified log|\bplutil\b|\.plist\b|knowledgec\.db|quarantine'
     tools: [read.output on plists/KnowledgeC, strings.extract on fsevents]
     label: macOS system artifact
+  # iOS device parses (mobile.*). One call parses MANY stores, so the per-store
+  # classes are MARKERS stamped by the wrapper only for a produced file that
+  # holds >= 1 record (an empty module carries no class) — never by tool name.
+  # They mirror the Windows analogues' group roles: messaging ~ chat_store,
+  # browser/location ~ device-recorded timestamped activity, accounts ~ a
+  # documentary identity binding (Apple ID / configured accounts). A phone
+  # parse is not a logon/session artifact and joins no session/transfer group.
+  mobile_artifact:
+    cmd: 'mvt-ios\b.*\bcheck-(?:fs|backup)\b|ios_apt\.py'
+    tools: [mobile.mvt_ios_check_fs, mobile.ios_apt, mobile.mvt_ios_check_backup]
+    label: iOS device artifact parse (MVT / ios_apt)
+  mobile_messaging:
+    marker: mobile_messaging
+    tools: [mobile.mvt_ios_check_fs (SMS/WhatsApp/Calls/InteractionC/Contacts), mobile.mvt_ios_check_backup]
+    label: iOS messaging / call / contact record
+  mobile_browser:
+    marker: mobile_browser
+    tools: [mobile.mvt_ios_check_fs (Safari/WebKit/Chrome/Firefox), mobile.ios_apt SAFARI]
+    label: iOS browser history / state record
+  mobile_location:
+    marker: mobile_location
+    tools: [mobile.mvt_ios_check_fs (LocationdClients), mobile.ios_apt WIFI/NETWORKING]
+    label: iOS location / Wi-Fi network record
+  mobile_accounts:
+    marker: mobile_accounts
+    tools: [mobile.ios_apt INETACCOUNTS/BASICINFO, mobile.mvt_ios_check_fs (Applications/IDStatusCache)]
+    label: iOS account / Apple ID record
 
 groups:
   # ANY = every class (used by act=other)
   execution_primary: [prefetch, userassist, amcache, bam, event_logs_security, memory_process, live_host, srum, jump_lists, unix_shell_history, unix_auth_log, macos_artifacts]
   execution_weak: [shimcache, mft, lnk_files, shellbags, registry, file_content, timeline, yara, av, usn_journal, filesystem_listing]
   presence_primary: [mft, filesystem_listing, usn_journal, file_content, hash_match, memory_process, recycle_bin, memory_injection, implant_config]
-  presence_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, prefetch, registry, timeline, yara, av, userassist]
-  timeline_primary: [mft, usn_journal, event_logs_security, prefetch, timeline, srum, logon_session, registry, network_capture, terminalservices, device_install, unix_auth_log, unix_syslog, macos_artifacts]
-  timeline_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, file_content, userassist, mail_store, chat_store]
+  presence_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, prefetch, registry, timeline, yara, av, userassist, mobile_artifact]
+  timeline_primary: [mft, usn_journal, event_logs_security, prefetch, timeline, srum, logon_session, registry, network_capture, terminalservices, device_install, unix_auth_log, unix_syslog, macos_artifacts, mobile_browser, mobile_location]
+  timeline_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, file_content, userassist, mail_store, chat_store, mobile_messaging, mobile_artifact]
   creation_event: [event_logs_security, sam_account, unix_auth_log]
   creation_corroborator: [logon_session, device_install, prefetch, userassist, amcache, memory_process, usn_journal, mft, registry, terminalservices, bam]
   session: [logon_session]
   session_corroborator: [terminalservices, registry, network_capture, usn_journal, prefetch, userassist, lnk_files, srum, shellbags, jump_lists, bam, event_logs_security, device_install, unix_auth_log, unix_syslog, unix_shell_history]
-  documentary_binding: [registry, mail_store, chat_store, network_capture, lnk_files, shellbags, userassist, recycle_bin, sam_account, jump_lists, file_content, srum, unix_shell_history, macos_artifacts]
+  documentary_binding: [registry, mail_store, chat_store, network_capture, lnk_files, shellbags, userassist, recycle_bin, sam_account, jump_lists, file_content, srum, unix_shell_history, macos_artifacts, mobile_accounts, mobile_messaging]
   transfer: [transfer]
   receipt: [receipt]
   ftp_context: [prefetch, userassist, amcache, bam, file_content, registry, network_capture, srum, memory_process, event_logs_security, jump_lists]
   removable_context: [usb_storage, registry, device_install, lnk_files, shellbags, jump_lists, usn_journal, mft]
   email_context: [mail_store, network_capture, receipt]
-  cloud_context: [registry, file_content, network_capture, srum, mft, usn_journal, prefetch, userassist, amcache]
-  chat_context: [chat_store, network_capture, srum, prefetch, userassist]
-  staging: [file_content, mft, usn_journal, lnk_files, jump_lists, shellbags, registry, prefetch, userassist, amcache, recycle_bin, usb_storage, mail_store, chat_store, network_capture, srum]
+  cloud_context: [registry, file_content, network_capture, srum, mft, usn_journal, prefetch, userassist, amcache, mobile_browser]
+  chat_context: [chat_store, network_capture, srum, prefetch, userassist, mobile_messaging]
+  staging: [file_content, mft, usn_journal, lnk_files, jump_lists, shellbags, registry, prefetch, userassist, amcache, recycle_bin, usb_storage, mail_store, chat_store, network_capture, srum, mobile_messaging]
   persistence_record: [registry, scheduled_tasks, services, event_logs_security, memory_process, live_host, memory_injection, unix_persistence, macos_artifacts]
   persistence_weak: [file_content, yara, av, mft, prefetch, amcache, shimcache, timeline, filesystem_listing]
   network_evidence: [memory_network, network_capture, srum, live_host]

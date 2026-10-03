@@ -223,11 +223,14 @@ def stamped_evidence_kinds(entries) -> set:
 
 
 def unfit_for_evidence(tool, kinds) -> bool:
-    """A prescribed tool the case's evidence cannot feed — never an unrun
-    work-order item (DAIR drops it; this covers orders recorded before)."""
+    """A prescribed tool the case's evidence cannot feed, or one the server
+    does not register at all — never an unrun work-order item (DAIR drops
+    both; this covers orders recorded before)."""
+    from tools.tool_capabilities import tool_fits_evidence, tool_exists
+    if not tool_exists(tool):
+        return True
     if not kinds:
         return False
-    from tools.tool_capabilities import tool_fits_evidence
     return not tool_fits_evidence(tool, kinds)
 
 

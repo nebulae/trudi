@@ -49,7 +49,9 @@ def _sniff_event_log(path: str) -> str:
 @output_safe
 def evtx_dump(evtx_file: str, output_path: Optional[str] = None) -> dict:
     """
-    Dump a Windows event log to text. EVTX (Vista+) is rendered to XML via
+    Dump a Windows event log to text: EVTX via python-evtx, legacy EVT via evtexport.
+
+    EVTX (Vista+) is rendered to XML via
     python-evtx; legacy EVT (NT/2000/XP/2003, "LfLe" header) is routed to
     libevt's `evtexport`, because python-evtx parses only the binary-XML
     EVTX format and, handed an EVT file, exits 0 with an empty <Events/>
@@ -537,24 +539,72 @@ def srum_export(srudb_path: str, output_dir: str) -> dict:
 
 @mcp.tool()
 @output_safe
+def xlsx_export(xlsx_path: str, output_dir: str) -> dict:
+    """Excel workbook (.xlsx/.xlsm) -> one CSV per sheet, for read.output.
+
+    read.output cannot open a workbook, and a workbook on evidence is not
+    produced output. Cells keep Excel's cached values; date-formatted cells
+    become ISO timestamps. The workbook is only read.
+    """
+    import csv
+    from core.executor import _log_tool
+    from core.xlsx import read_workbook
+
+    assert_output_safe(output_dir)
+    wb = read_workbook(xlsx_path)
+    written, lines = [], []
+    if wb.get("success"):
+        os.makedirs(output_dir, exist_ok=True)
+        stem = re.sub(r"[^\w.-]+", "_", os.path.splitext(os.path.basename(xlsx_path))[0])
+        for i, sh in enumerate(wb["sheets"], 1):
+            name = re.sub(r"[^\w.-]+", "_", sh["name"]).strip("_") or f"sheet{i}"
+            out = os.path.join(output_dir, f"{stem}__{name}.csv")
+            width = max((len(r) for r in sh["rows"]), default=0)
+            with open(out, "w", newline="", encoding="utf-8") as fh:
+                w = csv.writer(fh)
+                for r in sh["rows"]:
+                    w.writerow(r + [""] * (width - len(r)))
+            written.append({"sheet": sh["name"], "csv": out, "rows": len(sh["rows"]),
+                            "columns": width, **({"error": sh["error"]} if sh.get("error") else {})})
+            head = " | ".join(c for c in (sh["rows"][0] if sh["rows"] else []) if c)[:200]
+            lines.append(f"  {sh['name']}: {len(sh['rows'])} rows x {width} cols -> {out}"
+                         + (f"\n    first row: {head}" if head else ""))
+    ok = bool(wb.get("success")) and bool(written)
+    summary = (f"xlsx_export {xlsx_path}: {len(written)} sheet(s)\n" + "\n".join(lines)) if ok \
+        else ""
+    result = {"success": ok, "stdout": summary,
+              "stderr": "" if ok else (wb.get("error") or "workbook has no sheets"),
+              "exit_code": 0 if ok else 1, "truncated": False, "retries": 0,
+              "elapsed_seconds": 0.0,
+              "cmd": f"misc.xlsx_export {xlsx_path} -> {output_dir}"}
+    _log_tool(result)
+    from tools import _parsed_outputs
+    _parsed_outputs.stamp(result, output_dir)
+    return {"success": ok, "_trudi_call_id": result.get("_trudi_call_id"),
+            "error": None if ok else result["stderr"], "sheets": written,
+            "output_dir": output_dir, "summary": summary,
+            "hint": "Read each sheet CSV with read.output (query / where / columns) and cite "
+                    "that call; the first row is the sheet's own first row (often a header)."}
+
+
+@mcp.tool()
+@output_safe
 def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -> dict:
     """Export a chat/messenger sqlite store (Skype main.db, WhatsApp
-    msgstore.db) to normalized CSVs — the comms channel the mail extractors
-    (readpst/pff_export) do not cover, and a first-class exfil channel
-    (message bodies AND the Transfers file-transfer trail).
+    msgstore.db, Telegram iOS postbox db_sqlite) to normalized CSVs — the
+    comms channel the mail extractors do not cover, and an exfil channel.
 
     ENUMERATE, DON'T SEARCH: the whole Messages/Transfers tables are exported
-    (one row each), plus a participants roster, so a correspondent or file
-    transfer cannot be missed by grepping the wrong string. The db is opened
-    STRICTLY read-only (sqlite immutable URI — no -wal/-shm sidecars, no
-    locks), safe against read-only evidence mounts; an uncheckpointed -wal
-    sibling is surfaced as a warning.
+    (one row each), plus a participants roster (Telegram: usernames, names,
+    phones, peer type), so a correspondent or file transfer cannot be missed.
+    The store is parsed from a private copy (db + -wal/-shm, WAL replayed in
+    the copy); the evidence file is never opened by sqlite and its hash is
+    checked before/after.
 
-    db_path:   the store on the mounted image (e.g. .../AppData/Roaming/Skype/
-               <account>/main.db). Read-only.
+    db_path:   the store on the mounted image / extraction. Read-only.
     output_dir: CSV destination (default ./exports/chat/); must be under
                analysis/exports/reports.
-    chat_app:  auto | skype | whatsapp.
+    chat_app:  auto | skype | whatsapp | telegram.
 
     Read the produced CSVs with read.output. Returns _trudi_call_id for
     record_finding; participants are annotated onto the trace entry so
@@ -567,11 +617,14 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
     out_dir = output_dir or os.path.join(".", "exports", "chat")
     assert_output_safe(out_dir)
 
+    from tools import _parsed_outputs
+    t0 = _parsed_outputs.now()
     parsed = parse_chat_db(db_path, chat_app=chat_app)
     output_paths: dict = {}
     if parsed.get("success"):
         try:
             os.makedirs(out_dir, exist_ok=True)
+            fields = parsed.get("fields") or {}  # app-specific (Telegram) columns
             specs = (
                 ("messages.csv", parsed.get("messages", []),
                  ["ts_utc", "author", "author_display", "chat", "partner", "body"]),
@@ -579,10 +632,12 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                  ["start_utc", "finish_utc", "partner", "partner_display",
                   "filename", "filesize", "status"]),
                 ("participants.csv",
-                 [{"participant": p} for p in parsed.get("participants", [])],
+                 parsed.get("participant_rows")
+                 or [{"participant": p} for p in parsed.get("participants", [])],
                  ["participant"]),
             )
             for name, rows, header in specs:
+                header = fields.get(name) or header
                 p = os.path.join(out_dir, name)
                 with open(p, "w", newline="", encoding="utf-8") as fh:
                     w = _csv.DictWriter(fh, fieldnames=header)
@@ -600,6 +655,12 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
                    f"{parsed.get('transfer_count', 0)} file transfers, "
                    f"{len(parts)} participants, coverage "
                    f"{(cov or {}).get('start', '?')} -> {(cov or {}).get('end', '?')}")
+        if parsed.get("app") == "telegram":
+            unames = sorted({r.get("username") for r in parsed.get("participant_rows") or []
+                             if r.get("username")})
+            summary += (f"\npeers: {parsed.get('peer_count', 0)}; usernames: "
+                        + (", ".join("@" + u for u in unames[:60]) or "none")
+                        + f"\npostbox tables: {parsed.get('postbox_tables')}")
         if parsed.get("warning"):
             summary += f"\n⚠ {parsed['warning']}"
     else:
@@ -638,6 +699,7 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
             )
         except Exception:
             pass
+    _parsed_outputs.stamp(result, out_dir, t0)
 
     return {
         "success": parsed.get("success", False),
@@ -647,6 +709,8 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
         "app": parsed.get("app"),
         "partial": parsed.get("partial", False),
         "wal_present": parsed.get("wal_present", False),
+        "source_sha256": parsed.get("source_sha256"),
+        "source_unchanged": parsed.get("source_unchanged"),
         "message_count": parsed.get("message_count", 0),
         "transfer_count": parsed.get("transfer_count", 0),
         "participant_count": len(parts),
@@ -657,9 +721,53 @@ def chat_db_export(db_path: str, output_dir: str = "", chat_app: str = "auto") -
     }
 
 
+def _archived_setupapi_logs(log_path: str) -> list:
+    """Rotated setupapi.dev.YYYYMMDD_hhmmss.log files beside the live log."""
+    import glob
+    d = os.path.dirname(log_path) or "."
+    live = os.path.basename(log_path).lower()
+    return sorted(p for p in glob.glob(os.path.join(d, "*"))
+                  if re.fullmatch(r"setupapi\.dev\.\d{8}_\d{6}\.log", os.path.basename(p).lower())
+                  and os.path.basename(p).lower() != live)
+
+
+def _system_hive_beside(log_path: str) -> Optional[str]:
+    """<Windows>/System32/config/SYSTEM for a <Windows>/INF/setupapi.dev.log,
+    matched case-insensitively (mounted NTFS keeps the on-disk case)."""
+    inf = os.path.dirname(os.path.abspath(log_path))
+    win = os.path.dirname(inf)
+    cur = win
+    for seg in ("system32", "config", "system"):
+        try:
+            hit = next((n for n in os.listdir(cur) if n.lower() == seg), None)
+        except OSError:
+            return None
+        if not hit:
+            return None
+        cur = os.path.join(cur, hit)
+    return cur if os.path.isfile(cur) else None
+
+
+def _regripper_usb(hive: str) -> tuple:
+    """(text, error) — RegRipper usb + usbstor plugin output for a SYSTEM hive."""
+    import subprocess
+    out = []
+    for plugin in ("usb", "usbstor"):
+        try:
+            p = subprocess.run(["/usr/local/bin/rip.pl", "-r", hive, "-p", plugin],
+                               capture_output=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "", f"rip.pl -p {plugin}: {exc}"
+        if p.returncode != 0:
+            return "", f"rip.pl -p {plugin} exit {p.returncode}: {p.stderr.decode(errors='replace')[:200]}"
+        out.append(p.stdout.decode(errors="replace"))
+    return "\n".join(out), ""
+
+
 @mcp.tool()
 @output_safe
-def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] = None) -> dict:
+def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] = None,
+                             system_hive_path: Optional[str] = None) -> dict:
     """COMPLETE structured inventory of every device from the Windows device-install
     log (setupapi.dev.log) — the BadUSB / removable-media ingress lens.
 
@@ -673,22 +781,54 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
     negative or an 'interactive human authorship' finding must be grounded on
     (enforced by the broad attribution / completeness gates).
 
+    The install log rotates and can be cleared, so it is NOT a complete device
+    history on its own: archived setupapi.dev.*.log rotations beside it are
+    parsed too, and the SYSTEM hive's Enum\\USB / Enum\\USBSTOR keys (RegRipper
+    usb/usbstor) are merged in. A device the registry holds but no install log
+    mentions is listed as REGISTRY-ONLY.
+
     setupapi_log_path: path to setupapi.dev.log on the mounted image / triage set.
     output_path: optional CSV of the FULL inventory (must be under analysis/ etc.).
+    system_hive_path: SYSTEM hive; default <Windows>/System32/config/SYSTEM derived
+        from the log path.
     """
     from core.executor import _log_tool
-    from core.device_inventory import parse_device_install_log
+    from core.device_inventory import (merge_registry_devices, parse_device_install_logs,
+                                       parse_registry_usb)
 
     if output_path:
         assert_output_safe(output_path)
 
-    inv = parse_device_install_log(setupapi_log_path)
+    logs = [setupapi_log_path] + _archived_setupapi_logs(setupapi_log_path)
+    inv = parse_device_install_logs(logs)
+    hive = system_hive_path or _system_hive_beside(setupapi_log_path)
+    registry_checked, registry_error = False, ""
+    if inv.get("success") and hive:
+        rr_text, registry_error = _regripper_usb(hive)
+        if not registry_error:
+            merge_registry_devices(inv, parse_registry_usb(rr_text))
+            registry_checked = True
+    elif inv.get("success"):
+        registry_error = "SYSTEM hive not found beside the log; pass system_hive_path"
     cov = inv.get("coverage_window")
     flagged = inv.get("flagged", [])
+    registry_only = inv.get("registry_only", [])
 
     # Summary — flagged devices FIRST so they're unmissable even if the client
     # truncates the result display.
     lines = []
+    if registry_only:
+        lines.append(f"⚠ {len(registry_only)} device(s) in the SYSTEM hive USB history are "
+                     f"ABSENT from setupapi — the install log is NOT a complete device history:")
+        for d in registry_only:
+            ident = (f"VID_{d['vid'].upper()}&PID_{d['pid'].upper()}" if d.get("vid")
+                     else f"Ven_{d.get('vendor')}&Prod_{d.get('product')}")
+            lines.append(f"  {d.get('device_class')} {ident} interfaces="
+                         f"{','.join(d.get('interfaces') or []) or '-'} "
+                         f"key LastWrite {d.get('registry_last_write')}")
+    if not registry_checked and inv.get("success"):
+        lines.append(f"⚠ registry USB history NOT checked ({registry_error}) — the inventory "
+                     f"covers the install log only")
     if flagged:
         lines.append(f"⚠ {len(flagged)} FLAGGED device(s):")
         for d in flagged:
@@ -707,12 +847,14 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
             with open(output_path, "w", newline="", encoding="utf-8") as fh:
                 w = csv.writer(fh)
                 w.writerow(["first_seen", "last_seen", "device_class", "vendor",
-                            "product", "vid", "pid", "interfaces", "actions", "flagged"])
+                            "product", "vid", "pid", "interfaces", "actions", "flagged",
+                            "sources", "registry_last_write"])
                 for d in inv.get("devices", []):
                     w.writerow([d.get("first_seen"), d.get("last_seen"), d.get("device_class"),
                                 d.get("vendor"), d.get("product"), d.get("vid"), d.get("pid"),
                                 "|".join(d.get("interfaces", [])), "|".join(d.get("actions", [])),
-                                "YES" if d.get("identity") in flag_ids else ""])
+                                "YES" if d.get("identity") in flag_ids else "",
+                                "|".join(d.get("sources", [])), d.get("registry_last_write", "")])
         except OSError:
             pass
 
@@ -722,7 +864,8 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
               "stderr": inv.get("error", "") if not inv.get("success") else "",
               "exit_code": 0 if inv.get("success") else 1, "truncated": False,
               "retries": 0, "elapsed_seconds": 0.0,
-              "cmd": f"misc.device_install_inventory {setupapi_log_path}"}
+              "cmd": f"misc.device_install_inventory {setupapi_log_path}"
+                     + (f" + rip.pl usb/usbstor {hive}" if registry_checked else "")}
     _log_tool(result)
     cid = result.get("_trudi_call_id")
     if cid and inv.get("success"):
@@ -734,6 +877,10 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
                 coverage_window=cov,
                 device_count=inv.get("device_count"),
                 flagged_count=len(flagged),
+                registry_checked=registry_checked,
+                registry_only=[f"{d['vid']}:{d['pid']}" if d.get("vid")
+                               else f"{d.get('vendor')}:{d.get('product')}"
+                               for d in registry_only],
             )
         except Exception:
             pass
@@ -746,6 +893,9 @@ def device_install_inventory(setupapi_log_path: str, output_path: Optional[str] 
         "event_count": inv.get("event_count", 0),
         "coverage_window": cov,
         "flagged": flagged,
+        "registry_checked": registry_checked,
+        "registry_only": registry_only,
+        "logs_parsed": inv.get("logs_parsed", []),
         "devices": inv.get("devices", []),
         "summary": summary,
         "output_path": output_path,
@@ -861,6 +1011,92 @@ def cs_beacon_config(path: str, output_path: Optional[str] = None,
         "timed_out": bool(res.get("timed_out")), "searched_for": res.get("searched_for"),
         "elapsed_seconds": res.get("elapsed_seconds"), "summary": summary[:4000],
         "output_path": output_path if ok else None,
+    }
+
+
+# ── SQLite deleted-record recovery ────────────────────────────────────────────
+
+@mcp.tool()
+@output_safe
+def sqlite_recover(db_path: str, output_dir: str = "", max_seconds: int = 600) -> dict:
+    """Recover deleted SQLite records (freelist, freeblocks, unallocated, WAL) from a copy.
+
+    Plus a sqlite-carver pass. Parses a temp COPY of the db and its -wal/-shm (sqlite never opens the
+    evidence); rows still live in the db are dropped. recovered.csv columns:
+    source, status, page, offset, table, table_guess, rowid, method, text,
+    values_json. method intact_cell/freed_page_cell = exact cell;
+    freeblock_* = header partly overwritten, first column may be inferred.
+    output_dir default ./exports/sqlite_recover/<db name>/.
+    """
+    import hashlib
+    from core.executor import _log_tool
+    from core.paths import assert_case_output_path
+    from core.sqlite_recover import recover
+
+    tag = hashlib.sha1(db_path.encode("utf-8", "replace")).hexdigest()[:8]
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(db_path.rstrip("/"))) or "db"
+    out_dir = output_dir or os.path.join(".", "exports", "sqlite_recover", f"{base}_{tag}")
+    assert_case_output_path(out_dir)
+
+    res = recover(db_path, out_dir, max_seconds=max_seconds)
+    rows = res.pop("_rows", [])
+    ok = bool(res.get("success"))
+    carver = res.get("carver") or {}
+    if ok:
+        records = [r for r in rows if r["method"] != "strings"]
+        lines = [f"{len(records)} recovered record(s) no longer live in the db "
+                 f"(+{len(rows) - len(records)} residual string region(s)); by source "
+                 f"{res.get('records_by_source')}; by table {res.get('records_by_table')}",
+                 f"freelist pages {res.get('freelist_pages')}, wal {res.get('wal')}, "
+                 f"dropped as live duplicates {res.get('dropped_as_live_duplicates')}",
+                 f"sqlite-carver: {carver.get('rows', 0)} row(s)" if carver.get("success")
+                 else f"sqlite-carver: {carver.get('note') or carver.get('error') or carver.get('stderr')}"]
+        if res.get("timed_out") or res.get("row_cap_hit"):
+            lines.append("PARTIAL: time/row cap hit")
+        lines += [f"[{r['source']} p{r['page']}@{r['offset']} {r['table'] or r['table_guess']} "
+                  f"{r['method']}] {r['text'][:200]}" for r in rows[:40] if r["text"]]
+        summary = "\n".join(lines)
+        full = "\n".join([summary] + [f"[{r['source']} p{r['page']}@{r['offset']} "
+                                      f"{r['table'] or r['table_guess']} {r['method']} "
+                                      f"rowid={r['rowid']}] {r['text']}" for r in rows])
+    else:
+        summary = full = res.get("error", "sqlite_recover failed")
+
+    # Self-log: cmd carries the SOURCE db path; the full recovered text goes to
+    # the stdout sidecar so a reviewer can fetch any recovered row.
+    tc = {"success": ok, "stdout": summary[:4000], "_stdout_full": full[:4_000_000],
+          "stderr": "" if ok else res.get("error", ""), "exit_code": 0 if ok else 1,
+          "truncated": bool(res.get("timed_out") or res.get("row_cap_hit")), "retries": 0,
+          "elapsed_seconds": float(res.get("elapsed_seconds") or 0.0),
+          "timed_out": bool(res.get("timed_out")),
+          "cmd": f"misc.sqlite_recover {db_path}",
+          "output_path": res.get("output_csv") if ok else None}
+    _log_tool(tc)
+    cid = tc.get("_trudi_call_id")
+    if cid and ok:
+        try:
+            from core.execution_log import log
+            log.annotate_tool_call(cid, deleted_record_recovery=True,
+                                   recovered_record_count=res.get("recovered_records", 0),
+                                   source_sha256=res.get("source_sha256"))
+        except Exception:
+            pass
+    output_paths = {k: v for k, v in (("recovered_csv", res.get("output_csv")),
+                                      ("summary_json", res.get("output_json")),
+                                      ("carver_tsv", carver.get("output_path"))) if v}
+    return {
+        "success": ok, "error": res.get("error"), "_trudi_call_id": cid,
+        "recovered_records": res.get("recovered_records", 0),
+        "residual_string_regions": res.get("residual_string_regions", 0),
+        "records_by_source": res.get("records_by_source", {}),
+        "records_by_table": res.get("records_by_table", {}),
+        "freelist_pages": res.get("freelist_pages"), "wal": res.get("wal"),
+        "dropped_as_live_duplicates": res.get("dropped_as_live_duplicates"),
+        "carver": carver, "timed_out": bool(res.get("timed_out")),
+        "source_sha256": res.get("source_sha256"),
+        "source_unchanged": res.get("source_unchanged"),
+        "output_paths": output_paths, "elapsed_seconds": res.get("elapsed_seconds"),
+        "summary": summary[:4000],
     }
 
 
@@ -2047,6 +2283,7 @@ def write_final_report(output_path: str, content: str) -> dict:
     ioc_inv: dict = {}
     unshown: list = []
     disp_review: list = []
+    unread_out: list = []
     advisories: list = []
     try:
         for e in reversed(log._entries):
@@ -2056,6 +2293,7 @@ def write_final_report(output_path: str, content: str) -> dict:
                 ioc_inv = dict(e.get("ioc_inventory") or {})
                 unshown = list(e.get("unshown_review_details") or [])
                 disp_review = list(e.get("disposition_review") or [])
+                unread_out = list(e.get("unread_outputs") or [])
                 break
         # The latest successful cross-finding review's advisories: non-blocking
         # by the reviewer's own classification, but a reader should see them.
@@ -2158,6 +2396,16 @@ def write_final_report(output_path: str, content: str) -> dict:
                            f"{i.get('component','')} | {', '.join(i.get('iocs') or [])} | "
                            f"{', '.join((i.get('examine_with') or [])[:4])} | "
                            f"{('disposition: ' + str(i.get('disposition'))) if i.get('disposition') else 'open'} |")
+        content = content.rstrip() + "\n".join(sec) + "\n"
+    if unread_out and "## parsed output not examined" not in content.lower():
+        sec = ["\n\n## Parsed output not examined",
+               "Tables a parser produced that hold records but were never opened with "
+               "read.output or settled by a disposition. Nothing in them was checked; any "
+               "of them may hold relevant evidence."]
+        sec.append("\n| file | records | produced by |\n|---|---|---|")
+        for u in unread_out:
+            sec.append(f"| `{u.get('file')}` | {u.get('rows')} | {u.get('tool')} (call "
+                       f"{u.get('call_id')}) |")
         content = content.rstrip() + "\n".join(sec) + "\n"
     if disp_review and "## dispositions to review" not in content.lower():
         sec = ["\n\n## Dispositions to review",
@@ -2504,7 +2752,15 @@ def densityscout_scan(target: str, threshold: float = 0.10) -> dict:
         return missing
     binary = optional_binary("misc.densityscout_scan", _bin_or_warn)
     cmd = [binary, "-pe", "-t", str(threshold), target]
-    return run(cmd, timeout=600)
+    result = run(cmd, timeout=600)
+    # The densityscout build on some hosts segfaults on every input (even a
+    # plain directory with no options): nothing was scanned.
+    if result.get("exit_code") in (-11, 139):
+        result.update(success=False, status="tool_unavailable", tool_unavailable=True,
+                      error="densityscout crashed (SIGSEGV) on this host — NOTHING was "
+                            "scanned. Settle with misc.record_disposition(target_kind=\"tool\", "
+                            "target_id=\"misc.densityscout_scan\", reason=\"tool_unavailable\").")
+    return result
 
 
 # ── Sigma-rule hunting on EVTX ──────────────────────────────────────────────

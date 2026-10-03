@@ -61,8 +61,12 @@ def _classify_dotnet_crash(result: dict, stdout: str, stderr: str) -> None:
 def _ez(dll: str, args: list[str], output_dir: Optional[str] = None, timeout: int = 300) -> dict:
     if output_dir:
         assert_output_safe(output_dir)
+    from tools import _parsed_outputs
+    t0 = _parsed_outputs.now()
     result = run_dotnet(dll, args, timeout=timeout, output_dir=output_dir,
                         classify=_classify_dotnet_crash)
+    if output_dir:
+        _parsed_outputs.stamp(result, output_dir, t0)
     # Missing-binary detection: the .dll not being on disk is the unambiguous
     # signal (dotnet's exit 145 also fires for genuine runtime faults). Augment
     # the recorded result — the failed tool_call still lands in the trace, but

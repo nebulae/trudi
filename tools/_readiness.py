@@ -290,7 +290,7 @@ def assess_readiness(log, include_synthesis=True):
             print(f"[TRUDI WARN] pre_report structural check #{_n} failed: {_e}",
                   file=_sys.stderr)
 
-    from tools._gates._entities import norm_entity, entity_matches
+    from tools._gates._entities import norm_entity, entity_matches, is_role_label
     from tools._gates._dispositions import (find_disposition, disposition_call,
                                             disposition_batch_hint,
                                             PARKING, SOURCE_WAIVER_REASONS_ALL)
@@ -575,7 +575,9 @@ def assess_readiness(log, include_synthesis=True):
                 t = sub.get("likelihood_tier", "MEDIUM")
                 for ent in sub.get("entities") or []:
                     n = norm_entity(ent)
-                    if _skip_contested(ent, n):
+                    # A reviewer describing a role ("iPhone owner", "examiner/
+                    # lab") has named no one: nothing to bind or refute.
+                    if _skip_contested(ent, n) or is_role_label(ent):
                         continue
                     if _rank.get(t, 1) >= _rank.get(ent_tier.get(n, "LOW"), 0):
                         ent_tier[n] = t
@@ -1340,6 +1342,23 @@ def assess_readiness(log, include_synthesis=True):
         import sys as _sys
         print(f"[TRUDI WARN] IOC coverage check failed: {_e}", file=_sys.stderr)
 
+    # Parsed tables holding records that were never read — warnings only.
+    unread_outputs: list = []
+    try:
+        from tools._parsed_outputs import unread as _unread
+        unread_outputs = _unread(entries)
+        if unread_outputs:
+            _shown = "; ".join(os.path.basename(f["file"]) for f in unread_outputs[:8])
+            warnings.append(
+                f"{len(unread_outputs)} parsed output table(s) hold records no read.output call "
+                f"opened: {_shown}{' …' if len(unread_outputs) > 8 else ''}. Read the relevant "
+                f"ones, or settle a table/directory with misc.record_disposition("
+                f"target_kind=\"source\", target_id=\"<path>\", reason=\"inapplicable\"). "
+                f"Open items are listed in the report as parsed output not examined.")
+    except Exception as _e:
+        import sys as _sys
+        print(f"[TRUDI WARN] unread-output check failed: {_e}", file=_sys.stderr)
+
     ready = len(issues) == 0
     # Dispositions a reader should check (warning + report section, never a blocker).
     disposition_review: list = []
@@ -1363,6 +1382,7 @@ def assess_readiness(log, include_synthesis=True):
         "ready_to_report": ready if include_synthesis else False,
         "ioc_inventory": ioc_inventory,
         "disposition_review": disposition_review,
+        "unread_outputs": unread_outputs[:100],
         "unshown_review_details": unshown_details,
         "ready_for_synthesis": ready if not include_synthesis else None,
         "issues": issue_records(issues),

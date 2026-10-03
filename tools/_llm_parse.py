@@ -83,8 +83,15 @@ def _strip_comments(body: str) -> str:
     return "".join(out)
 
 
+# Windows paths written verbatim into a JSON string ("HKLM\SOFTWARE\Microsoft")
+# are invalid escapes (\S, \M) and fail the whole object. A backslash that does
+# not start a valid JSON escape can only have meant a literal backslash.
+_BAD_ESCAPE_RE = re.compile(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})')
+
+
 def _load(body: str):
-    for text in (body, _strip_comments(body)):
+    stripped = _strip_comments(body)
+    for text in (body, stripped, _BAD_ESCAPE_RE.sub(r"\\\\", stripped)):
         try:
             return json.loads(text)
         except (json.JSONDecodeError, ValueError):
@@ -139,16 +146,21 @@ def _find_result(text: str) -> tuple[int, int, int, int] | None:
 _BLOCK_LABEL_RE = re.compile(
     r"\n\s*\**(?:EVIDENCE_REQUEST|DIRECTIVES|BLOCKERS|EVIDENCE_AUDIT|VERDICT)\**\s*:", re.IGNORECASE)
 _MAX_MISSING_CLOSERS = 3
+_BARE_RESULT_RE = re.compile(r"\{\s*\"schema_version\"")
 
 
 def _salvage_unclosed(text: str) -> tuple[int, int, dict] | None:
-    """(start, end, obj) for a headed RESULT object missing only its closers."""
-    for m in reversed(list(_RESULT_HEAD_RE.finditer(text or ""))):
-        if _balanced_object(text, m.end()) is not None:
+    """(start, end, obj) for a RESULT object missing only its closers —
+    headed, or bare (`{"schema_version"...`) when no header is present."""
+    starts = [(m.start(), m.end()) for m in _RESULT_HEAD_RE.finditer(text or "")]
+    if not starts:
+        starts = [(m.start(), m.start()) for m in _BARE_RESULT_RE.finditer(text or "")]
+    for start, body in reversed(starts):
+        if _balanced_object(text, body) is not None:
             continue
-        nxt = _BLOCK_LABEL_RE.search(text, m.end())
+        nxt = _BLOCK_LABEL_RE.search(text, body)
         stop = nxt.start() if nxt else len(text)
-        segment = text[m.end():stop].rstrip()
+        segment = text[body:stop].rstrip()
         segment = re.sub(r"\s*```\s*$", "", segment)
         stack, in_str, esc = [], False, False
         for c in segment:
@@ -171,7 +183,7 @@ def _salvage_unclosed(text: str) -> tuple[int, int, dict] | None:
         obj = _load(segment + "".join(reversed(stack)))
         if isinstance(obj, dict):
             obj.setdefault("_repaired", f"appended {len(stack)} missing closing bracket(s)")
-            return m.start(), stop, obj
+            return start, stop, obj
     return None
 
 
@@ -225,6 +237,28 @@ def str_list(v) -> list[str]:
     return [str(x).strip() for x in v if str(x).strip()]
 
 
+def evidence_query_text(q) -> str:
+    """An evidence request's query as the resolver's space-separated term string.
+    Models often send the terms as a list (["69.80.225.91", "wscale 3"]) — same
+    intent, so it is joined rather than rejected. '' for anything else."""
+    if isinstance(q, str):
+        return q.strip()
+    if isinstance(q, list) and q and all(isinstance(t, (str, int, float)) for t in q):
+        return " ".join(str(t).strip() for t in q if str(t).strip())
+    return ""
+
+
+def evidence_call_id(v) -> int | None:
+    """call_id as int — an int, or a string of digits ("115"); else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
 def validate_result(result: dict, tool: str) -> str:
     """Validate new structured answers; known legacy formats remain explicit adapters."""
     if result.get('truncated'):
@@ -256,7 +290,8 @@ def validate_result(result: dict, tool: str) -> str:
     req = rb.get('evidence_request')
     if req:
         if not isinstance(req, list) or any(not isinstance(r, dict) or
-                not isinstance(r.get('call_id'), int) or not isinstance(r.get('query', ''), str)
+                evidence_call_id(r.get('call_id')) is None or
+                not evidence_query_text(r.get('query', ''))
                 for r in req):
             return 'Invalid evidence_request'
         return ''
