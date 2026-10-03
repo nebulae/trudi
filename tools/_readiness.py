@@ -290,7 +290,7 @@ def assess_readiness(log, include_synthesis=True):
             print(f"[TRUDI WARN] pre_report structural check #{_n} failed: {_e}",
                   file=_sys.stderr)
 
-    from tools._gates._entities import norm_entity, entity_matches
+    from tools._gates._entities import norm_entity, entity_matches, is_role_label
     from tools._gates._dispositions import (find_disposition, disposition_call,
                                             disposition_batch_hint,
                                             PARKING, SOURCE_WAIVER_REASONS_ALL)
@@ -575,7 +575,9 @@ def assess_readiness(log, include_synthesis=True):
                 t = sub.get("likelihood_tier", "MEDIUM")
                 for ent in sub.get("entities") or []:
                     n = norm_entity(ent)
-                    if _skip_contested(ent, n):
+                    # A reviewer describing a role ("iPhone owner", "examiner/
+                    # lab") has named no one: nothing to bind or refute.
+                    if _skip_contested(ent, n) or is_role_label(ent):
                         continue
                     if _rank.get(t, 1) >= _rank.get(ent_tier.get(n, "LOW"), 0):
                         ent_tier[n] = t
