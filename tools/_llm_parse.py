@@ -237,6 +237,28 @@ def str_list(v) -> list[str]:
     return [str(x).strip() for x in v if str(x).strip()]
 
 
+def evidence_query_text(q) -> str:
+    """An evidence request's query as the resolver's space-separated term string.
+    Models often send the terms as a list (["69.80.225.91", "wscale 3"]) — same
+    intent, so it is joined rather than rejected. '' for anything else."""
+    if isinstance(q, str):
+        return q.strip()
+    if isinstance(q, list) and q and all(isinstance(t, (str, int, float)) for t in q):
+        return " ".join(str(t).strip() for t in q if str(t).strip())
+    return ""
+
+
+def evidence_call_id(v) -> int | None:
+    """call_id as int — an int, or a string of digits ("115"); else None."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
 def validate_result(result: dict, tool: str) -> str:
     """Validate new structured answers; known legacy formats remain explicit adapters."""
     if result.get('truncated'):
@@ -268,7 +290,8 @@ def validate_result(result: dict, tool: str) -> str:
     req = rb.get('evidence_request')
     if req:
         if not isinstance(req, list) or any(not isinstance(r, dict) or
-                not isinstance(r.get('call_id'), int) or not isinstance(r.get('query', ''), str)
+                evidence_call_id(r.get('call_id')) is None or
+                not evidence_query_text(r.get('query', ''))
                 for r in req):
             return 'Invalid evidence_request'
         return ''

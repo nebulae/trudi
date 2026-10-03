@@ -67,6 +67,29 @@ class TestGrammar:
         raw = 'EVIDENCE_REQUEST:\n```json\n[{"call_id": "x", "query": "q"}, {"call_id": 3, "query": ""}, {"call_id": 4, "query": "ok"}]\n```'
         assert R._parse_evidence_request(raw) == [{"call_id": 4, "query": "ok", "columns": []}]
 
+    def test_query_as_a_list_of_terms_is_joined_not_rejected(self):
+        # DeepSeek sent query as a list in 4 reviews across 3 cases; each failed
+        # the round as "Invalid evidence_request" and forced a retry.
+        from tools._llm_parse import validate_result
+        rb = {"schema_version": 1, "evidence_request": [
+            {"call_id": 192, "query": ["69.80.225.91", "wscale 3"], "columns": []},
+            {"call_id": "115", "query": "gausr"}]}
+        assert validate_result({"result_block": rb, "_raw": "RESULT:"},
+                               "reason_evaluate_finding") == ""
+        assert R._parse_evidence_request_items(rb["evidence_request"]) == [
+            {"call_id": 192, "query": "69.80.225.91 wscale 3", "columns": []},
+            {"call_id": 115, "query": "gausr", "columns": []}]
+        raw = 'EVIDENCE_REQUEST:\n[{"call_id": 9, "query": ["a b", "c"]}]'
+        assert R._parse_evidence_request(raw) == [{"call_id": 9, "query": "a b c", "columns": []}]
+
+    def test_unusable_request_still_invalid(self):
+        from tools._llm_parse import validate_result
+        for bad in ({"call_id": "x", "query": "q"}, {"call_id": 3, "query": [{"a": 1}]},
+                    {"call_id": True, "query": "q"}, {"call_id": 3, "query": []}):
+            rb = {"schema_version": 1, "evidence_request": [bad]}
+            assert validate_result({"result_block": rb, "_raw": "RESULT:"},
+                                   "reason_evaluate_finding") == "Invalid evidence_request", bad
+
     def test_marker_lost_in_thinking_fallback(self):
         # A thinking model may leave the header in <think> and emit only the
         # array — accept a bare array whose items all carry call_id + query.
