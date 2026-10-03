@@ -48,9 +48,13 @@ def _count_outputs(output_dir: str) -> int:
 
 
 def start_job(cmd: list[str], tool: str, timeout: int, output_dir: str,
-              needs_sudo: bool = False) -> dict:
+              needs_sudo: bool = False, partial_ok: bool = False) -> dict:
     """Spawn `cmd` detached under a hard `timeout` budget; return immediately
-    with a running-job handle. Never blocks."""
+    with a running-job handle. Never blocks.
+
+    partial_ok: a carve-style tool whose files are usable as produced. A run
+    that hits the budget after producing output is then a TRUNCATED success
+    (no absence claim may rest on it), not a failed tool needing closure."""
     os.makedirs(JOBS_DIR, exist_ok=True)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -80,6 +84,7 @@ def start_job(cmd: list[str], tool: str, timeout: int, output_dir: str,
         "stdout_file": stdout_file, "stderr_file": stderr_file,
         "exit_file": exit_file, "started": time.time(),
         "status": "running", "collected": False, "call_id": None,
+        "partial_ok": bool(partial_ok),
     }
     with open(_job_path(job_id), "w") as f:
         json.dump(state, f)
@@ -130,6 +135,7 @@ def job_status(job_id: str) -> dict:
     except ValueError:
         rc = -1
     timed_out = rc == 124
+    ok = _job_ok(state, rc, timed_out)
     stdout = _read(state["stdout_file"])
     stderr = _read(state["stderr_file"])
     if timed_out:
@@ -138,8 +144,8 @@ def job_status(job_id: str) -> dict:
 
     # Log the underlying command as a normal, citable tool_call (once).
     res = {
-        "success": rc == 0, "stdout": stdout[:2000], "stderr": stderr[:2000],
-        "exit_code": rc, "truncated": len(stdout) > 2000, "retries": 0,
+        "success": ok, "stdout": stdout[:2000], "stderr": stderr[:2000],
+        "exit_code": rc, "truncated": len(stdout) > 2000 or (ok and timed_out), "retries": 0,
         "elapsed_seconds": elapsed, "timed_out": timed_out,
         "cmd": state["cmd"], "output_path": state["output_dir"],
         "_stdout_full": stdout, "_stdout_chars": len(stdout),
@@ -163,10 +169,17 @@ def job_status(job_id: str) -> dict:
     return _finished_result(state, elapsed, cached=False)
 
 
+def _job_ok(state: dict, rc: int, timed_out: bool) -> bool:
+    """Exit 0 — or, for a partial_ok carve, a timeout that produced files."""
+    return rc == 0 or (bool(state.get("partial_ok")) and timed_out
+                       and _count_outputs(state.get("output_dir") or "") > 0)
+
+
 def _finished_result(state: dict, elapsed: float, cached: bool) -> dict:
     n = _count_outputs(state["output_dir"])
     out = {
-        "success": state["exit_code"] == 0, "status": "finished",
+        "success": _job_ok(state, state["exit_code"], state["timed_out"]),
+        "status": "finished",
         "job_id": state["job_id"], "exit_code": state["exit_code"],
         "elapsed_seconds": elapsed, "timed_out": state["timed_out"],
         "stdout": state.get("stdout_excerpt", ""),
