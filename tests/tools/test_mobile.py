@@ -595,3 +595,130 @@ class TestEvidenceIntegrity:
             except OSError:
                 pass
         assert seen["root"] and not os.path.exists(seen["root"])
+
+
+# ── ALEAPP (Android) ──────────────────────────────────────────────────────────
+
+def _aleapp_writer(tsvs=None, stdout_files=True):
+    tsvs = {"SMS Messages": "﻿Date\tAddress\tBody\n2024-06-21\t+1555\tpier 4\n",
+            "Chrome - Web History": "Visit\tURL\n2024\thttps://cruise\n",
+            "Accounts_ce": "Name\tType\nsharon@gmail.com\tcom.google\n",
+            "Call Logs": "Date\tNumber\n"} if tsvs is None else tsvs
+
+    def w(cmd, env):
+        rep = os.path.join(_flag(cmd, "-o"), _flag(cmd, "--custom_output_folder"))
+        os.makedirs(os.path.join(rep, "_TSV Exports"), exist_ok=True)
+        for name, body in tsvs.items():
+            with open(os.path.join(rep, "_TSV Exports", f"{name}.tsv"), "w") as fh:
+                fh.write(body)
+        # ALEAPP's copies of evidence files: an app .json is NOT parser output
+        os.makedirs(os.path.join(rep, "data", "data", "com.app"), exist_ok=True)
+        with open(os.path.join(rep, "data", "data", "com.app", "cfg.json"), "w") as fh:
+            json.dump([{"a": 1}, {"a": 2}], fh)
+        os.makedirs(os.path.join(rep, "_HTML"), exist_ok=True)
+        with open(os.path.join(rep, "_HTML", "x.tsv"), "w") as fh:
+            fh.write("h\nv\n")
+    return w
+
+
+@pytest.fixture
+def android_tree(tmp_path):
+    root = tmp_path / "evidence" / "android_fs"
+    (root / "data" / "data" / "com.android.providers.telephony" / "databases").mkdir(parents=True)
+    return root
+
+
+class TestAleapp:
+    def test_argv_fs_and_report_folder(self, live_log, android_tree, tmp_path):
+        from tools.mobile import aleapp, ALEAPP, ALEAPP_PYTHON
+        out = str(tmp_path / "analysis" / "aleapp")
+        fake = FakeProc(_aleapp_writer())
+        with patch("core.executor.subprocess.run", fake):
+            r = _tool(aleapp)(str(android_tree), out)
+        cmd = fake.calls[0].cmd
+        assert cmd[:2] == [ALEAPP_PYTHON, ALEAPP]
+        assert _flag(cmd, "-t") == "fs" and _flag(cmd, "-o") == out
+        assert _flag(cmd, "-i") == str(android_tree)       # no stage: ALEAPP copies
+        folder = _flag(cmd, "--custom_output_folder")
+        assert folder.startswith("ALEAPP_")
+        assert r["success"] is True and r["output_dir"] == os.path.join(out, folder)
+
+    def test_auto_type_by_extension(self, live_log, tmp_path):
+        from tools.mobile import _aleapp_type
+        for name, want in (("x.zip", "zip"), ("x.tar", "tar"), ("x.tar.gz", "gz"),
+                           ("x.tgz", "gz"), ("x.E01", "raw"), ("x.img", "raw")):
+            p = tmp_path / name
+            p.write_text("")
+            assert _aleapp_type(str(p)) == want
+        assert _aleapp_type(str(tmp_path)) == "fs"
+
+    def test_type_mismatch_and_bad_type_refused(self, live_log, android_tree, tmp_path):
+        from tools.mobile import aleapp
+        f = tmp_path / "phone.zip"; f.write_text("")
+        fake = FakeProc()
+        with patch("core.executor.subprocess.run", fake):
+            r1 = _tool(aleapp)(str(f), str(tmp_path / "analysis" / "a"), input_type="fs")
+            r2 = _tool(aleapp)(str(android_tree), str(tmp_path / "analysis" / "a"), input_type="ufdr")
+            r3 = _tool(aleapp)(str(tmp_path / "nope"), str(tmp_path / "analysis" / "a"))
+        assert r1["success"] is False and "does not fit" in r1["error"]
+        assert r2["success"] is False and "unknown input_type" in r2["error"]
+        assert r3["success"] is False and "does not exist" in r3["error"]
+        assert not fake.calls
+
+    def test_rows_families_and_evidence_copies_excluded(self, live_log, android_tree, tmp_path):
+        from tools.mobile import aleapp
+        out = str(tmp_path / "analysis" / "aleapp")
+        with patch("core.executor.subprocess.run", FakeProc(_aleapp_writer())):
+            r = _tool(aleapp)(str(android_tree), out)
+        assert r["rows_by_tsv"]["_TSV Exports/SMS Messages.tsv"] == 1
+        assert r["rows_by_tsv"]["_TSV Exports/Call Logs.tsv"] == 0
+        assert not any(k.startswith(("data", "_HTML")) for k in r["rows_by_tsv"])
+        # Call Logs is empty: messaging comes from SMS; Chrome → browser; Accounts_ce → accounts
+        assert r["artifact_families"] == ["mobile_accounts", "mobile_browser", "mobile_messaging"]
+        e = _entry(live_log, r["_trudi_call_id"])
+        assert e.get("mobile_messaging") and e.get("mobile_browser") and e.get("mobile_accounts")
+        parsed = [p["file"] for p in e.get("parsed_outputs") or []]
+        assert parsed and all("_TSV Exports" in p for p in parsed)
+        assert e["stdout_excerpt"].startswith("ALEAPP output summary")
+
+    def test_exit_zero_without_tsv_is_failure(self, live_log, android_tree, tmp_path):
+        from tools.mobile import aleapp
+        with patch("core.executor.subprocess.run", FakeProc(None)):
+            r = _tool(aleapp)(str(android_tree), str(tmp_path / "analysis" / "aleapp"))
+        assert r["success"] is False and "no TSV" in r["error"]
+        assert _entry(live_log, r["_trudi_call_id"])["success"] is False
+
+    def test_module_errors_surface(self, live_log, android_tree, tmp_path):
+        from tools.mobile import aleapp
+        fake = FakeProc(_aleapp_writer(), stdout=(
+            b"No file found\nNo file found\nReading Chrome artifact had errors!\n"))
+        with patch("core.executor.subprocess.run", fake):
+            r = _tool(aleapp)(str(android_tree), str(tmp_path / "analysis" / "aleapp"))
+        assert r["success"] is True
+        assert any("had errors" in m for m in r["module_errors"])
+
+    def test_evidence_untouched(self, live_log, android_tree, tmp_path):
+        from tools.mobile import aleapp
+        before = _snapshot(android_tree)
+        with patch("core.executor.subprocess.run", FakeProc(_aleapp_writer())):
+            _tool(aleapp)(str(android_tree), str(tmp_path / "analysis" / "aleapp"))
+        assert _snapshot(android_tree) == before
+
+    def test_registration_job_capability_tier(self, monkeypatch):
+        import asyncio
+        import server
+        import tools.tool_capabilities as tc
+        from core.jobs import background_mode
+        from tools._gates._tiering import classify_entry
+        assert "mobile_aleapp" in {t.name for t in asyncio.run(server.mcp.list_tools())}
+        assert background_mode("mobile_aleapp") == "if_slow"
+        monkeypatch.setattr(tc.shutil, "which", lambda n: n)
+        assert tc.capability_for_tool("mobile.aleapp") == "mobile_device"
+        assert "mobile.aleapp" in tc.allowed_tool_names({"mobile"})
+        assert "mobile.aleapp" not in tc.allowed_tool_names({"disk_image"})
+        monkeypatch.setattr(tc.shutil, "which", lambda n: None)
+        assert "mobile.aleapp" in tc.unavailable_tools()
+        e = {"type": "tool_call", "success": True, "call_id": 9,
+             "cmd": "/opt/aleapp/venv/bin/python /opt/aleapp/src/aleapp.py -t fs -i /c/evidence/a -o /c/analysis/x",
+             "mobile_location": True}
+        assert {"mobile_artifact", "mobile_location"} <= classify_entry(e)

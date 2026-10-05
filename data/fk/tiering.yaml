@@ -212,7 +212,7 @@ classes:
     cmd: 'fseventsd|\.logarchive|log show|unified log|\bplutil\b|\.plist\b|knowledgec\.db|quarantine'
     tools: [read.output on plists/KnowledgeC, strings.extract on fsevents]
     label: macOS system artifact
-  # iOS device parses (mobile.*). One call parses MANY stores, so the per-store
+  # Phone parses (mobile.*: iOS MVT / ios_apt, Android ALEAPP). One call parses MANY stores, so the per-store
   # classes are MARKERS stamped by the wrapper only for a produced file that
   # holds >= 1 record (an empty module carries no class) — never by tool name.
   # They mirror the Windows analogues' group roles: messaging ~ chat_store,
@@ -220,25 +220,25 @@ classes:
   # documentary identity binding (Apple ID / configured accounts). A phone
   # parse is not a logon/session artifact and joins no session/transfer group.
   mobile_artifact:
-    cmd: 'mvt-ios\b.*\bcheck-(?:fs|backup)\b|ios_apt\.py'
-    tools: [mobile.mvt_ios_check_fs, mobile.ios_apt, mobile.mvt_ios_check_backup]
-    label: iOS device artifact parse (MVT / ios_apt)
+    cmd: 'mvt-ios\b.*\bcheck-(?:fs|backup)\b|ios_apt\.py|aleapp\.py'
+    tools: [mobile.mvt_ios_check_fs, mobile.ios_apt, mobile.mvt_ios_check_backup, mobile.aleapp]
+    label: phone artifact parse (MVT / ios_apt / ALEAPP)
   mobile_messaging:
     marker: mobile_messaging
-    tools: [mobile.mvt_ios_check_fs (SMS/WhatsApp/Calls/InteractionC/Contacts), mobile.mvt_ios_check_backup]
-    label: iOS messaging / call / contact record
+    tools: [mobile.mvt_ios_check_fs (SMS/WhatsApp/Calls/InteractionC/Contacts), mobile.mvt_ios_check_backup, mobile.aleapp (SMS/RCS/Call Logs/Contacts/chat apps)]
+    label: phone messaging / call / contact record
   mobile_browser:
     marker: mobile_browser
-    tools: [mobile.mvt_ios_check_fs (Safari/WebKit/Chrome/Firefox), mobile.ios_apt SAFARI]
-    label: iOS browser history / state record
+    tools: [mobile.mvt_ios_check_fs (Safari/WebKit/Chrome/Firefox), mobile.ios_apt SAFARI, mobile.aleapp (Chrome/browser history)]
+    label: phone browser history / state record
   mobile_location:
     marker: mobile_location
-    tools: [mobile.mvt_ios_check_fs (LocationdClients), mobile.ios_apt WIFI/NETWORKING]
-    label: iOS location / Wi-Fi network record
+    tools: [mobile.mvt_ios_check_fs (LocationdClients), mobile.ios_apt WIFI/NETWORKING, mobile.aleapp (Google location/Wi-Fi/Bluetooth)]
+    label: phone location / Wi-Fi network record
   mobile_accounts:
     marker: mobile_accounts
-    tools: [mobile.ios_apt INETACCOUNTS/BASICINFO, mobile.mvt_ios_check_fs (Applications/IDStatusCache)]
-    label: iOS account / Apple ID record
+    tools: [mobile.ios_apt INETACCOUNTS/BASICINFO, mobile.mvt_ios_check_fs (Applications/IDStatusCache), mobile.aleapp (Accounts_ce/de, installed apps)]
+    label: phone account / Apple ID / Google account record
 
 groups:
   # ANY = every class (used by act=other)

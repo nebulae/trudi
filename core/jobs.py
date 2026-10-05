@@ -234,8 +234,8 @@ BACKGROUND_IF_SLOW = frozenset({
     "misc_chainsaw_hunt", "misc_hindsight_chrome", "misc_pff_export",
     "misc_readpst_extract", "misc_usnparser_parse", "misc_usbdeviceforensics",
     "misc_sqlite_recover", "strings_png_acropalypse",
-    # iOS parsers: ~20 s on a small extraction, tens of minutes on a full phone.
-    "mobile_mvt_ios_check_fs", "mobile_mvt_ios_check_backup",
+    # Phone parsers: ~20 s on a small extraction, tens of minutes on a full phone.
+    "mobile_aleapp", "mobile_mvt_ios_check_fs", "mobile_mvt_ios_check_backup",
     "mobile_mvt_ios_decrypt_backup", "mobile_ios_apt",
 })
 INLINE_WAIT = float(os.environ.get("TRUDI_JOB_INLINE_WAIT") or "30")

@@ -142,11 +142,15 @@ _CAPABILITIES: list[dict] = [
         "id": "mobile_device",
         "phases": ["Collect", "Analyze"],
         "evidence": ["mobile"],
-        "purpose": ("Parse an extracted iOS filesystem or iTunes backup — MVT "
+        "purpose": ("Parse a phone extraction. Android (full-filesystem tree, zip/"
+                    "tar, raw image): ALEAPP (SMS/RCS, calls, contacts, chat apps, "
+                    "Chrome, Google location, Wi-Fi, Bluetooth, accounts, apps). "
+                    "iOS filesystem or iTunes backup: MVT "
                     "(messages, calls, contacts, Safari/WebKit, locationd, TCC, "
                     "accounts, timeline) and mac_apt ios_apt (apps, accounts, Wi-Fi, "
                     "networking, Safari, Notes, Screen Time, Spotlight)."),
         "tools": [
+            "mobile.aleapp",
             "mobile.mvt_ios_check_fs",
             "mobile.ios_apt",
             "mobile.mvt_ios_check_backup",
@@ -426,6 +430,9 @@ _OPTIONAL_BINARIES: dict[str, tuple[tuple[str, ...], str]] = {
     **{t: (("mvt-ios", "/usr/local/bin/mvt-ios"), "pipx install mvt (Amnesty MVT)")
        for t in ("mobile.mvt_ios_check_fs", "mobile.mvt_ios_check_backup",
                  "mobile.mvt_ios_decrypt_backup")},
+    "mobile.aleapp": (("/opt/aleapp/src/aleapp.py",),
+                      "clone github.com/abrignoni/ALEAPP to /opt/aleapp/src with a "
+                      "venv at /opt/aleapp/venv (pip install -r requirements.txt)"),
     "mobile.ios_apt": (("/opt/mac-apt/bin/mac_apt_git/ios_apt.py",),
                        "install mac_apt (github.com/ydkhatri/mac_apt) under /opt/mac-apt"),
 }

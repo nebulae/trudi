@@ -1,4 +1,5 @@
-"""mobile.* — iOS device artifact parsers (Amnesty MVT, mac_apt ios_apt).
+"""mobile.* — device artifact parsers: iOS (Amnesty MVT, mac_apt ios_apt) and
+Android (ALEAPP — see its section for why it runs without a working tree).
 
 Each wrapper runs the parser over an extracted iOS filesystem folder (or an
 iTunes-style backup) and writes its native output — MVT: one JSON per module
@@ -623,4 +624,151 @@ def ios_apt(fs_path: str, output_dir: str, plugins: str = "ALL") -> dict:
         extra["coverage_warning"] = (
             f"{unreadable['count']} directories in the input are not readable by this "
             "user (mode 000 in the extraction); their artifacts were NOT parsed.")
+    return _finish(r, extra)
+
+
+# ── ALEAPP (Android) ─────────────────────────────────────────────────────────
+#
+# ALEAPP never opens the input in place: its file seekers COPY every matched
+# file (with its -wal/-shm, which artifact patterns glob) into the report's
+# data/ folder and parse the copy; zip/tar/gz members are extracted there, a raw
+# image is read through its own read-only volume readers. So no working tree is
+# staged — and one would break it: ALEAPP skips symlinks that resolve outside
+# the input folder, which is every file of a stage. data/ (evidence copies, incl.
+# app .json files), media/ and _HTML/ are not parser output and are kept out of
+# the parsed-output inventory; the tables are _TSV Exports/<Artifact>.tsv.
+
+ALEAPP = os.environ.get("TRUDI_ALEAPP") or "/opt/aleapp/src/aleapp.py"
+ALEAPP_PYTHON = os.environ.get("TRUDI_ALEAPP_PYTHON") or "/opt/aleapp/venv/bin/python"
+ALEAPP_TIMEOUT = 7200
+ALEAPP_TYPES = ("fs", "zip", "tar", "gz", "raw")
+_ALEAPP_NON_TABLE_DIRS = ("data", "media", "_HTML")
+
+# ALEAPP artifact names (TSV stems, lower-cased) → tier-contract families.
+# 500+ artifact modules: matched by keyword, stamped only for a TSV with rows.
+_ALEAPP_FAMILY = (
+    ("mobile_messaging", re.compile(
+        r"\b(sms|mms|rcs|call ?logs?|call history|contacts?|messages?|messaging|messenger"
+        r"|chats?|whatsapp|telegram|signal|discord|viber|wire|threema|kik|snapchat|skype"
+        r"|teams|slack|gmail|e-?mail|voicemail)\b")),
+    ("mobile_browser", re.compile(
+        r"\b(chrom(e|ium)|firefox|browser|brave|opera|edge|samsung internet|web history"
+        r"|searches|search history|bookmarks|downloads|cookies)\b")),
+    ("mobile_location", re.compile(
+        r"\b(locations?|wi-?fi|wifi\w*|bluetooth|cell towers?|gps|maps|semantic|geofenc\w*"
+        r"|network usage|netusage)\b")),
+    ("mobile_accounts", re.compile(
+        r"\b(accounts?(_ce|_de)?|account sync|installed apps|package\w*|device info"
+        r"|google play|user profile|sim info|owner)\b")),
+)
+
+
+def _aleapp_type(path: str) -> str:
+    if os.path.isdir(path):
+        return "fs"
+    low = path.lower()
+    if low.endswith(".zip"):
+        return "zip"
+    if low.endswith((".tar.gz", ".tgz", ".gz")):
+        return "gz"
+    if low.endswith(".tar"):
+        return "tar"
+    return "raw"
+
+
+def _aleapp_families(files: list[dict]) -> list[str]:
+    fams = set()
+    for f in files:
+        if not f.get("rows") or not f["file"].lower().endswith(".tsv"):
+            continue
+        stem = os.path.splitext(os.path.basename(f["file"]))[0].lower()
+        for fam, rx in _ALEAPP_FAMILY:
+            if rx.search(stem):
+                fams.add(fam)
+    return sorted(fams)
+
+
+_ALEAPP_ERROR = re.compile(r"^.*(?:had errors|Traceback|Error in|ERROR\b).*$", re.M)
+_ALEAPP_NO_FILE = re.compile(r"^No file found", re.M)
+
+
+@mcp.tool()
+@output_safe
+def aleapp(input_path: str, output_dir: str, input_type: str = "auto") -> dict:
+    """ALEAPP on an Android extraction: one TSV per artifact (_TSV Exports/).
+
+    SMS/MMS/RCS, call logs, contacts, WhatsApp/Telegram/Signal, Chrome, Google
+    location/Maps, Wi-Fi, Bluetooth, accounts, installed apps, notifications…
+    input_type: auto | fs (extracted tree holding data/) | zip | tar | gz |
+    raw (.img/.E01/.dd, read in place). Read TSVs with read.output.
+    """
+    if not input_path or not os.path.exists(input_path):
+        return {"success": False, "error": f"input_path does not exist: {input_path!r}",
+                "hint": "Pass the ROOT of the extracted Android tree (holding data/), "
+                        "or the zip/tar/raw image itself."}
+    missing = tool_unavailable_result("mobile.aleapp", _which)
+    if missing:
+        return missing
+    itype = (input_type or "auto").strip().lower()
+    if itype == "auto":
+        itype = _aleapp_type(input_path)
+    if itype not in ALEAPP_TYPES:
+        return {"success": False, "error": f"unknown input_type {input_type!r}",
+                "valid": ["auto", *ALEAPP_TYPES]}
+    is_dir = os.path.isdir(input_path)
+    if (itype == "fs") != is_dir:
+        return {"success": False, "error": (f"input_type {itype!r} does not fit "
+                                            f"{'a directory' if is_dir else 'a file'}")}
+    os.makedirs(output_dir, exist_ok=True)
+    from datetime import datetime, timezone
+    folder = "ALEAPP_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    report = os.path.join(output_dir, folder)
+    unreadable = _unreadable_dirs(input_path) if is_dir else None
+    cmd = [ALEAPP_PYTHON, ALEAPP, "-t", itype, "-i", input_path, "-o", output_dir,
+           "--custom_output_folder", folder]
+    holder: dict = {}
+
+    def classify(result: dict, stdout: str, stderr: str) -> None:
+        result["output_path"] = report
+        files, total = (_inventory(report, skip_dirs=_ALEAPP_NON_TABLE_DIRS)
+                        if os.path.isdir(report) else ([], 0))
+        tsvs = [f for f in files if f["file"].lower().endswith(".tsv")]
+        text = (stdout or "") + "\n" + (stderr or "")
+        errors = sorted({m.group(0).strip()[:200] for m in _ALEAPP_ERROR.finditer(text)})
+        holder.update(files=files, total=total, errors=errors[:20],
+                      no_file=len(_ALEAPP_NO_FILE.findall(text)))
+        if result.get("success") and not tsvs:
+            result["success"] = False
+            result["error"] = (f"ALEAPP exited 0 but wrote no TSV under {report} — "
+                               "wrong input root/type, or not an Android extraction")
+        extra = [f"  modules with no input file: {holder['no_file']}"]
+        if errors:
+            extra.append(f"  module errors: {len(errors)} (see module_errors)")
+        _stamp(result, _summary_text("ALEAPP output summary (rows per TSV):", tsvs, extra))
+
+    t0 = _parsed.now()
+    r = run(cmd, timeout=ALEAPP_TIMEOUT, output_dir=output_dir, classify=classify)
+    _parsed.stamp(r, report, t0, skip_dirs=_ALEAPP_NON_TABLE_DIRS)
+    files = holder.get("files") or []
+    fams = _aleapp_families(files)
+    _annotate(r, **{f: True for f in fams})
+    rows = {f["file"]: f["rows"] for f in files
+            if f["file"].lower().endswith(".tsv") and "rows" in f}
+    extra = {
+        "output_dir": report, "input_path": input_path, "input_type": itype,
+        "rows_by_tsv": rows,
+        "tables_with_rows": sorted(k for k, v in rows.items() if v),
+        "module_errors": holder.get("errors", []),
+        "output_files": [f for f in files if "rows" in f][:_MAX_LISTED],
+        "output_file_count": holder.get("total", 0),
+        "artifact_families": fams,
+        "hint": ("Read '_TSV Exports/<Artifact>.tsv' with read.output (query/columns/where). "
+                 "_Timeline/tl.db and _lava_artifacts.db hold the same rows as sqlite; "
+                 "data/ holds ALEAPP's copies of the evidence files it parsed."),
+    }
+    if unreadable and unreadable.get("count"):
+        extra["unreadable_dirs"] = unreadable
+        extra["coverage_warning"] = (
+            f"{unreadable['count']} directories in the input are not readable by this "
+            "user; their artifacts were NOT parsed.")
     return _finish(r, extra)
