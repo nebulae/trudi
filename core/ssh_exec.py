@@ -212,14 +212,20 @@ ACTION_BUILDERS: dict[str, dict[str, Any]] = {
     # template so audit/classification read as a session kill, not a proc kill).
     "kill_session": {"params": {"pid": _v_pid},
                      "argv": lambda p: ["/bin/kill", "-9", p["pid"]]},
-    # Kill EVERY process whose command line matches the implant's image path —
-    # one shot catches cron/service-respawned siblings that a single-pid kill
+    # Kill EVERY process whose command line STARTS WITH the implant's image path
+    # — one shot catches cron/service-respawned siblings that a single-pid kill
     # leaves behind. Pass the DETECTION-TIME image_path (what the process's
     # argv[0] shows); a path quarantined afterwards won't match the live argv.
-    # Irreversible. (-f matches the full cmdline; the path is regex-validated,
-    # so it carries no shell/metachars.)
+    # Irreversible. The pattern is ANCHORED with ^ so it matches only processes
+    # whose cmdline begins with the path — NOT pkill's own
+    # `sudo … pkill -9 -f <path>` invocation (which begins with the sudo/pkill
+    # binary). Without the anchor, pkill -f self-matches and kills the invoking
+    # sudo/ssh chain (observed: exit 255, severed session). The path is
+    # regex-validated (no metachars); a literal '.' matches itself, so an
+    # unescaped dot in the path is harmless here.
     "kill_by_image": {"params": {"image_path": _v_safe_path},
-                      "argv": lambda p: ["/usr/bin/pkill", "-9", "-f", p["image_path"]]},
+                      "argv": lambda p: ["/usr/bin/pkill", "-9", "-f",
+                                         "^" + p["image_path"]]},
     # Cut the lateral channel at the network: REJECT all inbound from the
     # attacker's source IP. Reversible + low-risk → AUTO tier. No `-m comment`
     # match: the xt_comment module is absent on some nf_tables kernels (WSL2),

@@ -20,7 +20,7 @@ sources:
       SELECT
         ImagePath AS image_path,
         if(condition=valid,
-           then=execve(argv=["/usr/bin/pkill", "-9", "-f", ImagePath]),
+           then=execve(argv=["/usr/bin/pkill", "-9", "-f", "^" + ImagePath]),
            else=dict(stdout="", stderr="invalid image path", return_code=2)
         ) AS execution
       FROM scope()

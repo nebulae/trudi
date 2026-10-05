@@ -85,7 +85,7 @@ class TestKillByImageSweep:
     def test_argv_and_irreversible(self):
         from core import ssh_exec
         argv = ssh_exec.build_argv("kill_by_image", {"image_path": "/usr/local/sbin/.trudi-rootsvc"})
-        assert argv == ["/usr/bin/pkill", "-9", "-f", "/usr/local/sbin/.trudi-rootsvc"]
+        assert argv == ["/usr/bin/pkill", "-9", "-f", "^/usr/local/sbin/.trudi-rootsvc"]
         assert ssh_exec.revert_template_for("kill_by_image") is None
 
     def test_rejects_shell_metachars(self):
