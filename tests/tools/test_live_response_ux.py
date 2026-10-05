@@ -79,3 +79,91 @@ class TestGateAcceptsPopup:
         # agent cannot self-approve an action with no operator entry
         (sug / "ACT-9.json").write_text(json.dumps({"action_id": "ACT-9"}))
         assert gates.check_operator_text(case, "ACT-9", "Approve ACT-9") is not None
+
+
+class TestKillByImageSweep:
+    def test_argv_and_irreversible(self):
+        from core import ssh_exec
+        argv = ssh_exec.build_argv("kill_by_image", {"image_path": "/usr/local/sbin/.trudi-rootsvc"})
+        assert argv == ["/usr/bin/pkill", "-9", "-f", "/usr/local/sbin/.trudi-rootsvc"]
+        assert ssh_exec.revert_template_for("kill_by_image") is None
+
+    def test_rejects_shell_metachars(self):
+        from core import ssh_exec
+        import pytest as _pt
+        for bad in ("/x; rm -rf /", "/x && id", "/x`id`", "../etc/passwd"):
+            with _pt.raises(ssh_exec.ParamValidationError):
+                ssh_exec.build_argv("kill_by_image", {"image_path": bad})
+
+    def test_in_recipes_and_needs_approval(self):
+        import yaml
+        from response import policy
+        for rp in ("Custom.TRUDI.NewProcess", "Custom.TRUDI.PrivilegeEscalation"):
+            doc = yaml.safe_load(open(f"response/recipes/{rp}.yaml"))
+            kbi = [a for a in doc["actions"] if a["action_template"] == "kill_by_image"]
+            assert kbi, f"{rp} missing kill_by_image"
+            assert policy.classify(kbi[0]) == policy.NEEDS_APPROVAL
+
+
+class TestSnapshotEvidence:
+    def _scope(self, tmp_path, monkeypatch):
+        import tools.respond as respond
+        case = "SNAP"
+        monkeypatch.setattr(respond, "CASES_ROOT", tmp_path)
+        import response.gates as gates
+        monkeypatch.setattr(gates, "CASES_ROOT", tmp_path)
+        bl = tmp_path / case / "monitoring" / "baselines"; bl.mkdir(parents=True)
+        (bl / "C.x.json").write_text("{}")
+        monkeypatch.setattr(respond, "_resolve_host_for_case", lambda c: "trudi-victim-b")
+        return respond, case
+
+    def _fake_live(self, monkeypatch):
+        import tools.live as live
+        calls = {"n": 1000}
+
+        def mk(name):
+            def f(*a, **k):
+                calls["n"] += 1
+                return {"success": True, "_trudi_call_id": calls["n"], "tool": name}
+            return f
+        for n in ("live_process_details", "live_read_file",
+                  "live_network_connections", "live_processes"):
+            monkeypatch.setattr(live, n, mk(n))
+
+    def test_privesc_snapshots_proc_and_table(self, tmp_path, monkeypatch):
+        respond, case = self._scope(tmp_path, monkeypatch)
+        self._fake_live(monkeypatch)
+        r = respond.snapshot_evidence(
+            case, detector="Custom.TRUDI.PrivilegeEscalation",
+            evidence={"pid": "612", "image_path": "/usr/local/sbin/.trudi-rootsvc"})
+        assert r["success"] is True
+        assert len(r["snapshot_call_ids"]) >= 2          # process_details + process_table
+        caps = {c["capture"] for c in r["captured"]}
+        assert "process_details" in caps and "process_table" in caps
+
+    def test_persistence_snapshots_file(self, tmp_path, monkeypatch):
+        respond, case = self._scope(tmp_path, monkeypatch)
+        self._fake_live(monkeypatch)
+        r = respond.snapshot_evidence(
+            case, detector="Custom.TRUDI.NewPersistence",
+            evidence={"path": "/etc/cron.d/trudi-pivot"})
+        caps = {c["capture"] for c in r["captured"]}
+        assert "persistence_file" in caps and r["snapshot_call_ids"]
+
+    def test_logon_snapshots_netstat(self, tmp_path, monkeypatch):
+        respond, case = self._scope(tmp_path, monkeypatch)
+        self._fake_live(monkeypatch)
+        r = respond.snapshot_evidence(
+            case, detector="Custom.TRUDI.NewLogon",
+            evidence={"remote_ip": "10.73.0.3", "pid": 616})
+        caps = {c["capture"] for c in r["captured"]}
+        assert "network_connections" in caps and "session_proc" in caps
+
+    def test_off_scope_refused(self, tmp_path, monkeypatch):
+        import tools.respond as respond
+        monkeypatch.setattr(respond, "CASES_ROOT", tmp_path)
+        import response.gates as gates
+        monkeypatch.setattr(gates, "CASES_ROOT", tmp_path)
+        r = respond.snapshot_evidence("NOCASE", detector="Custom.TRUDI.NewProcess",
+                                         evidence={"pid": "1"})
+        assert r.get("success") is False

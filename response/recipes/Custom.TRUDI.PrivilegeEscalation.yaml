@@ -23,3 +23,12 @@ actions:
     reversible: false
     parameters:
       Pid: evidence.pid
+
+  - action_template: kill_by_image
+    artifact: Custom.TRUDI.Respond.KillByImage
+    description: "SIGKILL every process running the implant image (catches cron/service-respawned siblings a single-pid kill misses)"
+    manual_command: "pkill -9 -f <image_path>"
+    risk: medium
+    reversible: false
+    parameters:
+      ImagePath: evidence.image_path

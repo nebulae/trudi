@@ -96,7 +96,21 @@ def check_operator_text(case_id: str, action_id: str, operator_text: str) -> Opt
 
     try:
         from core.execution_log import log
-        entries = log.last_n_window(n=APPROVAL_LOOKBACK_ENTRIES)
+        entries = list(log.last_n_window(n=APPROVAL_LOOKBACK_ENTRIES))
+        # The operator's message (typed via UserPromptSubmit, or a popup answer
+        # via the PostToolUse hook) is written to the trace FILE by a separate
+        # process; the server's in-memory window can lag that write. Read the
+        # file too so a just-made approval is seen without waiting for a refresh.
+        # Entries written by a hook are what we're after, so the file is the
+        # authoritative source for this check.
+        path = getattr(log, "_path", None)
+        if path and os.path.exists(path):
+            try:
+                with open(path) as f:
+                    disk = json.load(f).get("entries", []) or []
+                entries.extend(disk[-APPROVAL_LOOKBACK_ENTRIES:])
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass
     except Exception as e:  # noqa: BLE001
         return _refuse(
             "operator_text_required",

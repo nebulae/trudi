@@ -58,7 +58,9 @@ class TestSlimPass:
             # silently re-bloat schema-eager clients. 8.5k -> 8.6k (2026-09-24):
             # the four mobile.* tools add ~64 tokens of one-line descriptions;
             # the pre-existing tools measured ~8,495, 5 tokens under the old bar.
-            assert total / 4 < 8600, f"description mass regressed: ~{total//4} tokens"
+            # 8.6k -> 8.7k (2026-10-05): respond.snapshot_evidence (live-response
+            # snapshot-at-detection) adds a one-line slimmed description (~20 tok).
+            assert total / 4 < 8700, f"description mass regressed: ~{total//4} tokens"
         asyncio.run(run())
 
     def test_overrides_target_existing_tools(self, server_mcp):

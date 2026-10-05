@@ -175,6 +175,17 @@ directly from the high-confidence detector alert and record the forensic
 finding in parallel/after (step 4b) for the report. `suggest_containment`'s
 `finding_id` is OPTIONAL — omit it on the fast path.
 
+**SNAPSHOT FIRST (mandatory before any destructive/quarantine action).**
+Containment destroys the artifacts a finding must cite (a quarantined binary,
+a killed process's /proc, a deleted cron file). Before `execute_action`, call
+`respond.snapshot_evidence(case_id, detector=<alert detector>,
+evidence=<alert evidence>)` — it runs the read-only live captures for that
+detector (process /proc details, persistence file content, inbound netstat,
+the process table) and returns `snapshot_call_ids`. Carry those into the
+finding's `input_call_ids` (step 4b) so the intrusion stays provable after
+eradication. Reversible AUTO actions (pause, block IP) need no snapshot; a
+kill / quarantine / cron-removal always does.
+
 For each response-eligible alert, call
 `respond.suggest_containment(case_id,
 detector="Custom.TRUDI.<NewLogon|NewProcess|PrivilegeEscalation|NewPersistence|NewNetwork|YaraProcess>",
@@ -213,6 +224,15 @@ The server decides — you do not classify. Two outcomes:
 
 Skip actions whose `unresolved_placeholders` is non-empty (flag them as
 incomplete — evidence was missing).
+
+**Prefer `kill_by_image` over single-pid `kill_pid` for a respawning implant.**
+A cron/service that re-launches its payload spawns fresh PIDs; killing one PID
+leaves siblings, and `monitor.verify_clean` will (correctly) still report
+dirty. When the NewProcess/PrivilegeEscalation evidence carries an
+`image_path`, take the `kill_by_image` action (`pkill -9 -f <image_path>`,
+operator-approved) with the DETECTION-TIME image path — it removes the whole
+family in one shot. Pair it with removing the persistence (cron/unit) so
+nothing re-drops the binary.
 
 ### 6. Operator approvals (resume path)
 

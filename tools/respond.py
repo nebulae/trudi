@@ -226,6 +226,91 @@ def list_actions(case_id: str, status: str = "all") -> dict:
     return {"success": True, "case_id": case_id, "actions": actions}
 
 
+@mcp.tool()
+@output_safe
+def snapshot_evidence(
+    case_id: str,
+    detector: Optional[str] = None,
+    evidence: Optional[dict] = None,
+    host: Optional[str] = None,
+) -> dict:
+    """Capture the alert's forensic grounding BEFORE containment destroys it.
+
+    Contain-first is fast, but quarantining a binary / killing a process /
+    deleting a cron file removes the very artifacts a finding must cite. Call
+    this immediately after an alert fires and BEFORE respond.execute_action:
+    it runs the detector-appropriate READ-ONLY live captures (process
+    /proc details, persistence file content, inbound-session netstat) and
+    returns their `_trudi_call_id`s. Cite those in the finding's
+    `input_call_ids` so the intrusion stays provable after eradication.
+
+    Read-only: uses the live.* read path, never mutates the endpoint.
+    """
+    refusal = response_gates.check_live_monitoring_scope(case_id)
+    if refusal:
+        return refusal
+    if not detector or evidence is None:
+        return {"success": False,
+                "error": "pass detector= and evidence= from the alert payload."}
+    h = host or _resolve_host_for_case(case_id)
+    if not h:
+        return {"success": False,
+                "error": "no live host configured — set 'host' in monitoring/config.json "
+                         "or register one in live_hosts.json."}
+
+    ev = {str(k).lower(): v for k, v in (evidence or {}).items()}
+    det = detector.rsplit(".", 1)[-1]
+    pid, path = ev.get("pid"), ev.get("path")
+
+    from tools import live as _live
+
+    def _fn(tool):
+        return getattr(tool, "fn", tool)
+
+    captured: list[dict] = []
+
+    def _cap(label: str, tool, *args):
+        try:
+            r = _fn(tool)(*args)
+        except Exception as e:  # noqa: BLE001
+            captured.append({"capture": label, "error": str(e)[:160]})
+            return
+        if isinstance(r, dict):
+            captured.append({"capture": label, "call_id": r.get("_trudi_call_id"),
+                             "success": r.get("success")})
+
+    # Process-centric detectors: /proc/<pid> (uid, cmdline, exe, maps) is the
+    # root/lineage proof that a kill erases.
+    if det in ("NewProcess", "PrivilegeEscalation", "YaraProcess") and pid is not None:
+        try:
+            _cap("process_details", _live.live_process_details, h, int(pid))
+        except (TypeError, ValueError):
+            pass
+    # Persistence: the file content a removal deletes.
+    if det == "NewPersistence" and path:
+        _cap("persistence_file", _live.live_read_file, h, path)
+    # Session detectors: the ESTABLISHED flow a block/kill tears down.
+    if det in ("NewLogon", "NewNetwork"):
+        _cap("network_connections", _live.live_network_connections, h)
+        if pid is not None:
+            try:
+                _cap("session_proc", _live.live_process_details, h, int(pid))
+            except (TypeError, ValueError):
+                pass
+    # Always anchor a full process table for lineage context.
+    _cap("process_table", _live.live_processes, h)
+
+    call_ids = [c["call_id"] for c in captured if c.get("call_id")]
+    return {
+        "success": bool(call_ids),
+        "case_id": case_id, "host": h, "detector": detector,
+        "snapshot_call_ids": call_ids,
+        "captured": captured,
+        "hint": "cite snapshot_call_ids in the finding's input_call_ids so the "
+                "intrusion stays grounded after contain/eradicate.",
+    }
+
+
 # ── Execution path (gated) ────────────────────────────────────────────────────
 
 def _executions_dir(case_id: str) -> Path:

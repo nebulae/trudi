@@ -212,6 +212,14 @@ ACTION_BUILDERS: dict[str, dict[str, Any]] = {
     # template so audit/classification read as a session kill, not a proc kill).
     "kill_session": {"params": {"pid": _v_pid},
                      "argv": lambda p: ["/bin/kill", "-9", p["pid"]]},
+    # Kill EVERY process whose command line matches the implant's image path —
+    # one shot catches cron/service-respawned siblings that a single-pid kill
+    # leaves behind. Pass the DETECTION-TIME image_path (what the process's
+    # argv[0] shows); a path quarantined afterwards won't match the live argv.
+    # Irreversible. (-f matches the full cmdline; the path is regex-validated,
+    # so it carries no shell/metachars.)
+    "kill_by_image": {"params": {"image_path": _v_safe_path},
+                      "argv": lambda p: ["/usr/bin/pkill", "-9", "-f", p["image_path"]]},
     # Cut the lateral channel at the network: REJECT all inbound from the
     # attacker's source IP. Reversible + low-risk → AUTO tier. No `-m comment`
     # match: the xt_comment module is absent on some nf_tables kernels (WSL2),
@@ -257,6 +265,7 @@ FORWARD_TO_REVERT_TEMPLATE: dict[str, str | None] = {
     "kill_pid": None,              # irreversible
     "kill_owning_pid": None,       # irreversible
     "kill_session": None,          # irreversible
+    "kill_by_image": None,         # irreversible
     "block_source_ip": "unblock_source_ip",
     "lock_account": "unlock_account",
 }
