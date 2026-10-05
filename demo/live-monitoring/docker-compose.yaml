@@ -79,6 +79,69 @@ services:
     privileged: true
     restart: unless-stopped
 
+  # ── Lateral-movement scenario (compose profile "lateral") ──────────────────
+  # Two extra hosts for the A→B lateral-movement / privesc / persistence demo.
+  # They start ONLY with `docker compose --profile lateral up`, so the default
+  # single-host DEMO-LIVE bring-up is unaffected. Both enroll as their own
+  # Velociraptor clients (writeback is container-local, so distinct client_ids).
+  #
+  #   victim-a  beachhead — already compromised; holds the "stolen" devops key
+  #             and runs /attacks/run lateral to pivot to victim-b.
+  #   victim-b  pivot target — the devops account + an over-broad sudoers rule
+  #             are the modelled weakness; lateral.sh lands here, escalates to
+  #             root, and installs persistence.
+  #
+  # lan-net carries the A→B SSH session (both are RFC1918, so the lateral logon
+  # is distinguished by baseline source-IP allowlist, not by an RFC1918 filter).
+  victim-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.victim
+    container_name: trudi-victim-a
+    init: true  # tini reaps killed-implant zombies so pslist stays clean
+    hostname: victim-a
+    profiles: ["lateral"]
+    environment:
+      VICTIM_ROLE: beachhead
+    networks:
+      - velo-net
+      - lan-net
+      - c2-net
+    ports:
+      - "2223:22"
+    volumes:
+      - velo-config:/config:ro
+      - lateral-cred:/lateral
+    depends_on:
+      velo-server:
+        condition: service_healthy
+    privileged: true
+    restart: unless-stopped
+
+  victim-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.victim
+    container_name: trudi-victim-b
+    init: true  # tini reaps killed-implant zombies so pslist stays clean
+    hostname: victim-b
+    profiles: ["lateral"]
+    environment:
+      VICTIM_ROLE: target
+    networks:
+      - velo-net
+      - lan-net
+    ports:
+      - "2224:22"
+    volumes:
+      - velo-config:/config:ro
+      - lateral-cred:/lateral
+    depends_on:
+      velo-server:
+        condition: service_healthy
+    privileged: true
+    restart: unless-stopped
+
   c2-sink:
     # Fake C2 listener. Pinned to a TEST-NET-3 address (RFC 5737 documentation
     # range, 203.0.113.0/24) so it is unmistakably non-routable/fake AND passes
@@ -107,7 +170,16 @@ networks:
     ipam:
       config:
         - subnet: 203.0.113.0/24
+  # Internal LAN carrying the victim-a → victim-b lateral SSH session.
+  lan-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.73.0.0/24
 
 volumes:
   velo-config:
   velo-data:
+  # Carries the modelled "stolen" devops SSH key from victim-b (which mints it)
+  # to victim-a (which pivots with it). Internal to the lateral profile.
+  lateral-cred:

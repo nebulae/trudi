@@ -113,38 +113,43 @@ def _render(template: str, evidence_lc: dict) -> str:
 @output_safe
 def suggest_containment(
     case_id: str,
-    finding_id: int,
+    finding_id: int = 0,
     detector: Optional[str] = None,
     evidence: Optional[dict] = None,
 ) -> dict:
-    """Recommend operator-runnable containment commands for a finding.
+    """Recommend operator-runnable containment commands from an alert or finding.
 
-    Looks up the recipe matching the alert's detector and renders each candidate
-    action's description + copyable `manual_command` with the finding's evidence
+    Looks up the recipe matching the detector and renders each candidate
+    action's description + copyable `manual_command` with the evidence
     substituted in, writing one ACT-N.json per option under
     `~/cases/<case>/monitoring/response/suggestions/`. NOTHING EXECUTES — the
     returned `manual_command` strings are for a human to run out-of-band.
 
-    `finding_id` is the `_trudi_call_id` of the upstream `record_finding`.
-    `detector` (e.g. 'Custom.TRUDI.NewNetwork') and `evidence` (the alert's
-    evidence dict) should be passed explicitly from the alert payload.
+    LIVE-MODE FAST PATH: `finding_id` is OPTIONAL. In live monitoring, call this
+    straight off a high-confidence detector alert — pass `detector` + `evidence`
+    from the alert payload and leave `finding_id=0`. Containment must NOT wait on
+    the forensic finding ceremony (tier contracts, evidence-citation rounds);
+    record the forensic finding in parallel/after for the report. When a recorded
+    finding does exist, pass its `_trudi_call_id` as `finding_id` for linkage.
     """
     refusal = response_gates.check_live_monitoring_scope(case_id)
     if refusal:
         return refusal
     _ensure_layout(case_id)
 
-    finding = _load_finding(finding_id)
+    finding = _load_finding(finding_id) if finding_id else None
     if finding is None and (detector is None or evidence is None):
         return {
             "success": False,
-            "error": f"finding_id {finding_id} not found in trace, and detector/evidence "
-                     f"not supplied. Pass detector= and evidence= explicitly.",
+            "error": "pass detector= and evidence= from the alert (live fast path), "
+                     "or a valid finding_id whose trace entry carries them. "
+                     f"finding_id={finding_id} resolved no finding and no detector/evidence given.",
         }
 
     if detector is None:
         desc = (finding or {}).get("description") or ""
-        for known in ("NewProcess", "NewPersistence", "NewNetwork", "YaraProcess"):
+        for known in ("NewProcess", "NewPersistence", "NewNetwork", "YaraProcess",
+                      "NewLogon", "PrivilegeEscalation"):
             if known in desc:
                 detector = f"Custom.TRUDI.{known}"
                 break

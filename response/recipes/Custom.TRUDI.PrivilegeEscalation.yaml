@@ -1,0 +1,25 @@
+# Recipe: containment actions for Custom.TRUDI.PrivilegeEscalation alerts
+# (a novel root-owned process — the privesc outcome of the pivot).
+#
+# Evidence fields the detector emits: pid, image_path, process_name, ppid,
+# commandline, username (root), timestamp_utc.
+
+actions:
+  - action_template: quarantine_image
+    artifact: Custom.TRUDI.Respond.QuarantineImage
+    description: "Quarantine the escalated binary to /var/quarantine/ (chmod 000 + move)"
+    manual_command: "mkdir -p /var/quarantine && chmod 000 <image_path> && mv <image_path> /var/quarantine/"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.RestoreFromQuarantine
+    parameters:
+      Path: evidence.image_path
+
+  - action_template: kill_pid
+    artifact: Custom.TRUDI.Respond.KillPid
+    description: "Terminate the escalated root process (SIGKILL)"
+    manual_command: "kill -9 <pid>"
+    risk: medium
+    reversible: false
+    parameters:
+      Pid: evidence.pid

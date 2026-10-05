@@ -50,9 +50,10 @@ investigating* still queue as later events. This is the robust mechanism.
 ### 2. On each Monitor event
 Each event is one JSON line, e.g. `{"status":"ALERTS","new_seqs":[10,11]}`.
 Run the **full `/trudi-check-alerts` flow** (its steps 1–8: open/extend the
-investigation, hypothesize → dair → tool batch → record findings, then the
-auto-protect stage — auto-execute the reversible+low tier, queue/pause
-destructive actions for `approve ACT-N`, print rollbacks — then
+investigation, contain off the alert (fast path) + record findings for the
+report, then the auto-protect stage — auto-execute the reversible+low tier,
+queue/pause destructive actions behind a popup approval (`AskUserQuestion`,
+approve option labelled with the `ACT-N`), print rollbacks — then
 `end_investigation` + ack + update `_last_check_seq.txt`).
 
 **Do NOT re-start the Monitor** — it is still running and will deliver the next
@@ -61,12 +62,13 @@ me again.
 
 ## Pausing & approvals
 
-If `/trudi-check-alerts` left an investigation **paused** awaiting `approve
-ACT-N`, the Monitor keeps running — new unrelated alerts still surface and fold
-into the open investigation via `extend_investigation`. The operator's `approve
-ACT-N` arrives as a normal prompt; handle it (`respond.approve_action` →
-`respond.execute_action(mode="operator")` → `monitor.clear_awaiting_approval`),
-then continue.
+If `/trudi-check-alerts` left an investigation **paused** awaiting approval, the
+Monitor keeps running — new unrelated alerts still surface and fold into the
+open investigation via `extend_investigation`. The operator's approval arrives
+either as a popup selection (`AskUserQuestion`, approve option labelled with the
+`ACT-N`) or a typed `approve ACT-N`; either way handle it
+(`respond.approve_action` → `respond.execute_action(mode="operator")` →
+`monitor.clear_awaiting_approval`), then continue.
 
 ## Stopping
 
@@ -79,4 +81,5 @@ detection itself.
 Same guardrails as `/trudi-check-alerts`: the waiter is read-only (it only
 watches the alerts directory, never touches evidence), and all response goes
 through the gated `respond.*` path — the reversible+low tier auto-executes,
-everything destructive still requires an operator-typed `approve ACT-N`.
+everything destructive still requires an explicit operator approval (a popup
+selection or a typed `approve ACT-N`); the agent cannot self-approve.

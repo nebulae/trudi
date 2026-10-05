@@ -1,0 +1,23 @@
+name: Custom.TRUDI.Respond.LockAccount
+description: |
+  TRUDI remediation: expire a local account so sshd denies all further logins
+  (key-based included) — contains an abused pivot account. Refuses protected
+  accounts (root et al.). Reversible via Custom.TRUDI.Respond.UnlockAccount.
+
+type: CLIENT
+
+parameters:
+  - name: User
+    type: string
+
+sources:
+  - query: |
+      LET valid <= User =~ "^[a-z_][a-z0-9_-]{0,31}$"
+                   AND NOT User IN ["root", "toor", "admin", "sshd", "daemon"]
+      SELECT
+        User AS user,
+        if(condition=valid,
+           then=execve(argv=["/usr/sbin/usermod", "--expiredate", "1", User]),
+           else=dict(stdout="", stderr="invalid or protected account", return_code=2)
+        ) AS execution
+      FROM scope()

@@ -75,6 +75,17 @@ run_one() {
         return $?
     fi
 
+    # `lateral` is the multi-stage A→B chain (run ON victim-a), not an Atomic
+    # test: it SSHes to victim-b and deploys movement+privesc+persistence there.
+    if [[ "${raw}" == "lateral" ]]; then
+        if [[ "${cleanup}" == "1" ]]; then
+            bash "$(dirname "$0")/lateral.sh" --cleanup
+        else
+            bash "$(dirname "$0")/lateral.sh"
+        fi
+        return $?
+    fi
+
     resolved="$(resolve_alias "${raw}")"
     if [[ -z "${resolved}" ]]; then
         echo "[run] '${raw}' is not a known alias or T-number" >&2

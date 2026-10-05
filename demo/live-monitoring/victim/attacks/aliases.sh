@@ -28,6 +28,11 @@ declare -A alias_map=(
     # LOLBin / unusual-path execution — used for the self-correction demo beat.
     # /bin/sleep run from /tmp/ — image name is allowlisted but path is not.
     [lolbas]="T1036.005#1"
+
+    # Multi-stage A→B lateral movement → privesc → persistence (profile
+    # "lateral"). Run ON victim-a. Special-cased in `run` → lateral.sh; this
+    # entry is for --list visibility only.
+    [lateral]="T1021.004+T1548.003+T1053.003"
 )
 
 list_aliases() {

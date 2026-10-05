@@ -1,0 +1,24 @@
+name: Custom.TRUDI.Respond.BlockSourceIp
+description: |
+  TRUDI remediation: iptables REJECT ALL inbound traffic from a source IP —
+  cuts a lateral-movement channel at the network. RemoteIp must be a valid
+  dotted-quad. Reversible via Custom.TRUDI.Respond.UnblockSourceIp.
+
+type: CLIENT
+
+parameters:
+  - name: RemoteIp
+    type: string
+
+sources:
+  - query: |
+      LET ip_valid <= RemoteIp =~ "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
+      SELECT
+        RemoteIp AS remote_ip,
+        if(condition=ip_valid,
+           then=execve(argv=["/sbin/iptables", "-I", "INPUT",
+                             "-s", RemoteIp,
+                             "-j", "REJECT"]),
+           else=dict(stdout="", stderr="invalid source ip", return_code=2)
+        ) AS execution
+      FROM scope()

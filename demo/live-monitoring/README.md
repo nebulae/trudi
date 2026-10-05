@@ -60,6 +60,42 @@ ssh -i ~/.ssh/trudi_live -p 2222 victim@localhost id   # smoke test
 ```
 </details>
 
+## Two-host lateral-movement scenario (profile `lateral`)
+
+The default stack is one victim. For the multi-host demo — one host moving
+laterally to another, escalating privilege, and persisting — bring up the
+`lateral` profile, which adds two more clients sharing the same server:
+
+```bash
+./bring-up.sh                                   # or: docker compose --profile lateral up -d --build
+docker compose --profile lateral up -d          # if the base stack is already up
+```
+
+- **victim-a** (`trudi-victim-a`, SSH :2223) — the beachhead. Holds a "stolen"
+  `devops` key and initiates the pivot.
+- **victim-b** (`trudi-victim-b`, SSH :2224) — the pivot target. A `devops`
+  account + an over-broad `NOPASSWD` sudoers rule are the modelled weakness.
+
+`bring-up.sh` enrolls both as their own Velociraptor clients and registers
+`trudi-victim-a` / `trudi-victim-b` in `live_hosts.json`. Drive it with the
+bundled **`LATERAL-DEMO`** case (`~/cases/LATERAL-DEMO/`).
+
+Stage the whole chain from the beachhead:
+
+```bash
+docker exec trudi-victim-a /attacks/run lateral            # A→B: move, escalate, persist
+docker exec trudi-victim-a /attacks/run lateral --cleanup  # reverse it
+```
+
+On victim-b this produces, one detector per stage: a new inbound SSH session
+(`Custom.TRUDI.NewLogon`, T1021.004), a dropped tool (`NewProcess`, T1059.004),
+a root-owned binary via sudo (`PrivilegeEscalation`, T1548.003), and a root
+cron entry (`NewPersistence`, T1053.003). Auto-protect blocks the source IP and
+quarantines/removes the reversible items automatically and pauses for
+`approve ACT-N` on the destructive kills; after eradication,
+`monitor.verify_clean(client_id=<victim-b>, case_id="LATERAL-DEMO")` confirms the
+host is back to baseline. Full runbook: `~/cases/LATERAL-DEMO/CLAUDE.md`.
+
 ## Staging attacks
 
 Each invocation runs one Atomic Red Team test and fires the matching

@@ -105,6 +105,14 @@ After this step, the active trace is the per-investigation file. The
 
 ### 4. Investigate the bundle (only if new alerts this tick)
 
+> **Ordering in live mode:** containment (step 5) is NOT gated on this step.
+> When the alerts are high-confidence detector hits that map to a response
+> recipe (NewLogon / PrivilegeEscalation / NewProcess / NewPersistence /
+> NewNetwork), you MAY run step 5's AUTO containment **first**, straight off the
+> alert evidence, then come back and record the forensic findings here for the
+> report. The findings below are the court-record of the investigation; they
+> must not delay stopping an active intrusion.
+
 If `alerts.nonempty` OR `rehydrated_entries == 0` (i.e. this is the
 first time we've actually run the investigation chain), execute the
 full chain ONCE on the bundle:
@@ -160,10 +168,18 @@ even when the infrastructure is lab-only (for example TEST-NET addresses or
 `TRUDI_DEMO_*` markers). Word the report as "contained planted demo TTPs", not
 "remediated a real compromise".
 
-Otherwise, for each response-eligible finding with tier **CONFIRMED or LIKELY**, call
-`respond.suggest_containment(case_id, finding_id=<record_finding cid>,
-detector="Custom.TRUDI.<NewNetwork|NewProcess|NewPersistence|YaraProcess>",
-evidence=<the alert's evidence dict>)`. Then, for each returned `ACT-N`
+**LIVE FAST PATH — contain off the alert, don't wait on the finding ceremony.**
+Live IR runs at machine speed: do NOT block containment on the full forensic
+finding gates (tier contracts, evidence-citation rounds). Trigger containment
+directly from the high-confidence detector alert and record the forensic
+finding in parallel/after (step 4b) for the report. `suggest_containment`'s
+`finding_id` is OPTIONAL — omit it on the fast path.
+
+For each response-eligible alert, call
+`respond.suggest_containment(case_id,
+detector="Custom.TRUDI.<NewLogon|NewProcess|PrivilegeEscalation|NewPersistence|NewNetwork|YaraProcess>",
+evidence=<the alert's evidence dict>)` (pass `finding_id=<cid>` only if a finding
+is already recorded, for linkage). Then, for each returned `ACT-N`
 that has **no** `unresolved_placeholders`, attempt autonomous execution:
 
 ```
@@ -180,30 +196,40 @@ The server decides — you do not classify. Two outcomes:
   > Undo: `kill -CONT 4242`
 
 - **Refused with `gate: "approval_required"` (destructive — irreversible
-  or risk ≥ medium):** do NOT retry. Queue it and pause:
-  `monitor.set_awaiting_approval(case_id, action_ids=["ACT-N"])`, then
-  surface the approval prompt with the command and the rollback that
-  *would* run:
-  > ⛔ **ACT-2** needs approval (irreversible): `kill -9 4242`
-  > Type `approve ACT-2` to authorise. Autonomous response is paused until you do.
+  or risk ≥ medium):** do NOT retry. Queue it
+  (`monitor.set_awaiting_approval(case_id, action_ids=["ACT-N"])`) and ask
+  the operator with a **popup** — `AskUserQuestion` — NOT by telling them to
+  type anything. One question per pending destructive action (or group them
+  into one question when several fire together). **The approve option's label
+  MUST contain the literal `ACT-N` id(s)** — that is what the
+  `operator_text_required` gate matches after the PostToolUse hook records the
+  selected label as a `user_message`. Example:
+  - question: `"Terminate the escalated root process? ACT-2: kill -9 4242 (irreversible)"`
+  - options: `"Approve ACT-2"` (→ gate authorises) · `"Skip ACT-2"` (→ no match, stays queued)
 
-  Once any action is queued for approval, stop taking new autonomous
-  actions this tick.
+  On an **Approve** selection, authorise + execute (step 6). On **Skip**, leave
+  it queued and move on. Either way, once a destructive action is pending, stop
+  taking new autonomous actions this tick.
 
 Skip actions whose `unresolved_placeholders` is non-empty (flag them as
 incomplete — evidence was missing).
 
 ### 6. Operator approvals (resume path)
 
-If the operator has typed `approve ACT-N` (the `UserPromptSubmit` hook has
-already written it to this investigation's trace), authorise + execute it:
+When the operator approves — either by selecting the `Approve ACT-N` option in
+the step-5 popup (the `PostToolUse` hook records that selected label as a
+`user_message`), or by typing `approve ACT-N` directly (the `UserPromptSubmit`
+hook; still supported) — authorise + execute it:
 ```
-respond.approve_action(case_id, "ACT-N", operator_text="approve ACT-N")
+respond.approve_action(case_id, "ACT-N", operator_text="ACT-N")
 respond.execute_action(case_id, "ACT-N", mode="operator")
 monitor.clear_awaiting_approval(case_id, "ACT-N")
 ```
-Print the `rollback_command` for the executed action. To undo a prior
-action on request, call `respond.revert_action(case_id, "ACT-N")`.
+`approve_action` succeeds because a recent `user_message` (popup or typed)
+contains the `ACT-N` id — the agent still cannot self-approve, since only the
+hooks write those entries from genuine human input. Print the
+`rollback_command` for the executed action. To undo a prior action on request,
+call `respond.revert_action(case_id, "ACT-N")`.
 
 ### 7. Close the investigation (unless paused)
 

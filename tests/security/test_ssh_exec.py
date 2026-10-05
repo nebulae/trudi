@@ -161,3 +161,42 @@ class TestSshRunWriteScope:
         assert logged.get("called") is True
         # identity path is never leaked into the recorded command
         assert "/secret/idkey" not in r["cmd"]
+
+
+# ── Lateral-movement / privesc containment actions (LATERAL-DEMO) ─────────────
+
+class TestLateralActions:
+    def test_kill_session_argv(self):
+        assert ssh_exec.build_argv("kill_session", {"pid": 211}) == ["/bin/kill", "-9", "211"]
+
+    def test_block_and_unblock_source_ip(self):
+        fwd = ssh_exec.build_argv("block_source_ip", {"remote_ip": "10.73.0.3"})
+        assert fwd[:5] == ["/sbin/iptables", "-I", "INPUT", "-s", "10.73.0.3"]
+        assert "REJECT" in fwd
+        rev = ssh_exec.build_argv("unblock_source_ip", {"remote_ip": "10.73.0.3"})
+        assert rev[:5] == ["/sbin/iptables", "-D", "INPUT", "-s", "10.73.0.3"]
+
+    def test_lock_and_unlock_account(self):
+        assert ssh_exec.build_argv("lock_account", {"user": "devops"}) == \
+            ["/usr/sbin/usermod", "--expiredate", "1", "devops"]
+        assert ssh_exec.build_argv("unlock_account", {"user": "devops"}) == \
+            ["/usr/sbin/usermod", "--expiredate", "", "devops"]
+
+    def test_protected_accounts_refused(self):
+        for u in ("root", "toor", "admin", "sshd", "daemon"):
+            with pytest.raises(ssh_exec.ParamValidationError):
+                ssh_exec.build_argv("lock_account", {"user": u})
+
+    def test_username_injection_refused(self):
+        for bad in ("devops; rm -rf /", "dev ops", "../root", "DEVOPS"):
+            with pytest.raises(ssh_exec.ParamValidationError):
+                ssh_exec.build_argv("lock_account", {"user": bad})
+
+    def test_bad_source_ip_refused(self):
+        with pytest.raises(ssh_exec.ParamValidationError):
+            ssh_exec.build_argv("block_source_ip", {"remote_ip": "10.73.0.3; echo x"})
+
+    def test_revert_map_lateral(self):
+        assert ssh_exec.revert_template_for("block_source_ip") == "unblock_source_ip"
+        assert ssh_exec.revert_template_for("lock_account") == "unlock_account"
+        assert ssh_exec.revert_template_for("kill_session") is None

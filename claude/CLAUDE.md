@@ -201,7 +201,7 @@ All forensic execution goes through MCP tools.
 | `net.*` | Network analysis | tcpdump_read, tcpdump_extract_http/dns, ngrep_search, tcpxtract_streams |
 | `enrich.*` | Threat intel | virustotal_hash/ip/domain, abuseipdb_check (graceful-degrade without keys) |
 | `misc.*` | Windows artifacts + email + macros | evtx_dump, regripper, usn_journal, analyzeMFT, Hindsight, ClamAV, PDF/PE, **pff_export**, **readpst_extract**, **densityscout_scan**, **chainsaw_hunt** (Sigma), **capa_analyze** (caps→ATT&CK), **olevba_scan**/**mraptor_scan**, **device_install_inventory** (complete USB/BadUSB device table from setupapi.dev.log), **chat_db_export** (Skype/WhatsApp sqlite → messages/transfers/participants CSVs, strict read-only), **srum_export** (SRUDB.dat ESE → per-table TSV via esedbexport: network usage / app resource usage / id map), **cs_beacon_config** (Cobalt Strike beacon config — C2/sleep/jitter/watermark/spawnto/UA/pubkey hash — from malfind/vadinfo/memmap dumps or a raw image; pass `memmap_listing=` to resolve runtime-table pointers), **xlsx_export** (Excel workbook on evidence → one CSV per sheet for read.output; dates as ISO), **sqlite_recover** (deleted records of any sqlite store — freelist pages, freeblocks, unallocated page space, -wal frames/WAL-superseded pages — plus a sqlite-carver pass; parses a temp copy, live rows dropped; `recovered.csv` for read.output), **batch_run** |
-| `mobile.*` | iOS device extractions (filesystem folder / iTunes backup) | **mvt_ios_check_fs** (Amnesty MVT: SMS/WhatsApp/Calls/Contacts/Safari/WebKit/locationd/TCC/accounts → JSON per module + timeline.csv), **mvt_ios_check_backup**, **mvt_ios_decrypt_backup** (password via env, never traced), **ios_apt** (mac_apt: apps/accounts/Wi-Fi/networking/Safari/Notes/Screen Time/Spotlight → CSV) — offline; read output with `read.output` |
+| `mobile.*` | Phone extractions — Android (full-filesystem tree / zip / tar / raw image) and iOS (filesystem folder / iTunes backup) | **aleapp** (Android, ALEAPP: SMS/RCS/calls/contacts/WhatsApp/Telegram/Signal/Chrome/Google location/Wi-Fi/Bluetooth/accounts/apps → one TSV per artifact under `_TSV Exports/`), **mvt_ios_check_fs** (Amnesty MVT: SMS/WhatsApp/Calls/Contacts/Safari/WebKit/locationd/TCC/accounts → JSON per module + timeline.csv), **mvt_ios_check_backup**, **mvt_ios_decrypt_backup** (password via env, never traced), **ios_apt** (mac_apt: apps/accounts/Wi-Fi/networking/Safari/Notes/Screen Time/Spotlight → CSV) — offline; read output with `read.output` |
 | `read.*` | Produced-output reads (traced + citable) | **read_output** (CSV/JSON/TXT under analysis / exports / reports — query, columns, where), **read_mail** (extracted mbox/.eml — message BODIES, sender/recipient roster). Use these instead of bash `python`/`jq`/`cat`/`mailbox` — bash reads are untraced/uncitable and now refused at PreToolUse |
 | `reason.*` | Adversarial review (swappable via REASON_BACKEND) | plan, hypothesize, evaluate_finding, **confidence_score**, cite_check, synthesize, pre_report_check |
 | `correlate.*` | Cross-tool correlation | **process_to_file**, **network_to_process**, **mitre_map**, **mitre_validate** |
@@ -219,8 +219,11 @@ All forensic execution goes through MCP tools.
 
 Velociraptor-backed live-monitoring cases (`monitor.*` / `respond.*`) use a
 per-investigation trace, auto-protect containment (reversible+low-risk actions
-auto-execute; destructive actions need an operator-typed `approve ACT-N`), and
-a server-classified auto/approval boundary. Static forensic investigations never
+auto-execute; destructive actions need an explicit operator approval — a popup
+selection (`AskUserQuestion`) or a typed `approve ACT-N`), and
+a server-classified auto/approval boundary. In live scope, containment triggers
+off a high-confidence alert and is NOT gated behind the forensic finding
+ceremony — the finding is recorded in parallel for the report. Static forensic investigations never
 use this subsystem. **Full detail: `docs/live-monitoring.md`.**
 
 **Not available:** MemProcFS, VSCMount (Windows-only), tshark, hayabusa, guymager.

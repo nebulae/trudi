@@ -1,0 +1,53 @@
+name: Custom.TRUDI.NewLogon
+description: |
+  TRUDI-managed: detect a new inbound interactive session — the lateral-
+  movement signal. Polls established inbound TCP on the SSH port and emits a
+  row for any remote source IP not in the baseline allowlist.
+
+  Why the socket, not wtmp/last: key-based non-PTY sshd sessions (how an
+  automated pivot lands) never write a utmp/wtmp record, so login-record
+  parsers miss them. The ESTABLISHED inbound :22 flow is the reliable signal
+  and is also what Custom.TRUDI.Respond.KillSession terminates.
+
+  Demo note: host-forwarded management SSH (TRUDI's own live.*) enters the
+  container through the bridge GATEWAY address (x.x.x.1), whereas a genuine
+  peer-to-peer lateral session comes from a non-gateway host address. The
+  query therefore also excludes gateway (.1) sources so the management plane
+  does not self-alert; real lateral movement from a fleet host still fires.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: BaselineLogonSources
+    description: JSON array of remote source IPs considered known-good.
+    default: |
+      ${baseline_logon_sources}
+  - name: SshPort
+    description: Local port that identifies an inbound SSH session.
+    type: int
+    default: 22
+  - name: PollSeconds
+    description: How often to re-snapshot inbound sessions.
+    type: int
+    default: 10
+
+sources:
+  - query: |
+      LET baseline <= parse_json_array(data=BaselineLogonSources)
+      LET tick = SELECT * FROM clock(period=PollSeconds)
+      LET snapshot = SELECT
+        timestamp(epoch=now()) AS timestamp_utc,
+        Raddr AS remote_ip,
+        Rport AS remote_port,
+        Laddr AS local_ip,
+        Lport AS local_port,
+        Status AS state,
+        Pid AS pid
+      FROM Artifact.Linux.Network.NetstatEnriched()
+      WHERE Lport = SshPort
+        AND Status = "ESTABLISHED"
+        AND Raddr != ""
+        AND NOT Raddr =~ "^127\\."
+        AND NOT Raddr =~ "\\.1$"
+        AND NOT Raddr IN baseline
+      SELECT * FROM foreach(row=tick, query=snapshot)
