@@ -52,7 +52,7 @@ def _fake_velo(monkeypatch, pslist, netstat, persist):
     def fake_results(client_id, fid, artifact):
         if artifact == "Linux.Sys.Pslist":
             return {"rows": pslist}
-        if artifact == "Linux.Network.Netstat":
+        if artifact in ("Linux.Network.Netstat", "Linux.Network.NetstatEnriched"):
             return {"rows": netstat}
         if artifact == monitor_mod.PERSISTENCE_SNAPSHOT_ARTIFACT:
             return {"rows": persist}

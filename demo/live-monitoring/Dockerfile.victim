@@ -52,7 +52,7 @@ RUN useradd -m -u 1000 -s /bin/bash victim \
 # scoped NOPASSWD sudo that makes root-level containment (iptables, kill of a
 # root process, usermod, quarantine of a root-owned binary) actually work.
 # DEMO-ONLY — do not copy this breadth into a production endpoint.
-RUN echo 'victim ALL=(root) NOPASSWD: /bin/kill, /sbin/iptables, /usr/sbin/usermod, /bin/systemctl, /usr/bin/gcore, /bin/sh' \
+RUN echo 'victim ALL=(root) NOPASSWD: /bin/kill, /sbin/iptables, /usr/sbin/usermod, /usr/bin/pkill, /bin/systemctl, /usr/bin/gcore, /bin/sh' \
         > /etc/sudoers.d/90-trudi-respond \
  && chmod 440 /etc/sudoers.d/90-trudi-respond
 

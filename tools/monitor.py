@@ -466,13 +466,26 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
 # ── Post-eradication verification ────────────────────────────────────────────
 
 def _netstat_fields(row: dict) -> tuple:
-    """(laddr_port, raddr_ip, status) tolerating Velociraptor schema variants."""
-    laddr = row.get("Laddr")
-    lport = (laddr or {}).get("Port") if isinstance(laddr, dict) else row.get("LaddrPort")
-    raddr = row.get("Raddr")
-    rip = (raddr or {}).get("IP") if isinstance(raddr, dict) else row.get("RaddrIP")
-    rport = (raddr or {}).get("Port") if isinstance(raddr, dict) else row.get("RaddrPort")
+    """(laddr_port, raddr_ip, raddr_port, status) from a NetstatEnriched row.
+
+    NetstatEnriched (the SAME source the NewLogon/NewNetwork detectors use) is
+    flat: Laddr/Raddr are string IPs, Lport/Rport ints, Status a string. Older
+    Linux.Network.Netstat packed Laddr/Raddr as {IP,Port} dicts — tolerate both
+    so verify_clean's logon/egress residual check matches what the detectors
+    fire on (mismatched parsing previously missed an open :22 session that was
+    still alerting, yielding a false clean=true)."""
+    laddr, raddr = row.get("Laddr"), row.get("Raddr")
+    lport = (laddr.get("Port") if isinstance(laddr, dict)
+             else row.get("Lport") if row.get("Lport") is not None else row.get("LaddrPort"))
+    rip = (raddr.get("IP") if isinstance(raddr, dict)
+           else raddr if isinstance(raddr, str) else row.get("RaddrIP"))
+    rport = (raddr.get("Port") if isinstance(raddr, dict)
+             else row.get("Rport") if row.get("Rport") is not None else row.get("RaddrPort"))
     status = row.get("Status") or row.get("State")
+    try:
+        lport = int(lport) if lport is not None else None
+    except (TypeError, ValueError):
+        pass
     return lport, rip, rport, status
 
 
@@ -537,9 +550,14 @@ def verify_clean(client_id: str, case_id: str, timeout_seconds: int = 300) -> di
     ps_rows, err = _collect("Linux.Sys.Pslist")
     if err:
         return err
-    net_rows, err = _collect("Linux.Network.Netstat")
+    # Use NetstatEnriched — the SAME artifact the NewLogon/NewNetwork detectors
+    # fire on — so a residual session verify sees matches what the detector sees.
+    net_rows, err = _collect("Linux.Network.NetstatEnriched")
     if err:
-        return err
+        # Fall back to plain Netstat if the enriched artifact is unavailable.
+        net_rows, err = _collect("Linux.Network.Netstat")
+        if err:
+            return err
     snap_yaml = (render.ARTIFACTS_DIR / f"{PERSISTENCE_SNAPSHOT_ARTIFACT}.yaml").read_text()
     upload_artifact_yaml(snap_yaml)
     persist_rows, err = _collect(

@@ -44,7 +44,7 @@ actions:
 
   - action_template: quarantine_image
     artifact: Custom.TRUDI.Respond.QuarantineImage
-    description: "Move the new process's image to /var/quarantine/<sha256>"
+    description: "Quarantine the new process's image to /var/quarantine/ (chmod 000 + move)"
     manual_command: "mkdir -p /var/quarantine && chmod 000 <image_path> && mv <image_path> /var/quarantine/"
     risk: low
     reversible: true
