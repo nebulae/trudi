@@ -117,12 +117,20 @@ def check_operator_text(case_id: str, action_id: str, operator_text: str) -> Opt
             f"trace not initialised — cannot verify operator message ({e})",
         )
 
-    needle = operator_text.strip()
     matched = False
     for entry in entries:
         # The harness writes operator inputs as entries with type/source we
-        # can recognise. We look for any recent entry where the content
-        # equals operator_text and the source/type marks it as user-origin.
+        # can recognise. We look for any recent user-origin entry that
+        # APPROVES THIS action_id. The dual-key property is preserved: the
+        # agent can forge the operator_text ARG (already checked above) but
+        # cannot fabricate a user_message source entry — those come from the
+        # UserPromptSubmit / popup PostToolUse hooks. We match on the action_id
+        # token appearing in a genuine operator message rather than exact
+        # string-equality with operator_text, because the operator legitimately
+        # batches approvals in ONE message ("Approve ACT-7; ACT-10; ACT-13") or
+        # approves via a popup whose phrasing ("Approve ACT-7 and ACT-10")
+        # never equals the per-action operator_text the agent passes. Requiring
+        # equality refused every batched/popup approval (observed in INV-001).
         content = (entry.get("content") or entry.get("user_message") or "").strip()
         if not content:
             continue
@@ -132,11 +140,12 @@ def check_operator_text(case_id: str, action_id: str, operator_text: str) -> Opt
         is_user_entry = (
             type_ == "user_message"
             or source == "claude_code_user_prompt"
+            or source == "claude_code_popup_answer"
             or "user_message" in source
             or "user_message" in type_
             or role == "user"
         )
-        if needle == content and is_user_entry:
+        if is_user_entry and action_id in content and "approv" in content.lower():
             matched = True
             break
 

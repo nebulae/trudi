@@ -307,6 +307,46 @@ def _pid_alive(pid: int) -> bool:
 
 @mcp.tool()
 @output_safe
+def _alias_for_client(client_id: str) -> Optional[str]:
+    """Match a Velociraptor client to its live_hosts.json ssh alias by hostname.
+
+    velo hostname 'victim-a' → ssh alias 'trudi-victim-a'. Best-effort: returns
+    None on any ambiguity or lookup failure, in which case response routing
+    falls back to the single configured host (no behaviour change for
+    single-host cases). This is what lets a multi-host live case route each
+    alert's response to the host it came from."""
+    try:
+        from tools.velo import list_clients
+        from core.ssh import list_configured_hosts
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        res = list_clients()
+        rows = res.get("rows") or res.get("clients") or []
+    except Exception:  # noqa: BLE001
+        return None
+    hostname = ""
+    for r in rows:
+        if isinstance(r, dict) and str(r.get("client_id")) == str(client_id):
+            hostname = str(r.get("hostname") or "").strip().lower()
+            break
+    if not hostname:
+        return None
+    try:
+        aliases = list_configured_hosts()
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _norm(s: str) -> str:
+        return s.lower().replace("trudi-", "").replace("_", "-")
+
+    exact = [a for a in aliases if _norm(a) == hostname]
+    if len(exact) == 1:
+        return exact[0]
+    contains = [a for a in aliases if hostname in _norm(a) or _norm(a) in hostname]
+    return contains[0] if len(contains) == 1 else None
+
+
 def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -> dict:
     """Snapshot processes / persistence / network for `client_id`; write baseline JSON.
 
@@ -448,9 +488,21 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(baseline, indent=2))
 
+    # Record this client's ssh alias so a multi-host case routes each alert's
+    # response to the host it came from (best-effort; falls back to the single
+    # configured host when unresolved).
+    alias = _alias_for_client(client_id)
+    if alias:
+        try:
+            from response import policy as _policy
+            _policy.record_client_host(case_id, client_id, alias)
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "success": True,
         "baseline_path": str(path),
+        "host_alias": alias,
         "summary": {
             "process_names": len(baseline["process_names"]),
             "image_paths": len(baseline["image_paths"]),

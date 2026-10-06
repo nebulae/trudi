@@ -226,3 +226,95 @@ class TestDetectorDedup:
         # a genuinely new pid (respawned sibling) still emits
         assert w._should_emit("Custom.TRUDI.PrivilegeEscalation",
                               {"image_path": "/x", "pid": "999"}) is True
+
+
+class TestHostAwareRouting:
+    """#1: snapshot/containment must route to the host the ALERT came from
+    (its client_id), not a single hard-wired response host."""
+    def test_policy_client_map_roundtrip_and_fallback(self, tmp_path):
+        from response import policy
+        case = "ROUTE"
+        (tmp_path / case / "monitoring").mkdir(parents=True)
+        policy.record_client_host(case, "C.aaa", "trudi-victim-a", cases_root=tmp_path)
+        policy.record_client_host(case, "C.bbb", "trudi-victim-b", cases_root=tmp_path)
+        assert policy.host_for_client(case, "C.aaa", cases_root=tmp_path) == "trudi-victim-a"
+        assert policy.host_for_client(case, "C.bbb", cases_root=tmp_path) == "trudi-victim-b"
+        # unmapped client / no client → None (caller ORs the single-host fallback)
+        assert policy.host_for_client(case, "C.zzz", cases_root=tmp_path) is None
+        assert policy.host_for_client(case, None, cases_root=tmp_path) is None
+        # record_client_host must not clobber the other config keys
+        import json
+        cfg = json.loads((tmp_path / case / "monitoring" / "config.json").read_text())
+        assert set(cfg["client_map"]) == {"C.aaa", "C.bbb"}
+
+    def test_suggestion_stamped_with_alerting_host(self, tmp_path, monkeypatch):
+        import tools.respond as respond
+        from response import policy, gates
+        case = "ROUTE2"
+        monkeypatch.setattr(respond, "CASES_ROOT", tmp_path)
+        monkeypatch.setattr(policy, "CASES_ROOT", tmp_path)
+        monkeypatch.setattr(gates, "CASES_ROOT", tmp_path)
+        bl = tmp_path / case / "monitoring" / "baselines"
+        bl.mkdir(parents=True)
+        (bl / "C.va.json").write_text("{}")
+        policy.record_client_host(case, "C.va", "trudi-victim-a", cases_root=tmp_path)
+        r = respond.suggest_containment(
+            case, detector="Custom.TRUDI.NewProcess",
+            evidence={"pid": "999", "image_path": "/tmp/.x"}, client_id="C.va")
+        assert r["suggestions"]
+        for s in r["suggestions"]:
+            assert s["host"] == "trudi-victim-a"      # routed to the alerting host
+            assert s["client_id"] == "C.va"
+
+
+class TestApprovalBatchedMatch:
+    """#2: the approval gate must accept a batched/popup approval, not demand
+    exact string-equality with the per-action operator_text."""
+    def _setup(self, tmp_path, monkeypatch, content, source="claude_code_user_prompt"):
+        import response.gates as gates, core.execution_log as el, json
+        (tmp_path / "C" / "monitoring" / "response" / "suggestions").mkdir(parents=True)
+        (tmp_path / "C" / "monitoring" / "response" / "suggestions" / "ACT-7.json").write_text("{}")
+        (tmp_path / "C" / "monitoring" / "response" / "suggestions" / "ACT-9.json").write_text("{}")
+        monkeypatch.setattr(gates, "CASES_ROOT", tmp_path)
+        trace = tmp_path / "trace.json"
+        trace.write_text(json.dumps({"entries": [
+            {"type": "user_message", "source": source, "content": content}]}))
+        class FakeLog:
+            _path = str(trace)
+            def last_n_window(self, n): return []
+        monkeypatch.setattr(el, "log", FakeLog())
+        return gates
+
+    def test_batched_typed_approval_accepted(self, tmp_path, monkeypatch):
+        gates = self._setup(tmp_path, monkeypatch, "Approve ACT-7; Approve ACT-10; Approve ACT-13")
+        assert gates.check_operator_text("C", "ACT-7", "Approve ACT-7") is None
+
+    def test_popup_phrasing_accepted(self, tmp_path, monkeypatch):
+        gates = self._setup(tmp_path, monkeypatch, "Approve ACT-7 and ACT-9",
+                            source="claude_code_popup_answer")
+        assert gates.check_operator_text("C", "ACT-9", "approve ACT-9") is None
+
+    def test_mention_without_approval_cue_refused(self, tmp_path, monkeypatch):
+        # a task-notification that merely NAMES the action id must not count
+        gates = self._setup(tmp_path, monkeypatch, "task-notification: ACT-7 finished")
+        assert gates.check_operator_text("C", "ACT-7", "approve ACT-7") is not None
+
+    def test_unapproved_action_refused(self, tmp_path, monkeypatch):
+        gates = self._setup(tmp_path, monkeypatch, "Approve ACT-7")
+        assert gates.check_operator_text("C", "ACT-9", "approve ACT-9") is not None
+
+
+class TestLiveSessionTier:
+    """#3: a live ESTABLISHED inbound SSH session is a session artifact that
+    reaches LIKELY for lateral_movement and logon."""
+    def test_live_session_class_and_tier(self):
+        from tools._gates import _tiering
+        ss = {"type": "tool_call", "success": True, "cmd": "ssh h -- ss -tnlpa",
+              "stdout_excerpt": "ESTAB 0 0 10.73.0.2:22 10.73.0.3:43374"}
+        assert "live_session" in _tiering.classify_entry(ss)
+        # a plain process table (no session) must NOT be a live_session
+        plain = {"type": "tool_call", "success": True, "cmd": "ssh h -- ps",
+                 "stdout_excerpt": "1 0 root /sbin/docker-init"}
+        assert "live_session" not in _tiering.classify_entry(plain)
+        assert _tiering.tier_for({"act": "lateral_movement"}, {"live_session"}).tier == "LIKELY"
+        assert _tiering.tier_for({"act": "logon"}, {"live_session"}).tier == "LIKELY"

@@ -116,6 +116,7 @@ def suggest_containment(
     finding_id: int = 0,
     detector: Optional[str] = None,
     evidence: Optional[dict] = None,
+    client_id: Optional[str] = None,
 ) -> dict:
     """Recommend operator-runnable containment commands from an alert or finding.
 
@@ -168,6 +169,11 @@ def suggest_containment(
         evidence = (finding or {}).get("evidence") or {}
     evidence_lc = {str(k).lower(): v for k, v in (evidence or {}).items()}
 
+    # Route this alert's containment to the host it came from (multi-host cases),
+    # falling back to the single configured host. Stamped on every suggestion so
+    # execute_action acts on the alerting host, not a hard-wired one.
+    target_host = _host_for_alert(case_id, client_id or evidence_lc.get("client_id"))
+
     suggestions: list[dict] = []
     for action in recipe.get("actions", []):
         action_id = _next_action_id(case_id)
@@ -197,6 +203,8 @@ def suggest_containment(
             "case_id": case_id,
             "finding_id": finding_id,
             "detector": detector,
+            "client_id": client_id or evidence_lc.get("client_id"),
+            "host": target_host,
             "description": description,
             "manual_command": manual_command,
             "risk": action.get("risk", "medium"),
@@ -251,6 +259,7 @@ def snapshot_evidence(
     detector: Optional[str] = None,
     evidence: Optional[dict] = None,
     host: Optional[str] = None,
+    client_id: Optional[str] = None,
 ) -> dict:
     """Capture the alert's forensic grounding BEFORE containment destroys it.
 
@@ -270,13 +279,15 @@ def snapshot_evidence(
     if not detector or evidence is None:
         return {"success": False,
                 "error": "pass detector= and evidence= from the alert payload."}
-    h = host or _resolve_host_for_case(case_id)
+    ev = {str(k).lower(): v for k, v in (evidence or {}).items()}
+    # Snapshot the host the ALERT came from (multi-host cases), else the single
+    # configured host. An explicit `host=` still overrides. Capturing the wrong
+    # host silently describes an unrelated process (observed in INV-001).
+    h = host or _host_for_alert(case_id, client_id or ev.get("client_id"))
     if not h:
         return {"success": False,
                 "error": "no live host configured — set 'host' in monitoring/config.json "
                          "or register one in live_hosts.json."}
-
-    ev = {str(k).lower(): v for k, v in (evidence or {}).items()}
     det = detector.rsplit(".", 1)[-1]
     pid, path = ev.get("pid"), ev.get("path")
 
@@ -369,6 +380,18 @@ def _resolve_host_for_case(case_id: str) -> Optional[str]:
     return hosts[0] if len(hosts) == 1 else None
 
 
+def _host_for_alert(case_id: str, client_id: Optional[str]) -> Optional[str]:
+    """Route this alert's response to the host it CAME FROM.
+
+    A multi-host live case (e.g. a lateral A→B demo) emits alerts from several
+    clients; snapshot/containment must act on the alerting client's host, not a
+    single hard-wired one. Resolve by the alert's `client_id` via the case's
+    client_map, falling back to the single-host resolution when the client is
+    unmapped (single-endpoint cases) — never silently acting on the wrong host.
+    """
+    return policy.host_for_client(case_id, client_id) or _resolve_host_for_case(case_id)
+
+
 def _command_string(argv: list[str]) -> str:
     """Human-readable form of a remote argv. For sh -c wrappers show the inner
     command, which is the actual shell line that runs."""
@@ -454,7 +477,11 @@ def execute_action(case_id: str, action_id: str, mode: str = "operator") -> dict
             "error": f"{action_id} has no action_template — re-run suggest_containment.",
         }
 
-    host = _resolve_host_for_case(case_id)
+    # Act on the host the suggestion was routed to (the alerting client's host),
+    # falling back to single-host resolution for suggestions recorded before
+    # host-aware routing. This is what makes containment hit the right host in a
+    # multi-host case rather than a single hard-wired one.
+    host = suggestion.get("host") or _host_for_alert(case_id, suggestion.get("client_id"))
     if host is None:
         return {
             "success": False,

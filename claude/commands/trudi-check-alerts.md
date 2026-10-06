@@ -179,9 +179,13 @@ finding in parallel/after (step 4b) for the report. `suggest_containment`'s
 Containment destroys the artifacts a finding must cite (a quarantined binary,
 a killed process's /proc, a deleted cron file). Before `execute_action`, call
 `respond.snapshot_evidence(case_id, detector=<alert detector>,
-evidence=<alert evidence>)` — it runs the read-only live captures for that
-detector (process /proc details, persistence file content, inbound netstat,
-the process table) and returns `snapshot_call_ids`. Carry those into the
+evidence=<alert evidence>, client_id=<the alert's client_id>)` — it runs the
+read-only live captures for that detector (process /proc details, persistence
+file content, inbound netstat, the process table) **on the host the alert came
+from** (resolved from `client_id`; pass it so a multi-host case snapshots the
+right host — omitting it silently falls back to the single configured host and,
+on a lateral A→B case, captures the wrong host's processes) and returns
+`snapshot_call_ids`. Carry those into the
 finding's `input_call_ids` (step 4b) so the intrusion stays provable after
 eradication. Reversible AUTO actions (pause, block IP) need no snapshot; a
 kill / quarantine / cron-removal always does.
@@ -189,8 +193,11 @@ kill / quarantine / cron-removal always does.
 For each response-eligible alert, call
 `respond.suggest_containment(case_id,
 detector="Custom.TRUDI.<NewLogon|NewProcess|PrivilegeEscalation|NewPersistence|NewNetwork|YaraProcess>",
-evidence=<the alert's evidence dict>)` (pass `finding_id=<cid>` only if a finding
-is already recorded, for linkage). Then, for each returned `ACT-N`
+evidence=<the alert's evidence dict>, client_id=<the alert's client_id>)` (pass
+`finding_id=<cid>` only if a finding is already recorded, for linkage). Passing
+`client_id` routes every suggested action to the alerting host, so
+`execute_action` contains the host the alert came from — not a hard-wired one.
+Then, for each returned `ACT-N`
 that has **no** `unresolved_placeholders`, attempt autonomous execution:
 
 ```
