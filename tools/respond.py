@@ -176,6 +176,22 @@ def suggest_containment(
         # Any placeholder still present after substitution is unresolved evidence.
         unresolved = sorted(set(_PLACEHOLDER_RE.findall(manual_command + " " + description)))
         action_template = action.get("action_template")
+        # Pre-validate the structured argv now, so an action whose evidence the
+        # validators reject (e.g. quarantine/kill_by_image targeting a SYSTEM
+        # binary like /usr/bin/sleep, a protected account, a bad pid) is flagged
+        # non-executable and never presented as an auto-runnable containment —
+        # execute_action would refuse it anyway, but it must not be OFFERED
+        # (least of all AUTO). unresolved placeholders already make it non-exec.
+        executable, blocked_reason = True, ""
+        if unresolved:
+            executable = False
+            blocked_reason = f"unresolved evidence placeholders: {unresolved}"
+        elif action_template:
+            try:
+                ssh_exec.build_argv(action_template, dict(evidence_lc))
+            except ssh_exec.ParamValidationError as e:
+                executable = False
+                blocked_reason = str(e)
         record = {
             "action_id": action_id,
             "case_id": case_id,
@@ -185,6 +201,8 @@ def suggest_containment(
             "manual_command": manual_command,
             "risk": action.get("risk", "medium"),
             "reversible": bool(action.get("reversible")),
+            "executable": executable,
+            "blocked_reason": blocked_reason,
             "unresolved_placeholders": unresolved,
             "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             # Self-contained execution metadata (additive — existing consumers

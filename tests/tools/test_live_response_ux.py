@@ -167,3 +167,62 @@ class TestSnapshotEvidence:
         r = respond.snapshot_evidence("NOCASE", detector="Custom.TRUDI.NewProcess",
                                          evidence={"pid": "1"})
         assert r.get("success") is False
+
+
+class TestSystemBinaryGuard:
+    """#3/#4: image-based actions must refuse SYSTEM-path binaries (e.g. the
+    held-session /usr/bin/sleep) and be flagged non-executable in suggestions."""
+    def test_kill_by_image_and_quarantine_reject_system_paths(self):
+        from core import ssh_exec
+        import pytest as _pt
+        for tmpl in ("kill_by_image", "quarantine_image"):
+            for bad in ("/usr/bin/sleep", "/bin/bash", "/usr/sbin/sshd", "/lib/x"):
+                with _pt.raises(ssh_exec.ParamValidationError):
+                    ssh_exec.build_argv(tmpl, {"image_path": bad})
+            for good in ("/tmp/.systemd-private", "/usr/local/sbin/.trudi-rootsvc", "/home/u/x"):
+                assert ssh_exec.build_argv(tmpl, {"image_path": good})
+
+    def test_suggest_flags_system_path_action_nonexecutable(self, tmp_path, monkeypatch):
+        import tools.respond as respond, response.gates as gates
+        case = "SYSGUARD"
+        monkeypatch.setattr(respond, "CASES_ROOT", tmp_path)
+        monkeypatch.setattr(gates, "CASES_ROOT", tmp_path)
+        bl = tmp_path / case / "monitoring" / "baselines"; bl.mkdir(parents=True)
+        (bl / "C.x.json").write_text("{}")
+        # NewProcess alert on the held-session /usr/bin/sleep
+        r = respond.suggest_containment(
+            case, detector="Custom.TRUDI.NewProcess",
+            evidence={"pid": "916", "image_path": "/usr/bin/sleep"})
+        by_t = {s["action_template"]: s for s in r["suggestions"]}
+        # quarantine + kill_by_image on a system binary → non-executable + reason
+        assert by_t["quarantine_image"]["executable"] is False
+        assert by_t["quarantine_image"]["blocked_reason"]
+        assert by_t["kill_by_image"]["executable"] is False
+        # kill_pid (by pid) is still fine
+        assert by_t["kill_pid"]["executable"] is True
+
+
+class TestDetectorDedup:
+    """#7: the NewLogon / PrivilegeEscalation detectors must dedup like the rest
+    (they re-fire every poll otherwise — ~40 events -> ~270 alerts)."""
+    def _watcher(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "w_dedup", str(_HOOK.parents[2] / "bin" / "trudi-velo-watcher.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_new_detectors_have_signatures_and_dedup(self):
+        w = self._watcher()
+        cases = [
+            ("Custom.TRUDI.PrivilegeEscalation", {"image_path": "/x", "pid": "612"}),
+            ("Custom.TRUDI.NewLogon", {"remote_ip": "10.73.0.3", "remote_port": 1, "pid": 616}),
+        ]
+        for det, row in cases:
+            assert w._row_signature(det, row)              # non-empty signature
+            assert w._should_emit(det, row) is True        # first time
+            assert w._should_emit(det, row) is False       # deduped thereafter
+        # a genuinely new pid (respawned sibling) still emits
+        assert w._should_emit("Custom.TRUDI.PrivilegeEscalation",
+                              {"image_path": "/x", "pid": "999"}) is True

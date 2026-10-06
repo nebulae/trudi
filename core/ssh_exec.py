@@ -223,7 +223,7 @@ ACTION_BUILDERS: dict[str, dict[str, Any]] = {
     # sudo/ssh chain (observed: exit 255, severed session). The path is
     # regex-validated (no metachars); a literal '.' matches itself, so an
     # unescaped dot in the path is harmless here.
-    "kill_by_image": {"params": {"image_path": _v_safe_path},
+    "kill_by_image": {"params": {"image_path": _v_path_quarantine},
                       "argv": lambda p: ["/usr/bin/pkill", "-9", "-f",
                                          "^" + p["image_path"]]},
     # Cut the lateral channel at the network: REJECT all inbound from the

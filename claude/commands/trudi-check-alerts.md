@@ -222,8 +222,13 @@ The server decides — you do not classify. Two outcomes:
   it queued and move on. Either way, once a destructive action is pending, stop
   taking new autonomous actions this tick.
 
-Skip actions whose `unresolved_placeholders` is non-empty (flag them as
-incomplete — evidence was missing).
+Skip any action with **`executable: false`** (its `blocked_reason` says why —
+unresolved evidence placeholders, or a validator-rejected target such as a
+quarantine/kill aimed at a SYSTEM binary like `/usr/bin/sleep`). Never execute
+or auto-run a blocked action; surface it as an informational note only. A
+system-path binary is not a containment target — if a NewProcess/privesc alert
+fires on one, investigate the process, don't quarantine or `pkill` the shared
+binary.
 
 **Prefer `kill_by_image` over single-pid `kill_pid` for a respawning implant.**
 A cron/service that re-launches its payload spawns fresh PIDs; killing one PID
