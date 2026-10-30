@@ -146,6 +146,97 @@ def _deny(reason: str) -> None:
     }}))
 
 
+def decide(tool: str, tool_input: dict, cwd: str, case_dir: Path) -> "str | None":
+    """Apply the deny rules to one tool call of the owning session.
+
+    Returns the refusal reason, or None when the call may run. Shared by the
+    Claude Code hook (main) and the Codex adapter (codex/hooks/guard_pretooluse.py),
+    which normalises its own payload shape before calling this. Ownership is the
+    caller's business; this function only judges the call.
+    """
+    # Rule 4 — raw file-tool writes into <case>/reports/.
+    if tool in _WRITE_TOOLS:
+        try:
+            fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+            if fp and _inside_reports(fp, cwd, case_dir):
+                return _REPORT_WRITE_REASON
+            if fp and _inside_memory(fp, cwd):
+                return _MEMORY_WRITE_REASON
+        except Exception:
+            pass
+        return None
+
+    cmd = tool_input.get("command") or ""
+    if not isinstance(cmd, str) or not cmd:
+        return None
+
+    # Rule 3 — bash writes into evidence dirs (redirect / tee / cp / mv / install).
+    try:
+        if _BASH_REPORT_WRITE_RE.search(cmd):
+            return _REPORT_WRITE_REASON
+        if _BASH_MEMORY_WRITE_RE.search(cmd):
+            return _MEMORY_WRITE_REASON
+    except Exception:
+        pass
+
+    # Rule 2 — forensic binaries (mcp_routing, at execution time).
+    # core.forensic_binaries is stdlib-only, so this works under any python3
+    # the harness runs hooks with (core.middleware would drag in fastmcp).
+    try:
+        from core.forensic_binaries import MCP_WRAPPER_HINTS, _identify_forensic_binary
+        binkey = _identify_forensic_binary(cmd)
+        if binkey is not None:
+            hint = MCP_WRAPPER_HINTS.get(
+                binkey, "the corresponding MCP wrapper (see the CLAUDE.md namespace table)")
+            return (
+                "Forensic binaries must run through the TRUDI MCP wrapper so the "
+                f"call is traced and citable — use {hint}. A bash run has no "
+                "_trudi_call_id and any finding citing it is refused (mcp_routing)."
+            )
+    except Exception:
+        pass
+
+    # Rule 1b — bash sqlite over a chat/messenger store (usually raw evidence):
+    # misc.chat_db_export is the traced, read-only-immutable path.
+    try:
+        if re.search(r"(?<![\w-])sqlite3\b", cmd) and re.search(
+                r"main\.db|msgstore\.db", cmd, re.IGNORECASE):
+            return (
+                "Chat/messenger sqlite stores must be exported through "
+                "misc.chat_db_export (strict read-only immutable open, traced, "
+                "citable — messages + Transfers + participants CSVs), then read "
+                "with read.output."
+            )
+    except Exception:
+        pass
+
+    # Rule 1 — bash reads of produced output.
+    try:
+        _is_enum = (bool(_ENUM_LEAD_RE.match(cmd))
+                    and not _ENUM_CONTENT_READ_RE.search(cmd)
+                    and not _CMD_CHAIN_RE.search(cmd))
+        if not _is_enum and _READER_RE.search(cmd) and (
+            _PRODUCED_FILE_RE.search(cmd)
+            or (_PRODUCED_DIR_RE.search(cmd) and _DATA_EXT_RE.search(cmd))
+            or _MCP_RESULT_CACHE_RE.search(cmd)
+        ):
+            return (
+                "Reading produced output via Bash is untraced and uncitable — this "
+                "includes the Claude Code MCP result cache "
+                "(~/.claude/projects/*/*/tool-results/mcp-*), which is a second copy "
+                "of the same tool output that lives outside the case sidecar. Use "
+                "read.output (CSV/JSON/TXT under analysis|exports|reports — "
+                "supports query/columns/where; it reads the traced "
+                "analysis/.tool_output/<cid>.txt) or read.mail (extracted "
+                "mbox/.eml — returns message BODIES) instead; both return a "
+                "_trudi_call_id to cite in record_finding. "
+                "(Emergency override: TRUDI_GUARD_DISABLE=1.)"
+            )
+    except Exception:
+        pass
+    return None
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -168,92 +259,12 @@ def main() -> None:
         return  # not the investigation session — never interfere
     case_dir = Path(trace_path).resolve().parent.parent
 
-    # Rule 4 — raw file-tool writes into <case>/reports/.
-    if tool in _WRITE_TOOLS:
-        try:
-            fp = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-            cwd = payload.get("cwd") or ""
-            if fp and _inside_reports(fp, cwd, case_dir):
-                _deny(_REPORT_WRITE_REASON)
-            elif fp and _inside_memory(fp, cwd):
-                _deny(_MEMORY_WRITE_REASON)
-        except Exception:
-            pass
+    try:
+        reason = decide(tool, tool_input, payload.get("cwd") or "", case_dir)
+    except Exception:
         return
-
-    cmd = tool_input.get("command") or ""
-    if not cmd:
-        return
-
-    # Rule 3 — bash writes into evidence dirs (redirect / tee / cp / mv / install).
-    try:
-        if _BASH_REPORT_WRITE_RE.search(cmd):
-            _deny(_REPORT_WRITE_REASON)
-            return
-        if _BASH_MEMORY_WRITE_RE.search(cmd):
-            _deny(_MEMORY_WRITE_REASON)
-            return
-    except Exception:
-        pass
-
-    # Rule 2 — forensic binaries (mcp_routing, at execution time).
-    # core.forensic_binaries is stdlib-only, so this works under any python3
-    # the harness runs hooks with (core.middleware would drag in fastmcp).
-    try:
-        from core.forensic_binaries import MCP_WRAPPER_HINTS, _identify_forensic_binary
-        binkey = _identify_forensic_binary(cmd)
-        if binkey is not None:
-            hint = MCP_WRAPPER_HINTS.get(
-                binkey, "the corresponding MCP wrapper (see the CLAUDE.md namespace table)")
-            _deny(
-                "Forensic binaries must run through the TRUDI MCP wrapper so the "
-                f"call is traced and citable — use {hint}. A bash run has no "
-                "_trudi_call_id and any finding citing it is refused (mcp_routing)."
-            )
-            return
-    except Exception:
-        pass
-
-    # Rule 1b — bash sqlite over a chat/messenger store (usually raw evidence):
-    # misc.chat_db_export is the traced, read-only-immutable path.
-    try:
-        if re.search(r"(?<![\w-])sqlite3\b", cmd) and re.search(
-                r"main\.db|msgstore\.db", cmd, re.IGNORECASE):
-            _deny(
-                "Chat/messenger sqlite stores must be exported through "
-                "misc.chat_db_export (strict read-only immutable open, traced, "
-                "citable — messages + Transfers + participants CSVs), then read "
-                "with read.output."
-            )
-            return
-    except Exception:
-        pass
-
-    # Rule 1 — bash reads of produced output.
-    try:
-        _is_enum = (bool(_ENUM_LEAD_RE.match(cmd))
-                    and not _ENUM_CONTENT_READ_RE.search(cmd)
-                    and not _CMD_CHAIN_RE.search(cmd))
-        if not _is_enum and _READER_RE.search(cmd) and (
-            _PRODUCED_FILE_RE.search(cmd)
-            or (_PRODUCED_DIR_RE.search(cmd) and _DATA_EXT_RE.search(cmd))
-            or _MCP_RESULT_CACHE_RE.search(cmd)
-        ):
-            _deny(
-                "Reading produced output via Bash is untraced and uncitable — this "
-                "includes the Claude Code MCP result cache "
-                "(~/.claude/projects/*/*/tool-results/mcp-*), which is a second copy "
-                "of the same tool output that lives outside the case sidecar. Use "
-                "read.output (CSV/JSON/TXT under analysis|exports|reports — "
-                "supports query/columns/where; it reads the traced "
-                "analysis/.tool_output/<cid>.txt) or read.mail (extracted "
-                "mbox/.eml — returns message BODIES) instead; both return a "
-                "_trudi_call_id to cite in record_finding. "
-                "(Emergency override: TRUDI_GUARD_DISABLE=1.)"
-            )
-            return
-    except Exception:
-        pass
+    if reason:
+        _deny(reason)
 
 
 if __name__ == "__main__":
