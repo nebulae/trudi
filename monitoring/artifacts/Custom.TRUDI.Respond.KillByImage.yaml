@@ -1,0 +1,26 @@
+name: Custom.TRUDI.Respond.KillByImage
+description: |
+  TRUDI remediation: SIGKILL every process whose command line matches an
+  implant image path (pkill -9 -f) — one shot removes cron/service-respawned
+  siblings that a single-pid kill leaves behind. Gated by the respond.*
+  approval workflow; never invoked directly by a detector. Irreversible.
+  Pass the DETECTION-TIME image path (the process argv[0]); a path quarantined
+  afterwards will not match the live command line.
+
+type: CLIENT
+
+parameters:
+  - name: ImagePath
+    description: Absolute image path to match against process command lines.
+    type: string
+
+sources:
+  - query: |
+      LET valid <= ImagePath =~ "^/[A-Za-z0-9_./@+-]+$"
+      SELECT
+        ImagePath AS image_path,
+        if(condition=valid,
+           then=execve(argv=["/usr/bin/pkill", "-9", "-f", "^" + ImagePath]),
+           else=dict(stdout="", stderr="invalid image path", return_code=2)
+        ) AS execution
+      FROM scope()

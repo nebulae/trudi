@@ -1,0 +1,22 @@
+name: Custom.TRUDI.Respond.UnlockAccount
+description: |
+  TRUDI remediation (revert): clear the account expiry that
+  Custom.TRUDI.Respond.LockAccount set, restoring login for User.
+
+type: CLIENT
+
+parameters:
+  - name: User
+    type: string
+
+sources:
+  - query: |
+      LET valid <= User =~ "^[a-z_][a-z0-9_-]{0,31}$"
+                   AND NOT User IN ["root", "toor", "admin", "sshd", "daemon"]
+      SELECT
+        User AS user,
+        if(condition=valid,
+           then=execve(argv=["/usr/sbin/usermod", "--expiredate", "", User]),
+           else=dict(stdout="", stderr="invalid or protected account", return_code=2)
+        ) AS execution
+      FROM scope()

@@ -123,6 +123,22 @@ def _row_signature(detector: str, row: dict) -> str:
             str(row.get("pid") or ""),
             str(row.get("rule") or ""),
         ])
+    if detector == "Custom.TRUDI.PrivilegeEscalation":
+        # A root process is identified by image+pid (started_utc folded in when
+        # present, since a reused pid on a respawn is a genuinely new event).
+        return "|".join([
+            str(row.get("image_path") or ""),
+            str(row.get("pid") or ""),
+            str(row.get("started_utc") or ""),
+        ])
+    if detector == "Custom.TRUDI.NewLogon":
+        # An inbound session is identified by its source + the sshd session pid;
+        # the held foothold otherwise re-alerts every poll.
+        return "|".join([
+            str(row.get("remote_ip") or ""),
+            str(row.get("remote_port") or ""),
+            str(row.get("pid") or ""),
+        ])
     return ""
 
 

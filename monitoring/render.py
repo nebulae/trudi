@@ -71,6 +71,11 @@ def render_template(name: str, baseline: Mapping[str, Any]) -> str:
             (f"{ep['remote_ip']}:{ep['remote_port']}"
              for ep in (baseline.get("endpoints") or []))
         ),
+        # Lateral-movement / privesc detector allowlists (empty → the detector
+        # allows nothing, which is conservative: a bare baseline still renders
+        # valid VQL and just filters everything out).
+        "baseline_logon_sources": _vql_array(baseline.get("logon_sources") or []),
+        "baseline_root_image_paths": _vql_array(baseline.get("root_image_paths") or []),
         "yara_rules_path": baseline.get("yara_rules_path") or "/rules/trudi-demo.yar",
     }
 

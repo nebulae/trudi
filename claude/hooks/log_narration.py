@@ -68,6 +68,55 @@ def _synthesize_cmd(tool_name: str, tool_input: dict) -> str:
     return f"{tool_name} {next(iter(tool_input.values()), '')}"[:_MAX_CMD]
 
 
+def _extract_popup_user_message(payload: dict) -> dict | None:
+    """Convert an AskUserQuestion PostToolUse payload into a `user_message`
+    entry carrying the operator's SELECTED option label(s).
+
+    This is the trusted path for popup-based destructive-action approval: the
+    answer in `tool_response` is produced by the harness from the real human's
+    selection, NOT by the agent, so the agent cannot forge it. Recording it as a
+    `user_message` lets the existing `operator_text_required` gate match it with
+    no gate change — when the approve option's label carries the `ACT-N` id, an
+    `approve_action(action_id="ACT-N")` finds this entry and authorises. A
+    decline option (no ACT-N in its label) leaves nothing for the gate to match.
+    """
+    if payload.get("tool_name") != "AskUserQuestion":
+        return None
+    resp = payload.get("tool_response", {}) or {}
+    labels: list[str] = []
+    answers = resp.get("answers") if isinstance(resp, dict) else None
+    if isinstance(answers, dict):
+        for v in answers.values():
+            if isinstance(v, str):
+                labels.append(v)
+            elif isinstance(v, dict):
+                lbl = v.get("label") or v.get("answer") or v.get("value")
+                if isinstance(lbl, str):
+                    labels.append(lbl)
+    if not labels:
+        # Tolerate shape drift: fall back to any short string leaves.
+        try:
+            blob = json.dumps(resp)
+        except (TypeError, ValueError):
+            blob = str(resp)
+        labels = [blob[:_MAX_CMD]]
+    content = "; ".join(l for l in labels if l).strip()
+    if not content:
+        return None
+    entry = {
+        "call_id": 0,
+        "type": "user_message",
+        "ts": _utcnow(),
+        "content": content[:2000],
+        "source": "claude_code_popup_answer",
+        "role": "user",
+    }
+    tuid = payload.get("tool_use_id", "")
+    if tuid:
+        entry["_source_tool_use_id"] = tuid
+    return entry
+
+
 def _extract_tool_call_entry(payload: dict) -> dict | None:
     """Convert a PostToolUse payload into a TRUDI tool_call entry, or None
     if this tool should be skipped (MCP tool, unknown tool, etc.)."""
@@ -236,6 +285,19 @@ def _process(transcript_path: str | None, trace_path: str, payload: dict) -> Non
             # No use_id available — append unconditionally; the trace dedup is
             # already best-effort for this rare case.
             new_entries.append(tool_entry)
+
+    # 4b) AskUserQuestion answers → user_message (popup-based operator approval).
+    #     The harness produces the answer; the agent cannot forge it. Recorded
+    #     as a user_message so the existing operator_text_required gate matches
+    #     an approve option whose label carries the ACT-N id.
+    popup_entry = _extract_popup_user_message(payload)
+    if popup_entry:
+        tuid = popup_entry.get("_source_tool_use_id", "")
+        if tuid and tuid not in processed_tool_ids:
+            new_entries.append(popup_entry)
+            processed_tool_ids.add(tuid)
+        elif not tuid:
+            new_entries.append(popup_entry)
 
     if not new_entries:
         # Only persist dedup state if we saw new uuids; otherwise no-op.

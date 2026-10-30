@@ -85,8 +85,24 @@ def live_network_connections(host: str) -> dict:
     """All TCP connections + listening sockets with owning PID.
 
     Live equivalent of vol.netscan/netstat. Output format: ss -tnlpa.
+
+    The `-p` (owning process) column is only populated for OTHER users' sockets
+    when ss runs as root; unprivileged, the Process column comes back empty and
+    a C2/lateral socket cannot be bound to its pid (observed in INV-001). So we
+    try, in order: `sudo -n ss` (endpoints that sudo ss directly), then
+    `sudo -n /bin/sh -c ss` (endpoints that NOPASSWD /bin/sh), then plain ss.
+    Every sudo attempt is non-interactive (`-n`), so on a host without sudo it
+    fails instantly and falls through to the unprivileged read — still read-only
+    (ss never mutates the endpoint).
     """
-    return ssh_run(host, ["ss", "-tnlpa"], timeout=30)
+    return ssh_run(
+        host,
+        ["sh", "-c",
+         "sudo -n ss -tnlpa 2>/dev/null "
+         "|| sudo -n /bin/sh -c 'ss -tnlpa' 2>/dev/null "
+         "|| ss -tnlpa"],
+        timeout=30,
+    )
 
 
 # ── Accounts / login history ─────────────────────────────────────────────────

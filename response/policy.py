@@ -101,3 +101,61 @@ def demo_response_enabled(case_id: str) -> bool:
 def configured_host(case_id: str) -> Optional[str]:
     """Optional explicit live-host alias for this case (from config.json)."""
     return load_config(case_id).get("host")
+
+
+def client_map(case_id: str, cases_root: Optional[Path] = None) -> dict:
+    """{client_id: ssh-alias} for this case, from config.json's `client_map`.
+
+    This is how a multi-host live case routes each alert's response to the host
+    the alert actually came from (the alert carries `client_id`). Empty when the
+    case has never recorded a mapping (single-host cases fall back to `host`)."""
+    path = _config_path(case_id, cases_root)
+    if not path.exists():
+        return {}
+    try:
+        doc = json.loads(path.read_text()) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    cm = doc.get("client_map")
+    return {str(k): str(v) for k, v in cm.items()} if isinstance(cm, dict) else {}
+
+
+def host_for_client(case_id: str, client_id: Optional[str],
+                    cases_root: Optional[Path] = None) -> Optional[str]:
+    """The ssh-alias to act on for an alert from `client_id`, or None if unknown.
+
+    Callers OR this with the single-host fallback (`configured_host` / the sole
+    live_hosts entry), so an unmapped client still resolves on a single-host
+    case but a mapped one routes to its own host on a multi-host case."""
+    if not client_id:
+        return None
+    return client_map(case_id, cases_root).get(str(client_id))
+
+
+def record_client_host(case_id: str, client_id: str, alias: str,
+                       cases_root: Optional[Path] = None) -> None:
+    """Merge {client_id: alias} into config.json's `client_map` (atomic).
+
+    Written by server tools (baseline_capture / start_watcher) that know both
+    the client_id and the ssh alias — never from agent prose, preserving the
+    guardrail that config.json is machine-read, not agent-edited."""
+    if not (client_id and alias):
+        return
+    path = _config_path(case_id, cases_root)
+    try:
+        doc = json.loads(path.read_text()) if path.exists() else {}
+        if not isinstance(doc, dict):
+            doc = {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        doc = {}
+    cm = doc.get("client_map")
+    if not isinstance(cm, dict):
+        cm = {}
+    if cm.get(str(client_id)) == alias:
+        return
+    cm[str(client_id)] = alias
+    doc["client_map"] = cm
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(doc, indent=2))
+    tmp.replace(path)

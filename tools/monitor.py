@@ -19,6 +19,7 @@ write to ``~/cases/<case>/monitoring/`` — TRUDI-generated state, not evidence.
 from __future__ import annotations
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -306,6 +307,46 @@ def _pid_alive(pid: int) -> bool:
 
 @mcp.tool()
 @output_safe
+def _alias_for_client(client_id: str) -> Optional[str]:
+    """Match a Velociraptor client to its live_hosts.json ssh alias by hostname.
+
+    velo hostname 'victim-a' → ssh alias 'trudi-victim-a'. Best-effort: returns
+    None on any ambiguity or lookup failure, in which case response routing
+    falls back to the single configured host (no behaviour change for
+    single-host cases). This is what lets a multi-host live case route each
+    alert's response to the host it came from."""
+    try:
+        from tools.velo import list_clients
+        from core.ssh import list_configured_hosts
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        res = list_clients()
+        rows = res.get("rows") or res.get("clients") or []
+    except Exception:  # noqa: BLE001
+        return None
+    hostname = ""
+    for r in rows:
+        if isinstance(r, dict) and str(r.get("client_id")) == str(client_id):
+            hostname = str(r.get("hostname") or "").strip().lower()
+            break
+    if not hostname:
+        return None
+    try:
+        aliases = list_configured_hosts()
+    except Exception:  # noqa: BLE001
+        return None
+
+    def _norm(s: str) -> str:
+        return s.lower().replace("trudi-", "").replace("_", "-")
+
+    exact = [a for a in aliases if _norm(a) == hostname]
+    if len(exact) == 1:
+        return exact[0]
+    contains = [a for a in aliases if hostname in _norm(a) or _norm(a) in hostname]
+    return contains[0] if len(contains) == 1 else None
+
+
 def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -> dict:
     """Snapshot processes / persistence / network for `client_id`; write baseline JSON.
 
@@ -388,13 +429,31 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
 
     process_names: set[str] = set()
     image_paths: set[str] = set()
+    root_image_paths: set[str] = set()
     for row in flow_results.get("Linux.Sys.Pslist", []):
-        # Velociraptor's Linux.Sys.Pslist row schema: Name, Pid, Ppid, Exe, ...
+        # Velociraptor's Linux.Sys.Pslist row schema: Name, Pid, Ppid, Exe,
+        # Username, ...
         name = row.get("Name") or row.get("Exe")
         if name:
             process_names.add(os.path.basename(name))
         if row.get("Exe"):
             image_paths.add(row["Exe"])
+            # Root-owned image paths feed the PrivilegeEscalation allowlist so a
+            # legitimately-root daemon present at baseline is not flagged.
+            if (row.get("Username") or row.get("User")) == "root":
+                root_image_paths.add(row["Exe"])
+
+    # Logon-source allowlist for the NewLogon (lateral-movement) detector:
+    # remote IPs with an ESTABLISHED inbound SSH (:22) flow at baseline time.
+    logon_sources: set[str] = set()
+    for row in flow_results.get("Linux.Network.Netstat", []):
+        laddr = row.get("Laddr")
+        lport = (laddr or {}).get("Port") if isinstance(laddr, dict) else row.get("LaddrPort")
+        raddr = row.get("Raddr")
+        rip = (raddr or {}).get("IP") if isinstance(raddr, dict) else row.get("RaddrIP")
+        status = row.get("Status") or row.get("State")
+        if lport == 22 and rip and (status in (None, "", "ESTABLISHED")):
+            logon_sources.add(rip)
 
     persistence_paths: set[str] = set()
     for row in flow_results.get(PERSISTENCE_SNAPSHOT_ARTIFACT, []):
@@ -418,8 +477,10 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
         "flow_ids": flow_ids,
         "process_names": sorted(process_names),
         "image_paths": sorted(image_paths),
+        "root_image_paths": sorted(root_image_paths),
         "persistence_paths": sorted(persistence_paths),
         "endpoints": endpoints,
+        "logon_sources": sorted(logon_sources),
         "yara_rules_path": "/rules/trudi-demo.yar",
     }
 
@@ -427,16 +488,192 @@ def baseline_capture(client_id: str, case_id: str, timeout_seconds: int = 300) -
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(baseline, indent=2))
 
+    # Record this client's ssh alias so a multi-host case routes each alert's
+    # response to the host it came from (best-effort; falls back to the single
+    # configured host when unresolved).
+    alias = _alias_for_client(client_id)
+    if alias:
+        try:
+            from response import policy as _policy
+            _policy.record_client_host(case_id, client_id, alias)
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "success": True,
         "baseline_path": str(path),
+        "host_alias": alias,
         "summary": {
             "process_names": len(baseline["process_names"]),
             "image_paths": len(baseline["image_paths"]),
+            "root_image_paths": len(baseline["root_image_paths"]),
             "persistence_paths": len(baseline["persistence_paths"]),
             "endpoints": len(baseline["endpoints"]),
+            "logon_sources": len(baseline["logon_sources"]),
         },
         "flow_ids": flow_ids,
+    }
+
+
+# ── Post-eradication verification ────────────────────────────────────────────
+
+def _netstat_fields(row: dict) -> tuple:
+    """(laddr_port, raddr_ip, raddr_port, status) from a NetstatEnriched row.
+
+    NetstatEnriched (the SAME source the NewLogon/NewNetwork detectors use) is
+    flat: Laddr/Raddr are string IPs, Lport/Rport ints, Status a string. Older
+    Linux.Network.Netstat packed Laddr/Raddr as {IP,Port} dicts — tolerate both
+    so verify_clean's logon/egress residual check matches what the detectors
+    fire on (mismatched parsing previously missed an open :22 session that was
+    still alerting, yielding a false clean=true)."""
+    laddr, raddr = row.get("Laddr"), row.get("Raddr")
+    lport = (laddr.get("Port") if isinstance(laddr, dict)
+             else row.get("Lport") if row.get("Lport") is not None else row.get("LaddrPort"))
+    rip = (raddr.get("IP") if isinstance(raddr, dict)
+           else raddr if isinstance(raddr, str) else row.get("RaddrIP"))
+    rport = (raddr.get("Port") if isinstance(raddr, dict)
+             else row.get("Rport") if row.get("Rport") is not None else row.get("RaddrPort"))
+    status = row.get("Status") or row.get("State")
+    try:
+        lport = int(lport) if lport is not None else None
+    except (TypeError, ValueError):
+        pass
+    return lport, rip, rport, status
+
+
+_RFC1918_OR_LOCAL = re.compile(
+    r"^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|0\.|169\.254\.)")
+
+# A point-in-time snapshot unavoidably catches the collection's OWN transient
+# processes (the agent's ps/shell/ssh/velociraptor query). verify_clean treats a
+# standard system tool in a standard bin dir as ephemeral measurement noise, so
+# it does not read as a residual intrusion — while an implant at a NON-standard
+# path (e.g. /tmp/.systemd-private, /usr/local/sbin/.trudi-rootsvc) still counts.
+_EPHEMERAL_BASENAMES = {
+    "ps", "pgrep", "pkill", "kill", "ss", "netstat", "sshd", "sudo", "sleep",
+    "sh", "dash", "bash", "env", "grep", "sed", "awk", "cat", "head", "tail",
+    "which", "find", "python3", "velociraptor", "cron", "dockerd", "docker-init",
+}
+_STD_BIN_DIRS = {"/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"}
+
+
+def _is_ephemeral_tool(exe: str) -> bool:
+    return (os.path.basename(exe) in _EPHEMERAL_BASENAMES
+            and os.path.dirname(exe) in _STD_BIN_DIRS)
+
+
+@mcp.tool()
+@output_safe
+def verify_clean(client_id: str, case_id: str, timeout_seconds: int = 300) -> dict:
+    """Re-snapshot a client and recompute every detector's residual deviations
+    from the baseline — the post-eradication 'is it clean now?' pass.
+
+    Collects the same surfaces as baseline_capture (Pslist, Netstat,
+    PersistenceSnapshot) and re-applies the stored baseline allowlists in
+    Python, mirroring each detector's filter. Returns per-detector residual
+    rows; `clean` is True iff every category is empty. Read-only — never
+    remediates.
+    """
+    if not client_id.startswith("C."):
+        return {"success": False, "error": f"client_id must look like 'C.xxx', got {client_id!r}"}
+
+    baseline_path = _baseline_path(case_id, client_id)
+    if not baseline_path.exists():
+        return {"success": False,
+                "error": f"no baseline at {baseline_path}; run monitor.baseline_capture first."}
+    baseline = json.loads(baseline_path.read_text())
+
+    from tools.velo import (collect_artifact, wait_for_flow, get_collection_results,
+                            upload_artifact_yaml)
+    from monitoring import render
+
+    def _collect(artifact: str, parameters: Optional[dict] = None) -> tuple[list, Optional[dict]]:
+        kicked = collect_artifact(client_id, artifact, parameters=parameters) if parameters \
+            else collect_artifact(client_id, artifact)
+        if not kicked.get("success") or not kicked.get("flow_id"):
+            return [], {"success": False,
+                        "error": f"collect {artifact} failed: {kicked.get('stderr') or kicked.get('error')}"}
+        fid = kicked["flow_id"]
+        done = wait_for_flow(client_id, fid, timeout_seconds=timeout_seconds)
+        if not done.get("success") or done.get("final_state") != "FINISHED":
+            return [], {"success": False, "error": f"flow {fid} ({artifact}) did not finish"}
+        return get_collection_results(client_id, fid, artifact).get("rows") or [], None
+
+    ps_rows, err = _collect("Linux.Sys.Pslist")
+    if err:
+        return err
+    # Use NetstatEnriched — the SAME artifact the NewLogon/NewNetwork detectors
+    # fire on — so a residual session verify sees matches what the detector sees.
+    net_rows, err = _collect("Linux.Network.NetstatEnriched")
+    if err:
+        # Fall back to plain Netstat if the enriched artifact is unavailable.
+        net_rows, err = _collect("Linux.Network.Netstat")
+        if err:
+            return err
+    snap_yaml = (render.ARTIFACTS_DIR / f"{PERSISTENCE_SNAPSHOT_ARTIFACT}.yaml").read_text()
+    upload_artifact_yaml(snap_yaml)
+    persist_rows, err = _collect(
+        PERSISTENCE_SNAPSHOT_ARTIFACT,
+        parameters={"WatchDirs": json.dumps(render.PERSISTENCE_WATCH_GLOBS)})
+    if err:
+        return err
+
+    base_images = set(baseline.get("image_paths") or [])
+    base_names = set(baseline.get("process_names") or [])
+    base_root = set(baseline.get("root_image_paths") or [])
+    base_persist = set(baseline.get("persistence_paths") or [])
+    base_logon = set(baseline.get("logon_sources") or [])
+    base_endpoints = {f"{e['remote_ip']}:{e['remote_port']}" for e in (baseline.get("endpoints") or [])}
+
+    residual_proc, residual_privesc, residual_logon, residual_net = [], [], [], []
+    for row in ps_rows:
+        exe = row.get("Exe")
+        name = os.path.basename(row.get("Name") or exe or "")
+        status = (row.get("Status") or "").lower()
+        if not exe or "zombie" in status or _is_ephemeral_tool(exe):
+            continue
+        if exe not in base_images and name not in base_names:
+            residual_proc.append({"pid": row.get("Pid"), "image_path": exe,
+                                  "username": row.get("Username") or row.get("User")})
+        if (row.get("Username") or row.get("User")) == "root" and exe not in base_root:
+            residual_privesc.append({"pid": row.get("Pid"), "image_path": exe})
+
+    residual_persist = []
+    for row in persist_rows:
+        p = row.get("path") or row.get("FullPath")
+        if p and p not in base_persist:
+            residual_persist.append({"path": p})
+
+    for row in net_rows:
+        lport, rip, rport, status = _netstat_fields(row)
+        if status not in (None, "", "ESTABLISHED") or not rip:
+            continue
+        if lport == 22 and not rip.startswith("127.") and not rip.endswith(".1") \
+                and rip not in base_logon:
+            residual_logon.append({"remote_ip": rip, "pid": row.get("Pid")})
+        if rport and not _RFC1918_OR_LOCAL.match(str(rip)) \
+                and f"{rip}:{rport}" not in base_endpoints:
+            residual_net.append({"remote_ip": rip, "remote_port": rport})
+
+    residuals = {
+        "Custom.TRUDI.NewProcess": residual_proc,
+        "Custom.TRUDI.PrivilegeEscalation": residual_privesc,
+        "Custom.TRUDI.NewPersistence": residual_persist,
+        "Custom.TRUDI.NewLogon": residual_logon,
+        "Custom.TRUDI.NewNetwork": residual_net,
+    }
+    counts = {k: len(v) for k, v in residuals.items()}
+    clean = all(c == 0 for c in counts.values())
+    return {
+        "success": True,
+        "client_id": client_id,
+        "case_id": case_id,
+        "clean": clean,
+        "residual_counts": counts,
+        "residuals": residuals,
+        "checked_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "note": ("clean=true means no process/root-process/persistence/logon/egress "
+                 "deviation from baseline remains on this host."),
     }
 
 

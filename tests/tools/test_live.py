@@ -81,11 +81,18 @@ class TestLiveProcessDetails:
 
 
 class TestLiveNetworkConnections:
-    def test_runs_ss_tnlpa(self, mock_ssh):
+    def test_runs_ss_tnlpa_with_privilege_escalation_and_fallback(self, mock_ssh):
+        # ss -p only populates the owning-process column as root, so we try
+        # sudo (direct, then via NOPASSWD /bin/sh) and fall back to plain ss on
+        # a host without sudo. Still read-only (ss never mutates).
         from tools.live import live_network_connections
         live_network_connections(HOST)
         argv = mock_ssh.call_args[0][1]
-        assert argv == ["ss", "-tnlpa"]
+        assert argv[0] == "sh" and argv[1] == "-c"
+        script = argv[2]
+        assert "sudo -n ss -tnlpa" in script
+        assert "sudo -n /bin/sh -c 'ss -tnlpa'" in script
+        assert script.endswith("|| ss -tnlpa")
 
 
 class TestLiveReadFile:

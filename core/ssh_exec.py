@@ -44,6 +44,12 @@ class ParamValidationError(ValueError):
     this into a refusal and NEVER executes."""
 
 
+# Containment runs as root on the endpoint via this fixed prefix (the live SSH
+# user is unprivileged and granted scoped NOPASSWD sudo on the demo victim).
+# `-n` fails closed rather than ever prompting for a password.
+SUDO_PREFIX = ["/usr/bin/sudo", "-n"]
+
+
 # ── Validators ────────────────────────────────────────────────────────────────
 # Each returns the normalized string form, or raises ParamValidationError.
 # Anchored patterns reject whitespace and shell metacharacters by construction.
@@ -121,6 +127,21 @@ def _v_path_cron(raw: Any) -> str:
     return s
 
 
+# Linux account name. Refuses root (and uid-0 aliases) so account containment
+# can never lock out the superuser, plus the usual charset guard.
+_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_PROTECTED_USERS = {"root", "toor", "admin", "sshd", "daemon"}
+
+
+def _v_user(raw: Any) -> str:
+    s = str(raw).strip()
+    if not _USER_RE.match(s):
+        raise ParamValidationError(f"{raw!r} is not a valid Linux username")
+    if s in _PROTECTED_USERS:
+        raise ParamValidationError(f"refusing to act on protected account {s!r}")
+    return s
+
+
 # ── Action argv builders ──────────────────────────────────────────────────────
 # action_template -> {"params": {evidence_key: validator}, "argv": fn(validated) -> list[str]}
 # The three shell-needing actions emit ["/bin/sh","-c", <cmd>] where <cmd> is
@@ -186,7 +207,44 @@ ACTION_BUILDERS: dict[str, dict[str, Any]] = {
                          "argv": _quarantine_argv},
     "remove_cron_entry": {"params": {"path": _v_path_cron},
                           "argv": _remove_cron_argv},
+    # Lateral-movement containment: terminate the live inbound SSH session by
+    # its sshd session pid. Irreversible (same shape as kill_pid; distinct
+    # template so audit/classification read as a session kill, not a proc kill).
+    "kill_session": {"params": {"pid": _v_pid},
+                     "argv": lambda p: ["/bin/kill", "-9", p["pid"]]},
+    # Kill EVERY process whose command line STARTS WITH the implant's image path
+    # — one shot catches cron/service-respawned siblings that a single-pid kill
+    # leaves behind. Pass the DETECTION-TIME image_path (what the process's
+    # argv[0] shows); a path quarantined afterwards won't match the live argv.
+    # Irreversible. The pattern is ANCHORED with ^ so it matches only processes
+    # whose cmdline begins with the path — NOT pkill's own
+    # `sudo … pkill -9 -f <path>` invocation (which begins with the sudo/pkill
+    # binary). Without the anchor, pkill -f self-matches and kills the invoking
+    # sudo/ssh chain (observed: exit 255, severed session). The path is
+    # regex-validated (no metachars); a literal '.' matches itself, so an
+    # unescaped dot in the path is harmless here.
+    "kill_by_image": {"params": {"image_path": _v_path_quarantine},
+                      "argv": lambda p: ["/usr/bin/pkill", "-9", "-f",
+                                         "^" + p["image_path"]]},
+    # Cut the lateral channel at the network: REJECT all inbound from the
+    # attacker's source IP. Reversible + low-risk → AUTO tier. No `-m comment`
+    # match: the xt_comment module is absent on some nf_tables kernels (WSL2),
+    # and the rule is uniquely identified by (source IP, REJECT) for revert.
+    "block_source_ip": {
+        "params": {"remote_ip": _v_ipv4},
+        "argv": lambda p: ["/sbin/iptables", "-I", "INPUT", "-s", p["remote_ip"],
+                           "-j", "REJECT"]},
+    # Account containment: expire the abused account so sshd denies further
+    # logins (key-based included). Reversible via unlock_account.
+    "lock_account": {"params": {"user": _v_user},
+                     "argv": lambda p: ["/usr/sbin/usermod", "--expiredate", "1", p["user"]]},
     # Revert actions (inverse of the above)
+    "unblock_source_ip": {
+        "params": {"remote_ip": _v_ipv4},
+        "argv": lambda p: ["/sbin/iptables", "-D", "INPUT", "-s", p["remote_ip"],
+                           "-j", "REJECT"]},
+    "unlock_account": {"params": {"user": _v_user},
+                       "argv": lambda p: ["/usr/sbin/usermod", "--expiredate", "", p["user"]]},
     "resume_pid": {"params": {"pid": _v_pid},
                    "argv": lambda p: ["/bin/kill", "-CONT", p["pid"]]},
     "unblock_egress": {
@@ -212,6 +270,10 @@ FORWARD_TO_REVERT_TEMPLATE: dict[str, str | None] = {
     "dump_process_memory": None,   # forensic capture; nothing to undo
     "kill_pid": None,              # irreversible
     "kill_owning_pid": None,       # irreversible
+    "kill_session": None,          # irreversible
+    "kill_by_image": None,         # irreversible
+    "block_source_ip": "unblock_source_ip",
+    "lock_account": "unlock_account",
 }
 
 
@@ -302,7 +364,14 @@ def ssh_run_write(
         _log_ssh_tool(result)
         return result
 
-    argv = _build_ssh_argv(resolved, remote_argv)
+    # Containment runs as root. The live SSH user is an unprivileged account, so
+    # the structured (already-validated) argv is executed under `sudo -n` on the
+    # endpoint; the demo victim grants that account scoped NOPASSWD sudo. The
+    # prefix is fixed and adds no shell — the argv stays fully structured. The
+    # RECORDED cmd keeps the logical (un-sudo'd) argv so the audit/rollback read
+    # as the action itself.
+    exec_argv = [*SUDO_PREFIX, *remote_argv]
+    argv = _build_ssh_argv(resolved, exec_argv)
     # Recorded cmd never leaks the identity path.
     result["cmd"] = (
         f"ssh {resolved['user']}@{resolved['host']}:{resolved['port']} -- "

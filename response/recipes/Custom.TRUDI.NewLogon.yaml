@@ -1,0 +1,25 @@
+# Recipe: containment actions for Custom.TRUDI.NewLogon alerts
+# (lateral-movement — a new inbound SSH session from a non-baseline source).
+#
+# Evidence fields the detector emits: remote_ip, remote_port, local_port, pid
+# (the sshd session pid), timestamp_utc.
+
+actions:
+  - action_template: block_source_ip
+    artifact: Custom.TRUDI.Respond.BlockSourceIp
+    description: "Cut the lateral channel — iptables REJECT all inbound from the source host"
+    manual_command: "iptables -I INPUT -s <remote_ip> -j REJECT"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.UnblockSourceIp
+    parameters:
+      RemoteIp: evidence.remote_ip
+
+  - action_template: kill_session
+    artifact: Custom.TRUDI.Respond.KillSession
+    description: "Terminate the live inbound SSH session (SIGKILL its sshd pid)"
+    manual_command: "kill -9 <pid>"
+    risk: medium
+    reversible: false
+    parameters:
+      Pid: evidence.pid

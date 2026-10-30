@@ -196,6 +196,18 @@ classes:
     cmd: 'auth\.log|[\\/]secure\b|\bwtmp\b|\bbtmp\b|lastlog|journalctl|\bsshd\b|\blast\b -f'
     tools: [read.output on auth.log/secure, live.recent_logins, strings.grep on wtmp]
     label: unix authentication log
+  live_session:
+    # A live endpoint capture that shows an ACTIVE authenticated session: an
+    # ESTABLISHED inbound SSH flow (ss) or an sshd per-user session process
+    # (ps 'sshd: <user>'), or an 'Accepted publickey/password' line. Weaker than
+    # an auth-log EVENT (no logon type / event record), so it grounds a session
+    # at LIKELY — never CONFIRMED — for lateral_movement and logon. text-matched
+    # over the cited call's OUTPUT, so only a call that actually captured the
+    # session carries it (a plain process/netstat listing with no :22 flow does
+    # not). This is the live-Linux equivalent of a 4624/wtmp session record.
+    text: '\bESTAB\b[^\n]*:22\b|sshd:\s*\S+|Accepted (?:publickey|password)'
+    tools: [live.network_connections, live.recent_logins, respond.snapshot_evidence]
+    label: live endpoint session (ESTABLISHED inbound SSH / sshd session)
   unix_shell_history:
     cmd: 'bash_history|zsh_history|sh_history|\.histfile'
     tools: [read.output on shell history, strings.extract]
@@ -212,7 +224,7 @@ classes:
     cmd: 'fseventsd|\.logarchive|log show|unified log|\bplutil\b|\.plist\b|knowledgec\.db|quarantine'
     tools: [read.output on plists/KnowledgeC, strings.extract on fsevents]
     label: macOS system artifact
-  # iOS device parses (mobile.*). One call parses MANY stores, so the per-store
+  # Phone parses (mobile.*: iOS MVT / ios_apt, Android ALEAPP). One call parses MANY stores, so the per-store
   # classes are MARKERS stamped by the wrapper only for a produced file that
   # holds >= 1 record (an empty module carries no class) — never by tool name.
   # They mirror the Windows analogues' group roles: messaging ~ chat_store,
@@ -220,25 +232,25 @@ classes:
   # documentary identity binding (Apple ID / configured accounts). A phone
   # parse is not a logon/session artifact and joins no session/transfer group.
   mobile_artifact:
-    cmd: 'mvt-ios\b.*\bcheck-(?:fs|backup)\b|ios_apt\.py'
-    tools: [mobile.mvt_ios_check_fs, mobile.ios_apt, mobile.mvt_ios_check_backup]
-    label: iOS device artifact parse (MVT / ios_apt)
+    cmd: 'mvt-ios\b.*\bcheck-(?:fs|backup)\b|ios_apt\.py|aleapp\.py'
+    tools: [mobile.mvt_ios_check_fs, mobile.ios_apt, mobile.mvt_ios_check_backup, mobile.aleapp]
+    label: phone artifact parse (MVT / ios_apt / ALEAPP)
   mobile_messaging:
     marker: mobile_messaging
-    tools: [mobile.mvt_ios_check_fs (SMS/WhatsApp/Calls/InteractionC/Contacts), mobile.mvt_ios_check_backup]
-    label: iOS messaging / call / contact record
+    tools: [mobile.mvt_ios_check_fs (SMS/WhatsApp/Calls/InteractionC/Contacts), mobile.mvt_ios_check_backup, mobile.aleapp (SMS/RCS/Call Logs/Contacts/chat apps)]
+    label: phone messaging / call / contact record
   mobile_browser:
     marker: mobile_browser
-    tools: [mobile.mvt_ios_check_fs (Safari/WebKit/Chrome/Firefox), mobile.ios_apt SAFARI]
-    label: iOS browser history / state record
+    tools: [mobile.mvt_ios_check_fs (Safari/WebKit/Chrome/Firefox), mobile.ios_apt SAFARI, mobile.aleapp (Chrome/browser history)]
+    label: phone browser history / state record
   mobile_location:
     marker: mobile_location
-    tools: [mobile.mvt_ios_check_fs (LocationdClients), mobile.ios_apt WIFI/NETWORKING]
-    label: iOS location / Wi-Fi network record
+    tools: [mobile.mvt_ios_check_fs (LocationdClients), mobile.ios_apt WIFI/NETWORKING, mobile.aleapp (Google location/Wi-Fi/Bluetooth)]
+    label: phone location / Wi-Fi network record
   mobile_accounts:
     marker: mobile_accounts
-    tools: [mobile.ios_apt INETACCOUNTS/BASICINFO, mobile.mvt_ios_check_fs (Applications/IDStatusCache)]
-    label: iOS account / Apple ID record
+    tools: [mobile.ios_apt INETACCOUNTS/BASICINFO, mobile.mvt_ios_check_fs (Applications/IDStatusCache), mobile.aleapp (Accounts_ce/de, installed apps)]
+    label: phone account / Apple ID / Google account record
 
 groups:
   # ANY = every class (used by act=other)
@@ -250,7 +262,7 @@ groups:
   timeline_weak: [lnk_files, jump_lists, shellbags, shimcache, amcache, file_content, userassist, mail_store, chat_store, mobile_messaging, mobile_artifact]
   creation_event: [event_logs_security, sam_account, unix_auth_log]
   creation_corroborator: [logon_session, device_install, prefetch, userassist, amcache, memory_process, usn_journal, mft, registry, terminalservices, bam]
-  session: [logon_session]
+  session: [logon_session, live_session]
   session_corroborator: [terminalservices, registry, network_capture, usn_journal, prefetch, userassist, lnk_files, srum, shellbags, jump_lists, bam, event_logs_security, device_install, unix_auth_log, unix_syslog, unix_shell_history]
   documentary_binding: [registry, mail_store, chat_store, network_capture, lnk_files, shellbags, userassist, recycle_bin, sam_account, jump_lists, file_content, srum, unix_shell_history, macos_artifacts, mobile_accounts, mobile_messaging]
   transfer: [transfer]
@@ -266,7 +278,7 @@ groups:
   network_evidence: [memory_network, network_capture, srum, live_host]
   process_evidence: [memory_process, memory_injection, prefetch, userassist, amcache, bam, event_logs_security]
   c2_weak: [yara, av, enrichment, file_content, memory_injection, registry, timeline, implant_config]
-  lateral_primary: [logon_session, network_capture, terminalservices, unix_auth_log]
+  lateral_primary: [logon_session, network_capture, terminalservices, unix_auth_log, live_session]
   lateral_corroborator: [registry, prefetch, userassist, srum, memory_process, event_logs_security, jump_lists, shellbags, lnk_files, terminalservices, memory_network]
   lateral_weak: [registry, lnk_files, shellbags, jump_lists, file_content, timeline]
   credential_primary: [memory_process, event_logs_security, prefetch, userassist, amcache, memory_injection, logon_session]

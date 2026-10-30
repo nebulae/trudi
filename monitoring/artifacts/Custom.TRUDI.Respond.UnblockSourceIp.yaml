@@ -1,0 +1,23 @@
+name: Custom.TRUDI.Respond.UnblockSourceIp
+description: |
+  TRUDI remediation (revert): delete the iptables INPUT REJECT rule that
+  Custom.TRUDI.Respond.BlockSourceIp installed for RemoteIp.
+
+type: CLIENT
+
+parameters:
+  - name: RemoteIp
+    type: string
+
+sources:
+  - query: |
+      LET ip_valid <= RemoteIp =~ "^([0-9]{1,3}\\.){3}[0-9]{1,3}$"
+      SELECT
+        RemoteIp AS remote_ip,
+        if(condition=ip_valid,
+           then=execve(argv=["/sbin/iptables", "-D", "INPUT",
+                             "-s", RemoteIp,
+                             "-j", "REJECT"]),
+           else=dict(stdout="", stderr="invalid source ip", return_code=2)
+        ) AS execution
+      FROM scope()

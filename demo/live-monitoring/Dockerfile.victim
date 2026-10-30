@@ -16,7 +16,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates curl git \
         auditd audispd-plugins \
-        openssh-server \
+        openssh-server openssh-client \
+        sudo \
         iptables iproute2 net-tools procps \
         cron \
         python3 python3-yaml \
@@ -38,13 +39,22 @@ RUN git clone --depth=1 --branch "${ATOMIC_RED_TEAM_REF}" \
 
 # Attack dispatcher + alias map. Mounted at /attacks for the operator.
 COPY victim/attacks /attacks
-RUN chmod +x /attacks/run /attacks/beacon.sh
+RUN chmod +x /attacks/run /attacks/beacon.sh /attacks/lateral.sh
 
 # Demo user the attacks run as. UID 1000 = baseline-friendly.
 RUN useradd -m -u 1000 -s /bin/bash victim \
  && echo "victim:victim" | chpasswd \
  && mkdir -p /home/victim/.ssh \
  && chown -R victim:victim /home/victim
+
+# TRUDI's gated respond.* path SSHes in as this unprivileged user and runs the
+# validated containment argv under `sudo -n` (see core/ssh_exec.py). Grant the
+# scoped NOPASSWD sudo that makes root-level containment (iptables, kill of a
+# root process, usermod, quarantine of a root-owned binary) actually work.
+# DEMO-ONLY — do not copy this breadth into a production endpoint.
+RUN echo 'victim ALL=(root) NOPASSWD: /bin/kill, /sbin/iptables, /usr/sbin/usermod, /usr/bin/pkill, /bin/systemctl, /usr/bin/gcore, /bin/sh' \
+        > /etc/sudoers.d/90-trudi-respond \
+ && chmod 440 /etc/sudoers.d/90-trudi-respond
 
 # SSH host keys + a key pair that TRUDI's live.* will use.
 # The private key lands under /shared and the SIFT host mounts a copy into

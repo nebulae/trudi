@@ -33,9 +33,18 @@ actions:
     parameters:
       Pid: evidence.pid
 
+  - action_template: kill_by_image
+    artifact: Custom.TRUDI.Respond.KillByImage
+    description: "SIGKILL every process running this image (catches respawned siblings a single-pid kill misses)"
+    manual_command: "pkill -9 -f <image_path>"
+    risk: medium
+    reversible: false
+    parameters:
+      ImagePath: evidence.image_path
+
   - action_template: quarantine_image
     artifact: Custom.TRUDI.Respond.QuarantineImage
-    description: "Move the new process's image to /var/quarantine/<sha256>"
+    description: "Quarantine the new process's image to /var/quarantine/ (chmod 000 + move)"
     manual_command: "mkdir -p /var/quarantine && chmod 000 <image_path> && mv <image_path> /var/quarantine/"
     risk: low
     reversible: true

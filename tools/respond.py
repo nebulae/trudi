@@ -113,38 +113,44 @@ def _render(template: str, evidence_lc: dict) -> str:
 @output_safe
 def suggest_containment(
     case_id: str,
-    finding_id: int,
+    finding_id: int = 0,
     detector: Optional[str] = None,
     evidence: Optional[dict] = None,
+    client_id: Optional[str] = None,
 ) -> dict:
-    """Recommend operator-runnable containment commands for a finding.
+    """Recommend operator-runnable containment commands from an alert or finding.
 
-    Looks up the recipe matching the alert's detector and renders each candidate
-    action's description + copyable `manual_command` with the finding's evidence
+    Looks up the recipe matching the detector and renders each candidate
+    action's description + copyable `manual_command` with the evidence
     substituted in, writing one ACT-N.json per option under
     `~/cases/<case>/monitoring/response/suggestions/`. NOTHING EXECUTES — the
     returned `manual_command` strings are for a human to run out-of-band.
 
-    `finding_id` is the `_trudi_call_id` of the upstream `record_finding`.
-    `detector` (e.g. 'Custom.TRUDI.NewNetwork') and `evidence` (the alert's
-    evidence dict) should be passed explicitly from the alert payload.
+    LIVE-MODE FAST PATH: `finding_id` is OPTIONAL. In live monitoring, call this
+    straight off a high-confidence detector alert — pass `detector` + `evidence`
+    from the alert payload and leave `finding_id=0`. Containment must NOT wait on
+    the forensic finding ceremony (tier contracts, evidence-citation rounds);
+    record the forensic finding in parallel/after for the report. When a recorded
+    finding does exist, pass its `_trudi_call_id` as `finding_id` for linkage.
     """
     refusal = response_gates.check_live_monitoring_scope(case_id)
     if refusal:
         return refusal
     _ensure_layout(case_id)
 
-    finding = _load_finding(finding_id)
+    finding = _load_finding(finding_id) if finding_id else None
     if finding is None and (detector is None or evidence is None):
         return {
             "success": False,
-            "error": f"finding_id {finding_id} not found in trace, and detector/evidence "
-                     f"not supplied. Pass detector= and evidence= explicitly.",
+            "error": "pass detector= and evidence= from the alert (live fast path), "
+                     "or a valid finding_id whose trace entry carries them. "
+                     f"finding_id={finding_id} resolved no finding and no detector/evidence given.",
         }
 
     if detector is None:
         desc = (finding or {}).get("description") or ""
-        for known in ("NewProcess", "NewPersistence", "NewNetwork", "YaraProcess"):
+        for known in ("NewProcess", "NewPersistence", "NewNetwork", "YaraProcess",
+                      "NewLogon", "PrivilegeEscalation"):
             if known in desc:
                 detector = f"Custom.TRUDI.{known}"
                 break
@@ -163,6 +169,11 @@ def suggest_containment(
         evidence = (finding or {}).get("evidence") or {}
     evidence_lc = {str(k).lower(): v for k, v in (evidence or {}).items()}
 
+    # Route this alert's containment to the host it came from (multi-host cases),
+    # falling back to the single configured host. Stamped on every suggestion so
+    # execute_action acts on the alerting host, not a hard-wired one.
+    target_host = _host_for_alert(case_id, client_id or evidence_lc.get("client_id"))
+
     suggestions: list[dict] = []
     for action in recipe.get("actions", []):
         action_id = _next_action_id(case_id)
@@ -171,15 +182,35 @@ def suggest_containment(
         # Any placeholder still present after substitution is unresolved evidence.
         unresolved = sorted(set(_PLACEHOLDER_RE.findall(manual_command + " " + description)))
         action_template = action.get("action_template")
+        # Pre-validate the structured argv now, so an action whose evidence the
+        # validators reject (e.g. quarantine/kill_by_image targeting a SYSTEM
+        # binary like /usr/bin/sleep, a protected account, a bad pid) is flagged
+        # non-executable and never presented as an auto-runnable containment —
+        # execute_action would refuse it anyway, but it must not be OFFERED
+        # (least of all AUTO). unresolved placeholders already make it non-exec.
+        executable, blocked_reason = True, ""
+        if unresolved:
+            executable = False
+            blocked_reason = f"unresolved evidence placeholders: {unresolved}"
+        elif action_template:
+            try:
+                ssh_exec.build_argv(action_template, dict(evidence_lc))
+            except ssh_exec.ParamValidationError as e:
+                executable = False
+                blocked_reason = str(e)
         record = {
             "action_id": action_id,
             "case_id": case_id,
             "finding_id": finding_id,
             "detector": detector,
+            "client_id": client_id or evidence_lc.get("client_id"),
+            "host": target_host,
             "description": description,
             "manual_command": manual_command,
             "risk": action.get("risk", "medium"),
             "reversible": bool(action.get("reversible")),
+            "executable": executable,
+            "blocked_reason": blocked_reason,
             "unresolved_placeholders": unresolved,
             "created_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             # Self-contained execution metadata (additive — existing consumers
@@ -221,6 +252,94 @@ def list_actions(case_id: str, status: str = "all") -> dict:
     return {"success": True, "case_id": case_id, "actions": actions}
 
 
+@mcp.tool()
+@output_safe
+def snapshot_evidence(
+    case_id: str,
+    detector: Optional[str] = None,
+    evidence: Optional[dict] = None,
+    host: Optional[str] = None,
+    client_id: Optional[str] = None,
+) -> dict:
+    """Capture the alert's forensic grounding BEFORE containment destroys it.
+
+    Contain-first is fast, but quarantining a binary / killing a process /
+    deleting a cron file removes the very artifacts a finding must cite. Call
+    this immediately after an alert fires and BEFORE respond.execute_action:
+    it runs the detector-appropriate READ-ONLY live captures (process
+    /proc details, persistence file content, inbound-session netstat) and
+    returns their `_trudi_call_id`s. Cite those in the finding's
+    `input_call_ids` so the intrusion stays provable after eradication.
+
+    Read-only: uses the live.* read path, never mutates the endpoint.
+    """
+    refusal = response_gates.check_live_monitoring_scope(case_id)
+    if refusal:
+        return refusal
+    if not detector or evidence is None:
+        return {"success": False,
+                "error": "pass detector= and evidence= from the alert payload."}
+    ev = {str(k).lower(): v for k, v in (evidence or {}).items()}
+    # Snapshot the host the ALERT came from (multi-host cases), else the single
+    # configured host. An explicit `host=` still overrides. Capturing the wrong
+    # host silently describes an unrelated process (observed in INV-001).
+    h = host or _host_for_alert(case_id, client_id or ev.get("client_id"))
+    if not h:
+        return {"success": False,
+                "error": "no live host configured — set 'host' in monitoring/config.json "
+                         "or register one in live_hosts.json."}
+    det = detector.rsplit(".", 1)[-1]
+    pid, path = ev.get("pid"), ev.get("path")
+
+    from tools import live as _live
+
+    def _fn(tool):
+        return getattr(tool, "fn", tool)
+
+    captured: list[dict] = []
+
+    def _cap(label: str, tool, *args):
+        try:
+            r = _fn(tool)(*args)
+        except Exception as e:  # noqa: BLE001
+            captured.append({"capture": label, "error": str(e)[:160]})
+            return
+        if isinstance(r, dict):
+            captured.append({"capture": label, "call_id": r.get("_trudi_call_id"),
+                             "success": r.get("success")})
+
+    # Process-centric detectors: /proc/<pid> (uid, cmdline, exe, maps) is the
+    # root/lineage proof that a kill erases.
+    if det in ("NewProcess", "PrivilegeEscalation", "YaraProcess") and pid is not None:
+        try:
+            _cap("process_details", _live.live_process_details, h, int(pid))
+        except (TypeError, ValueError):
+            pass
+    # Persistence: the file content a removal deletes.
+    if det == "NewPersistence" and path:
+        _cap("persistence_file", _live.live_read_file, h, path)
+    # Session detectors: the ESTABLISHED flow a block/kill tears down.
+    if det in ("NewLogon", "NewNetwork"):
+        _cap("network_connections", _live.live_network_connections, h)
+        if pid is not None:
+            try:
+                _cap("session_proc", _live.live_process_details, h, int(pid))
+            except (TypeError, ValueError):
+                pass
+    # Always anchor a full process table for lineage context.
+    _cap("process_table", _live.live_processes, h)
+
+    call_ids = [c["call_id"] for c in captured if c.get("call_id")]
+    return {
+        "success": bool(call_ids),
+        "case_id": case_id, "host": h, "detector": detector,
+        "snapshot_call_ids": call_ids,
+        "captured": captured,
+        "hint": "cite snapshot_call_ids in the finding's input_call_ids so the "
+                "intrusion stays grounded after contain/eradicate.",
+    }
+
+
 # ── Execution path (gated) ────────────────────────────────────────────────────
 
 def _executions_dir(case_id: str) -> Path:
@@ -259,6 +378,18 @@ def _resolve_host_for_case(case_id: str) -> Optional[str]:
     except Exception:  # noqa: BLE001
         hosts = []
     return hosts[0] if len(hosts) == 1 else None
+
+
+def _host_for_alert(case_id: str, client_id: Optional[str]) -> Optional[str]:
+    """Route this alert's response to the host it CAME FROM.
+
+    A multi-host live case (e.g. a lateral A→B demo) emits alerts from several
+    clients; snapshot/containment must act on the alerting client's host, not a
+    single hard-wired one. Resolve by the alert's `client_id` via the case's
+    client_map, falling back to the single-host resolution when the client is
+    unmapped (single-endpoint cases) — never silently acting on the wrong host.
+    """
+    return policy.host_for_client(case_id, client_id) or _resolve_host_for_case(case_id)
 
 
 def _command_string(argv: list[str]) -> str:
@@ -346,7 +477,11 @@ def execute_action(case_id: str, action_id: str, mode: str = "operator") -> dict
             "error": f"{action_id} has no action_template — re-run suggest_containment.",
         }
 
-    host = _resolve_host_for_case(case_id)
+    # Act on the host the suggestion was routed to (the alerting client's host),
+    # falling back to single-host resolution for suggestions recorded before
+    # host-aware routing. This is what makes containment hit the right host in a
+    # multi-host case rather than a single hard-wired one.
+    host = suggestion.get("host") or _host_for_alert(case_id, suggestion.get("client_id"))
     if host is None:
         return {
             "success": False,

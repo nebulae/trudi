@@ -184,6 +184,59 @@ else
     echo "    ssh -i $KEY_PATH -p $SSH_PORT $SSH_USER@$SSH_HOST id"
 fi
 
+# ── 6. Lateral-movement hosts (compose profile "lateral", if running) ─────────
+# victim-a / victim-b each enroll as their own Velociraptor client and each
+# publish their own /shared/trudi_live key. Wire them exactly like trudi-victim
+# (pull key → forget stale host key → merge into live_hosts.json → smoke test),
+# but only when their containers are actually up.
+wire_lateral_host() {  # $1=alias  $2=container  $3=ssh_port
+    local alias="$1" ctr="$2" port="$3"
+    local key="$REAL_HOME/.ssh/${ctr#trudi-}"   # ~/.ssh/victim-a, ~/.ssh/victim-b
+    if ! docker inspect -f '{{.State.Running}}' "$ctr" >/dev/null 2>&1; then
+        return 0
+    fi
+    step "Wiring lateral host $alias ($ctr:$port)"
+    local got=0
+    for i in $(seq 1 60); do
+        if docker cp "$ctr:/shared/trudi_live" "$key" 2>/dev/null; then
+            docker cp "$ctr:/shared/trudi_live.pub" "$key.pub" 2>/dev/null || true
+            own "$key" "$key.pub"; chmod 600 "$key"; [ -f "$key.pub" ] && chmod 644 "$key.pub"
+            got=1; ok "SSH key → $key"; break
+        fi
+        sleep 2
+    done
+    [ "$got" -eq 1 ] || { warn "timed out pulling $ctr key — skipping $alias"; return 0; }
+    as_user ssh-keygen -R "[$SSH_HOST]:$port" >/dev/null 2>&1 || true
+    as_user env HOSTS_CONFIG="$HOSTS_CONFIG" REAL_HOME="$REAL_HOME" \
+        HOST_ALIAS="$alias" SSH_USER="$SSH_USER" SSH_HOST="$SSH_HOST" \
+        SSH_PORT="$port" KEY_PATH="$key" python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+cfg_path = Path(os.environ["HOSTS_CONFIG"]); hosts = {}
+if cfg_path.exists():
+    try: hosts = json.loads(cfg_path.read_text()) or {}
+    except (json.JSONDecodeError, ValueError): raise SystemExit(f"  ✗ {cfg_path} invalid JSON")
+alias = os.environ["HOST_ALIAS"]; real_home = os.environ["REAL_HOME"]; identity = os.environ["KEY_PATH"]
+if identity.startswith(real_home): identity = "~" + identity[len(real_home):]
+entry = {"user": os.environ["SSH_USER"], "host": os.environ["SSH_HOST"],
+         "port": int(os.environ["SSH_PORT"]), "identity": identity}
+if hosts.get(alias) == entry:
+    print(f"  {alias} already registered (unchanged)")
+else:
+    hosts[alias] = entry; cfg_path.write_text(json.dumps(hosts, indent=2) + "\n")
+    print(f"  wrote {alias}")
+PYEOF
+    own "$HOSTS_CONFIG"
+    if as_user ssh -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+           -o ConnectTimeout=10 -p "$port" "$SSH_USER@$SSH_HOST" 'hostname' >/dev/null 2>&1; then
+        ok "live.* SSH path up ($SSH_USER@$SSH_HOST:$port)"
+    else
+        warn "$alias SSH smoke test failed — sshd may still be starting"
+    fi
+}
+wire_lateral_host "trudi-victim-a" "trudi-victim-a" "2223"
+wire_lateral_host "trudi-victim-b" "trudi-victim-b" "2224"
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${GREEN}  Live endpoint ready.${NC}"

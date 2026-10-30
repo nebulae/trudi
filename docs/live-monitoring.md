@@ -70,8 +70,14 @@ itself.
 **The auto vs approval boundary is server-classified** from the recipe's
 `risk`/`reversible` metadata (`response/policy.py:classify`) — the agent
 cannot reclassify. AUTO = reversible AND risk:low. Everything else (any
-irreversible action, or risk ≥ medium) requires an operator-typed
-`approve ACT-N`. Passing `mode="auto"` to `execute_action` on a
+irreversible action, or risk ≥ medium) requires an explicit operator
+approval — either a **popup selection** (`AskUserQuestion` whose approve
+option's label carries the `ACT-N`; the `PostToolUse` hook records the
+selected label as a `user_message`) or a typed `approve ACT-N` (the
+`UserPromptSubmit` hook). Both satisfy `operator_text_required` the same
+way, and the agent cannot self-approve either way — only the hooks write
+those trace entries, from genuine human input. Passing `mode="auto"` to
+`execute_action` on a
 destructive action does NOT bypass approval — permission is recomputed
 from disk every call.
 
@@ -99,6 +105,53 @@ markers prove lab/exercise infrastructure. Keep the language precise:
 
 `respond.*` cannot touch anything under `/cases/.../evidence/`,
 `/mnt/`, or `/media/` — those refusals are unchanged.
+
+## Multi-host lateral-movement scenario + eradicate/verify
+
+The `demo/live-monitoring` stack has a compose profile **`lateral`** that adds a
+beachhead (`victim-a`) and a pivot target (`victim-b`), each its own
+Velociraptor client, plus the `LATERAL-DEMO` case. `victim-a /attacks/run
+lateral` moves A→B over SSH (stolen key, held session), escalates to root via a
+sudo misconfiguration, and installs a root cron. Two detectors beyond the
+original four carry this:
+
+- **`Custom.TRUDI.NewLogon`** — a new inbound SSH (:22 ESTABLISHED) session from
+  a source IP not in the baseline `logon_sources` allowlist (gateway `.1` and
+  loopback excluded so the management plane doesn't self-alert). The
+  lateral-movement signal; keyed on the socket, since key-based non-PTY sessions
+  write no wtmp/utmp record.
+- **`Custom.TRUDI.PrivilegeEscalation`** — a process running as **root** whose
+  image path is not in the baseline `root_image_paths` set (zombies skipped).
+
+Both allowlists are captured by `monitor.baseline_capture` and substituted by
+`monitoring/render.py`. Their recipes add response actions (all built as
+validated argv in `core/ssh_exec.py`):
+
+| Action | Template | Tier |
+|---|---|---|
+| Block the lateral source IP (iptables INPUT REJECT) | `block_source_ip` (revert `unblock_source_ip`) | AUTO |
+| Kill the live SSH session | `kill_session` | approval |
+| Quarantine the escalated binary | `quarantine_image` (revert restore) | AUTO |
+| Kill the escalated root process | `kill_pid` | approval |
+| Kill the whole implant family by image | `kill_by_image` (`pkill -9 -f <image_path>`) | approval |
+| Expire the abused account | `lock_account` (revert `unlock_account`), refuses protected accounts | approval |
+
+**Snapshot before you contain.** Contain-first is fast, but quarantining a
+binary / killing a process / deleting a cron file removes the artifacts a
+finding must cite. `respond.snapshot_evidence(case_id, detector=, evidence=)`
+runs the detector-appropriate READ-ONLY live captures (`/proc/<pid>` details,
+persistence file content, inbound netstat, process table) and returns
+`snapshot_call_ids` to cite in the finding's `input_call_ids` — so the
+intrusion stays provable after eradication. Call it before any
+kill/quarantine/removal. **Prefer `kill_by_image` over single-pid `kill_pid`
+for a respawning implant**: a cron/service re-launches fresh PIDs, so a
+single-pid kill leaves siblings that `verify_clean` then (correctly) reports.
+
+After containment/eradication, **`monitor.verify_clean(client_id, case_id)`**
+re-snapshots the host (Pslist / Netstat / PersistenceSnapshot) and recomputes
+every detector's residual against the baseline allowlists; `clean=true` means no
+process / root-process / persistence / logon / egress deviation remains. It is
+read-only — it never remediates.
 
 **Not available:** MemProcFS, VSCMount (Windows-only), tshark, hayabusa, guymager.
 
