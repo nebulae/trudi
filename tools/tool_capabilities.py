@@ -8,6 +8,7 @@ priority_tools should come from these known, phase-appropriate capabilities.
 from __future__ import annotations
 
 import copy
+import os
 import re
 import shutil
 
@@ -438,13 +439,38 @@ _OPTIONAL_BINARIES: dict[str, tuple[tuple[str, ...], str]] = {
 }
 
 
+# WSL exposes Windows drives under /mnt/<letter>/ through DrvFS, where a stat
+# costs ~1 ms, and a Windows-inherited PATH carries dozens of such entries. No
+# forensic tool lives there, yet probing ~250 binaries against the full PATH
+# took seconds per importing module — long enough for the Codex MCP handshake
+# (10–30 s) to time out on server start. Probes skip those entries unless
+# TRUDI_PROBE_FULL_PATH=1 asks for the whole PATH.
+_DRVFS_RE = re.compile(r"^/mnt/[A-Za-z]/")
+
+
+def _probe_path() -> str:
+    """PATH used for binary probes: the session PATH minus WSL drive mounts."""
+    entries = (os.environ.get("PATH") or os.defpath).split(os.pathsep)
+    if os.environ.get("TRUDI_PROBE_FULL_PATH") == "1":
+        return os.pathsep.join(entries)
+    kept = [e for e in entries if not _DRVFS_RE.match(e)]
+    return os.pathsep.join(kept or entries)
+
+
+def _which(name: str) -> str | None:
+    try:
+        return shutil.which(name, path=_probe_path())
+    except TypeError:  # a test double that takes only the name
+        return shutil.which(name)
+
+
 def optional_binary(tool_id: str, which=None) -> str | None:
     """Resolved binary for an optional-binary tool; None when none is installed.
     Tools outside the table are always considered available ("")."""
     spec = _OPTIONAL_BINARIES.get(tool_id)
     if not spec:
         return ""
-    which = which or shutil.which
+    which = which or _which
     return next((b for b in (which(n) for n in spec[0]) if b), None)
 
 
@@ -461,9 +487,22 @@ def tool_unavailable_result(tool_id: str, which=None) -> dict | None:
                      "reason='inapplicable') or use another parser.")}
 
 
+# One probe pass per (which implementation, PATH): the manifest builders call
+# unavailable_tools() a dozen times per module import, and every reasoning/DAIR
+# call rebuilds the allowed-tool set. The key changes when a test swaps
+# shutil.which or the PATH changes, so the cache never serves a stale answer.
+_UNAVAILABLE_CACHE: dict = {}
+
+
 def unavailable_tools() -> set[str]:
     """Optional-binary tools whose binary is not installed on this host."""
-    return {t for t in _OPTIONAL_BINARIES if optional_binary(t) is None}
+    key = (shutil.which, os.environ.get("PATH"), os.environ.get("TRUDI_PROBE_FULL_PATH"))
+    cached = _UNAVAILABLE_CACHE.get("probe")
+    if cached is not None and cached[0] == key:
+        return set(cached[1])
+    missing = {t for t in _OPTIONAL_BINARIES if optional_binary(t) is None}
+    _UNAVAILABLE_CACHE["probe"] = (key, frozenset(missing))
+    return set(missing)
 
 
 def _installed(tools: list[str]) -> list[str]:
