@@ -16,14 +16,20 @@ parameters:
   - name: WatchDirs
     description: JSON array of glob patterns (must match the NewPersistence detector).
     default: |
-      ["/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*", "/etc/cron.weekly/*", "/etc/cron.monthly/*", "/etc/systemd/system/*", "/var/spool/cron/crontabs/*"]
+      ["/etc/crontab", "/etc/anacrontab", "/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*", "/etc/cron.weekly/*", "/etc/cron.monthly/*", "/etc/systemd/system/*", "/var/spool/cron/crontabs/*"]
 
 sources:
   - query: |
       LET watch <= parse_json_array(data=WatchDirs)
       SELECT
-        FullPath AS path,
+        path,
         Size,
-        Mtime AS mtime_utc
-      FROM glob(globs=watch, accessor="auto")
-      WHERE Mode.IsDir = FALSE
+        mtime_utc,
+        sha256,
+        format(format="%v|%v", args=[path, sha256]) AS identity
+      FROM foreach(row={
+        SELECT FullPath AS path, Size, Mtime AS mtime_utc,
+               hash(path=FullPath).SHA256 AS sha256
+        FROM glob(globs=watch, accessor="auto")
+        WHERE Mode.IsDir = FALSE
+      })

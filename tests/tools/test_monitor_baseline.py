@@ -49,7 +49,8 @@ class TestBaselinePersistenceSnapshot:
         def fake_wait(client_id, fid, timeout_seconds=300):
             return {"success": True, "final_state": "FINISHED"}
 
-        def fake_results(client_id, fid, artifact):
+        def fake_results(client_id, fid, artifact, *, full_output=False):
+            assert full_output
             if artifact == "Linux.Sys.Pslist":
                 return {"rows": [{"Name": "sshd", "Exe": "/usr/sbin/sshd"}]}
             if artifact == monitor_mod.PERSISTENCE_SNAPSHOT_ARTIFACT:

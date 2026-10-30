@@ -1,13 +1,22 @@
 name: Custom.TRUDI.PrivilegeEscalation
 description: |
   TRUDI-managed: detect a privilege-escalation outcome — a process running as
-  root whose image path is NOT in the baseline set of root-owned image paths.
-  Catches the classic "land as an unprivileged user, then run a root-owned
-  implant" pivot (e.g. via a sudo misconfiguration or SUID drop): the escalated
-  binary appears as a novel root process.
+  root, whose image is NOT in the baseline set of root-owned image paths, and
+  whose ancestry crosses a uid boundary: some ancestor (up to six hops) runs as
+  a non-root user. That is the classic "land as an unprivileged user, then run
+  a root-owned implant" pivot (sudo misconfiguration, SUID drop, su): the
+  implant is root, its grandparent is the user's shell.
 
-  Zombies are skipped — a killed implant reaped by init briefly lingers as a
-  defunct entry and must not read as a live root process.
+  A root process whose whole ancestry is root is NOT an escalation — the daily
+  cron chain (cron → CRON → sh → run-parts → script → sleep) and root daemons
+  spawning root children stay silent here (they are NewProcess's concern when
+  their image is novel). The escalation brokers themselves (sudo/su/pkexec)
+  are not reported — the process they hand root to is.
+
+  Ancestry is resolved from the same per-tick process snapshot the row came
+  from (Pid → Ppid lookups over a dict of the snapshot), so no process tracker
+  is required. Each row carries parent_exe / parent_user / ancestry for the
+  investigation and the watcher's merge logic.
 
 type: CLIENT_EVENT
 
@@ -16,6 +25,12 @@ parameters:
     description: JSON array of image paths already seen running as root at baseline.
     default: |
       ${baseline_root_image_paths}
+  - name: EscalationBrokers
+    description: >
+      JSON array of binaries that legitimately cross the uid boundary; they are
+      never reported themselves (their root children are).
+    default: |
+      ["/usr/bin/sudo", "/bin/sudo", "/usr/bin/su", "/bin/su", "/usr/bin/pkexec", "/usr/bin/doas"]
   - name: PollSeconds
     description: How often to walk the process list.
     type: int
@@ -24,20 +39,51 @@ parameters:
 sources:
   - query: |
       LET baseline <= parse_json_array(data=BaselineRootImagePaths)
+      LET brokers <= parse_json_array(data=EscalationBrokers)
       LET tick = SELECT * FROM clock(period=PollSeconds)
+      LET snapshot = SELECT Pid, Ppid, Exe, Username, Name, CommandLine, CreatedTime
+                     FROM Artifact.Linux.Sys.Pslist()
+      -- Index the snapshot by pid and walk up to six ancestors per row.
+      LET pm(rows) = to_dict(item={
+          SELECT str(str=Pid) AS _key,
+                 dict(Pid=Pid, Ppid=Ppid, Exe=Exe, Username=Username) AS _value
+          FROM foreach(row=rows) })
+      LET a1(m, p) = get(item=m, member=str(str=p))
+      LET a2(m, p) = a1(m=m, p=a1(m=m, p=p).Ppid)
+      LET a3(m, p) = a1(m=m, p=a2(m=m, p=p).Ppid)
+      LET a4(m, p) = a1(m=m, p=a3(m=m, p=p).Ppid)
+      LET a5(m, p) = a1(m=m, p=a4(m=m, p=p).Ppid)
+      LET a6(m, p) = a1(m=m, p=a5(m=m, p=p).Ppid)
+      LET nr(x) = if(condition=x AND x.Username != "root", then=1, else=0)
+      LET nonroot_hops(m, p) = nr(x=a1(m=m,p=p)) + nr(x=a2(m=m,p=p)) + nr(x=a3(m=m,p=p))
+                             + nr(x=a4(m=m,p=p)) + nr(x=a5(m=m,p=p)) + nr(x=a6(m=m,p=p))
+      LET ex(x) = if(condition=x, then=x.Exe, else="")
+      LET ancestry(m, p) = join(array=filter(list=[ex(x=a1(m=m,p=p)), ex(x=a2(m=m,p=p)),
+                                                   ex(x=a3(m=m,p=p)), ex(x=a4(m=m,p=p)),
+                                                   ex(x=a5(m=m,p=p)), ex(x=a6(m=m,p=p))],
+                                             regex="."), sep=" <- ")
       SELECT * FROM foreach(row=tick, query={
-        SELECT
-          timestamp(epoch=now()) AS timestamp_utc,
-          Exe AS image_path,
-          Name AS process_name,
-          Pid AS pid,
-          Ppid AS ppid,
-          CommandLine AS commandline,
-          Username AS username,
-          CreatedTime AS started_utc
-        FROM Artifact.Linux.Sys.Pslist()
-        WHERE Username = "root"
-          AND Exe != ""
-          AND NOT Exe IN baseline
-          AND NOT Status =~ "zombie"
+        SELECT * FROM foreach(row={ SELECT snapshot AS procs FROM scope() }, query={
+          SELECT * FROM foreach(row={ SELECT procs, pm(rows=procs) AS m FROM scope() }, query={
+            SELECT
+              timestamp(epoch=now()) AS timestamp_utc,
+              Exe AS image_path,
+              Name AS process_name,
+              Pid AS pid,
+              Ppid AS ppid,
+              CommandLine AS commandline,
+              Username AS username,
+              CreatedTime AS started_utc,
+              a1(m=m, p=Ppid).Exe AS parent_exe,
+              a1(m=m, p=Ppid).Username AS parent_user,
+              ancestry(m=m, p=Ppid) AS ancestry,
+              nonroot_hops(m=m, p=Ppid) AS nonroot_ancestors
+            FROM foreach(row=procs)
+            WHERE Username = "root"
+              AND Exe != ""
+              AND NOT Exe IN baseline
+              AND NOT Exe IN brokers
+              AND nonroot_hops(m=m, p=Ppid) > 0
+          })
+        })
       })

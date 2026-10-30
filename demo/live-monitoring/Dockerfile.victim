@@ -24,6 +24,7 @@ RUN apt-get update \
         yara \
         gdb \
         jq \
+        freerdp2-x11 xvfb xdotool \
  && rm -rf /var/lib/apt/lists/*
 
 # Velociraptor client (same binary as the server — -musl static build).
@@ -39,7 +40,7 @@ RUN git clone --depth=1 --branch "${ATOMIC_RED_TEAM_REF}" \
 
 # Attack dispatcher + alias map. Mounted at /attacks for the operator.
 COPY victim/attacks /attacks
-RUN chmod +x /attacks/run /attacks/beacon.sh /attacks/lateral.sh
+RUN chmod +x /attacks/run /attacks/beacon.sh /attacks/lateral.sh /attacks/decoy-touch.sh /attacks/win-rdp.sh /attacks/win-decoy.sh
 
 # Demo user the attacks run as. UID 1000 = baseline-friendly.
 RUN useradd -m -u 1000 -s /bin/bash victim \

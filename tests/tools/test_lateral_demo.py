@@ -49,7 +49,7 @@ def _fake_velo(monkeypatch, pslist, netstat, persist):
     def fake_wait(client_id, fid, timeout_seconds=300):
         return {"success": True, "final_state": "FINISHED"}
 
-    def fake_results(client_id, fid, artifact):
+    def fake_results(client_id, fid, artifact, **kwargs):
         if artifact == "Linux.Sys.Pslist":
             return {"rows": pslist}
         if artifact in ("Linux.Network.Netstat", "Linux.Network.NetstatEnriched"):
@@ -76,7 +76,7 @@ class TestBaselineLateralFields:
             {"Laddr": {"Port": 22}, "Raddr": {"IP": "172.18.0.1", "Port": 5000},
              "Status": "ESTABLISHED"},
         ]
-        _fake_velo(monkeypatch, pslist, netstat, [{"path": "/etc/cron.d/e2scrub_all"}])
+        _fake_velo(monkeypatch, pslist, netstat, [{"path": "/etc/cron.d/e2scrub_all", "sha256": "good"}])
         r = monitor_mod.baseline_capture("C.abc", "LAT-TEST")
         assert r["success"] is True
         bl = json.loads((tmp_path / "LAT-TEST" / "monitoring" / "baselines" / "C.abc.json").read_text())
@@ -93,6 +93,7 @@ class TestVerifyClean:
             "process_names": ["sshd", "bash"],
             "root_image_paths": ["/usr/sbin/sshd"],
             "persistence_paths": ["/etc/cron.d/e2scrub_all"],
+            "persistence_fingerprints": ["/etc/cron.d/e2scrub_all|good"],
             "logon_sources": ["172.18.0.1"],
             "endpoints": [],
         }))
@@ -104,7 +105,7 @@ class TestVerifyClean:
                    pslist=[{"Name": "sshd", "Exe": "/usr/sbin/sshd", "Username": "root"}],
                    netstat=[{"Laddr": {"Port": 22}, "Raddr": {"IP": "172.18.0.1", "Port": 5000},
                              "Status": "ESTABLISHED"}],
-                   persist=[{"path": "/etc/cron.d/e2scrub_all"}])
+                   persist=[{"path": "/etc/cron.d/e2scrub_all", "sha256": "good"}])
         r = monitor_mod.verify_clean("C.abc", "LAT-TEST")
         assert r["success"] is True
         assert r["clean"] is True
@@ -123,7 +124,7 @@ class TestVerifyClean:
                    ],
                    netstat=[{"Laddr": {"Port": 22}, "Raddr": {"IP": "10.73.0.3", "Port": 44130},
                              "Status": "ESTABLISHED", "Pid": 200}],
-                   persist=[{"path": "/etc/cron.d/e2scrub_all"},
+                   persist=[{"path": "/etc/cron.d/e2scrub_all", "sha256": "good"},
                             {"path": "/etc/cron.d/trudi-pivot"}])
         r = monitor_mod.verify_clean("C.abc", "LAT-TEST")
         assert r["clean"] is False
@@ -141,7 +142,7 @@ class TestVerifyClean:
                             "Username": "root", "Status": "zombie", "Pid": 106}],
                    netstat=[{"Laddr": {"Port": 22}, "Raddr": {"IP": "172.18.0.1", "Port": 5000},
                              "Status": "ESTABLISHED"}],   # gateway .1, management plane
-                   persist=[{"path": "/etc/cron.d/e2scrub_all"}])
+                   persist=[{"path": "/etc/cron.d/e2scrub_all", "sha256": "good"}])
         r = monitor_mod.verify_clean("C.abc", "LAT-TEST")
         # zombie root proc skipped; .1 gateway logon skipped → clean
         assert r["clean"] is True
@@ -158,7 +159,7 @@ class TestVerifyClean:
                        {"Name": "sleep", "Exe": "/usr/bin/sleep", "Username": "devops", "Pid": 902},
                        {"Name": "evil", "Exe": "/tmp/evil", "Username": "root", "Pid": 903},
                    ],
-                   netstat=[], persist=[{"path": "/etc/cron.d/e2scrub_all"}])
+                   netstat=[], persist=[{"path": "/etc/cron.d/e2scrub_all", "sha256": "good"}])
         r = monitor_mod.verify_clean("C.abc", "LAT-TEST")
         assert r["clean"] is False
         # only the /tmp implant remains; ps/dash/sleep filtered as ephemeral

@@ -1,0 +1,17 @@
+# Deception decoy EMULATOR for the TRUDI live-monitoring demo.
+#
+# Stands in for an Acalvio ShadowPlex RDP decoy: listens on 3389, reads the
+# username from the RDP mstshash cookie, and emits ShadowPlex-format CEF over
+# UDP syslog to the TRUDI ingest sidecar on the SIFT host. Format emulation of
+# the published spec — NOT Acalvio software.
+FROM python:3.12-slim
+
+RUN useradd -m -u 1500 decoy
+COPY demo/live-monitoring/decoy/decoy.py demo/live-monitoring/decoy/cef_format.py /opt/decoy/
+COPY monitoring /opt/trudi/monitoring
+ENV PYTHONPATH=/opt/trudi
+RUN chmod +x /opt/decoy/decoy.py
+
+USER decoy
+EXPOSE 3389
+ENTRYPOINT ["python3", "/opt/decoy/decoy.py"]

@@ -227,6 +227,16 @@ def check_execution_permitted(
     from response import policy
     tier = policy.classify(suggestion)
     if tier == policy.AUTO and policy.auto_protect_enabled(case_id):
+        if str(suggestion.get("detector", "")).rsplit(".", 1)[-1] == "DecoyTouch":
+            from monitoring import cef_auth, response_store
+            case_dir = CASES_ROOT / case_id
+            allowed = any(cef_auth.authorize_alert(case_dir, alert,
+                suggestion.get("raw_evidence") or {}, suggestion.get("client_id"))
+                for aid in suggestion.get("alert_ids") or []
+                if (alert := response_store.find_alert(case_dir, aid)))
+            if not allowed:
+                _, refusal = check_approval(case_id, action_id)
+                return refusal
         return None
     _, refusal = check_approval(case_id, action_id)
     return refusal

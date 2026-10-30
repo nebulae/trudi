@@ -1,0 +1,16 @@
+# Sample ShadowPlex incident as the WINDECOY-DEMO on-decoy sensor (sensor.ps1)
+# emits it: a honey-account ("linda") type-10 RDP logon on the real Windows
+# decoy, reported as the two CEF records (fused incident + service interaction)
+# sharing one incidentID. Field layout matches monitoring/cef.py and the
+# published Acalvio ShadowPlex Incident Mapping Guide (release 2026.8.2.0).
+#
+# Container-free replay into the ingest:
+#   python3 bin/trudi-cef-ingest.py --case-id WINDECOY-DEMO \
+#       --alerts-dir ~/cases/WINDECOY-DEMO/monitoring/alerts --no-resolve \
+#       --replay demo/live-monitoring/windecoy/sample-sensor-incident.cef
+#
+# Unlike demo/live-monitoring/decoy/sample-incident.cef, srcIP/dstIP here are
+# the real lab LAN addresses (beachhead 10.73.0.3 → decoy 10.73.0.60) the
+# sensor reads from the decoy's own 4624, not RFC5737 documentation addresses.
+<114>2026-10-10T12:00:00.000Z lab CEF:0|Acalvio|ShadowPlex|2026.8.2.0|DETECT_AND_RESPOND|ENDPOINT_COMPROMISE|9|cat="Endpoint Compromise" cs2Label=incidentID cs2=b2c7a9d1-4e83-4a21-9f0c-1d6e5a2b3c4d start="October 10 2026 12:00:00.000 UTC" end="October 10 2026 12:00:00.000 UTC" cs3Label=incidentStatus cs3=Active cs8Label=tacticName cs8="Lateral Movement,Discovery" cs10Label=techniqueName cs10="Remote Services.Remote Desktop Protocol,Network Service Discovery" cs15Label=srcIP cs15=10.73.0.3 cs25Label=dstIP cs25=10.73.0.60 cs26Label=dstEndpointName cs26=WIN-DECOY01 cs35Label=dstPort cs35=3389 cs52Label=userIdAttempted cs52=linda cs67Label=callbackURL cs67=https://233.252.0.91/#/incidents?incidentID=b2c7a9d1-4e83-4a21-9f0c-1d6e5a2b3c4d
+<114>2026-10-10T12:00:00.010Z lab CEF:0|Acalvio|ShadowPlex|2026.8.2.0|DETECT_AND_RESPOND|SERVICE_INTERACTION|9|cs2Label=incidentID cs2=b2c7a9d1-4e83-4a21-9f0c-1d6e5a2b3c4d cs78Label=event_data cs78={"user_name":"linda","service_details":{"host_mac":null,"remote_port":null,"service_name":"MS-WBT-SERVER","service_port":3389,"auth_attempted":true,"client_host_ip":"10.73.0.3","remote_address":"10.73.0.3","client_host_name":"VICTIM-A","service_host_name":"WIN-DECOY01","service_host_address":"10.73.0.60"}}
