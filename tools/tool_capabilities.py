@@ -12,7 +12,7 @@ import re
 import shutil
 
 
-MANIFEST_VERSION = "2026-09-24.1"
+MANIFEST_VERSION = "2026-09-24.2"
 
 
 _CAPABILITIES: list[dict] = [
@@ -127,12 +127,30 @@ _CAPABILITIES: list[dict] = [
         "purpose": ("Extract and enumerate communications stores — mail OST/PST "
                     "(readpst/pff_export) and chat/messenger sqlite "
                     "(chat_db_export: messages, file-transfer trail, full "
-                    "sender/recipient roster). Mandatory before any "
-                    "recipient/dissemination conclusion."),
+                    "sender/recipient roster; sqlite_recover: deleted records "
+                    "from freelist/freeblocks/unallocated/WAL of any sqlite "
+                    "store). Mandatory before any recipient/dissemination "
+                    "conclusion."),
         "tools": [
             "misc.readpst_extract",
             "misc.pff_export",
             "misc.chat_db_export",
+            "misc.sqlite_recover",
+        ],
+    },
+    {
+        "id": "mobile_device",
+        "phases": ["Collect", "Analyze"],
+        "evidence": ["mobile"],
+        "purpose": ("Parse an extracted iOS filesystem or iTunes backup — MVT "
+                    "(messages, calls, contacts, Safari/WebKit, locationd, TCC, "
+                    "accounts, timeline) and mac_apt ios_apt (apps, accounts, Wi-Fi, "
+                    "networking, Safari, Notes, Screen Time, Spotlight)."),
+        "tools": [
+            "mobile.mvt_ios_check_fs",
+            "mobile.ios_apt",
+            "mobile.mvt_ios_check_backup",
+            "mobile.mvt_ios_decrypt_backup",
         ],
     },
     {
@@ -156,12 +174,16 @@ _CAPABILITIES: list[dict] = [
         "id": "static_file_triage",
         "phases": ["Triage", "Analyze", "Scan"],
         "evidence": ["file", "mounted_fs"],
-        "purpose": "Identify, hash, grep, inspect, and classify files or extracted payloads.",
+        "purpose": ("Identify, hash, grep, inspect, and classify files or extracted "
+                    "payloads; detect/recover Acropalypse-cropped screenshots; export "
+                    "spreadsheets (xlsx_export) to CSV for read.output."),
         "tools": [
             "strings.stat_file",
             "strings.file_identify",
             "strings.grep",
             "strings.floss_extract",
+            "strings.png_acropalypse",
+            "misc.xlsx_export",
             "hash.file",
             "hash.directory",
             "hash.verify_evidence_hash",
@@ -284,6 +306,7 @@ _EVIDENCE_NEEDS_PREFIX: tuple[tuple[str, frozenset], ...] = (
     ("velo.", frozenset({"live"})),
     ("monitor.", frozenset({"live"})),
     ("respond.", frozenset({"live"})),
+    ("mobile.", frozenset({"mobile"})),
 )
 _EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
     "ez.sqlecmd": frozenset({"disk_image", "triage", "mobile"}),   # any SQLite store
@@ -296,6 +319,9 @@ _EVIDENCE_NEEDS_TOOL: dict[str, frozenset] = {
     "plaso.create_timeline": frozenset({"disk_image", "triage", "mobile"}),
     "plaso.create_targeted": frozenset({"disk_image", "triage", "mobile"}),
     "misc.chat_db_export": frozenset({"disk_image", "triage", "mobile"}),
+    "misc.sqlite_recover": frozenset({"disk_image", "triage", "mobile"}),
+    "strings.png_acropalypse": frozenset({"disk_image", "triage", "mobile"}),
+    "misc.xlsx_export": frozenset({"disk_image", "triage", "mobile"}),
     **{t: _WINDOWS_ARTIFACTS for t in (
         "misc.evtx_filter", "misc.evtx_dump", "misc.chainsaw_hunt", "misc.regripper_hive",
         "misc.usnparser_parse", "misc.analyzemft_parse", "misc.srum_export",
@@ -318,6 +344,32 @@ def canonical_tool_id(tool) -> str:
         from tools._fk import normalize_tool_name
         t = normalize_tool_name(t).replace("_", ".", 1)
     return t
+
+
+# Every tool the server actually registers, as canonical ids ("ez.pecmd"),
+# set once at server start (core.normalize_names). Empty = unknown (tests,
+# scripts): nothing is treated as nonexistent.
+_REGISTERED: set[str] = set()
+
+
+def set_registered_tools(ids) -> None:
+    _REGISTERED.clear()
+    _REGISTERED.update(ids)
+
+
+def tool_exists(tool) -> bool:
+    """False only for a `<namespace>.<name>` in a namespace the server has,
+    that no registered tool matches — a backend-invented tool
+    (ez.tidh_extractor) no one can run. A family prefix (ez.recmd for
+    ez.recmd_hive) exists; loose words ("sam", "roster") and unknown
+    namespaces are not judged. Unknown registry (tests, scripts) = exists."""
+    if not _REGISTERED:
+        return True
+    t = canonical_tool_id(tool)
+    ns, _, name = t.partition(".")
+    if not name or not any(r.startswith(ns + ".") for r in _REGISTERED):
+        return True
+    return t in _REGISTERED or any(r.startswith(t + "_") for r in _REGISTERED)
 
 
 def tool_evidence_needs(tool) -> frozenset | None:
@@ -371,6 +423,11 @@ _OPTIONAL_BINARIES: dict[str, tuple[tuple[str, ...], str]] = {
     "misc.pff_export": (("pffexport",), "apt install pff-tools"),
     "misc.readpst_extract": (("readpst",), "sudo apt install pst-utils"),
     "misc.srum_export": (("esedbexport",), "apt install libesedb-utils"),
+    **{t: (("mvt-ios", "/usr/local/bin/mvt-ios"), "pipx install mvt (Amnesty MVT)")
+       for t in ("mobile.mvt_ios_check_fs", "mobile.mvt_ios_check_backup",
+                 "mobile.mvt_ios_decrypt_backup")},
+    "mobile.ios_apt": (("/opt/mac-apt/bin/mac_apt_git/ios_apt.py",),
+                       "install mac_apt (github.com/ydkhatri/mac_apt) under /opt/mac-apt"),
 }
 
 

@@ -172,13 +172,13 @@ def open_challenges(entries, dair_entry: dict) -> list[dict]:
             continue                                   # unparseable — cannot enforce
         if _claim_key(c) in later_verified:
             continue
-        # A method the case's evidence cannot feed can never run (DAIR drops
-        # such challenges; this covers ones recorded before the stamp).
-        if kinds:
-            from tools.tool_capabilities import challenge_method_tools
-            _ms = challenge_method_tools(c.get("challenge_method"))
-            if _ms and all(unfit_for_evidence(m, kinds) for m in _ms):
-                continue
+        # A method the case's evidence cannot feed, or a tool the server does
+        # not register, can never run (DAIR drops such challenges; this covers
+        # ones recorded before).
+        from tools.tool_capabilities import challenge_method_tools
+        _ms = challenge_method_tools(c.get("challenge_method"))
+        if _ms and all(unfit_for_evidence(m, kinds) for m in _ms):
+            continue
         toks = claim_tokens(c.get("claim"))
         if any(run_matches_challenge(e, sig, toks) for e in later_runs):
             continue

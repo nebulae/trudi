@@ -83,6 +83,34 @@ class TestCollection:
         assert "timed out after 1s" in s["stderr"]
         assert "2 files already produced" in s["partial_output"]
 
+    def _timed_out(self, tmp_path, files: int):
+        out = tmp_path / "carved"
+        out.mkdir()
+        for i in range(files):
+            (out / f"f{i}").write_text("x")
+        r = jobs.start_job(["sleep", "30"], tool="t", timeout=1,
+                           output_dir=str(out), partial_ok=True)
+        _wait_done(r["job_id"], timeout=15)
+        logged = {}
+        with patch("core.executor._log_tool") as log:
+            def grab(res):
+                logged.update(res)
+                res["_trudi_call_id"] = 80
+            log.side_effect = grab
+            return jobs.job_status(r["job_id"]), logged
+
+    def test_partial_ok_timeout_with_output_is_truncated_success(self, jobs_dir, tmp_path):
+        # tcpxtract on Nitroba: thousands of carved files, then a FAILED tool at
+        # the budget that pre_report_check demanded closure for.
+        s, logged = self._timed_out(tmp_path, 2)
+        assert s["success"] is True and s["timed_out"] is True
+        assert logged["success"] is True and logged["truncated"] is True
+        assert "2 files already produced" in s["partial_output"]
+
+    def test_partial_ok_timeout_without_output_still_fails(self, jobs_dir, tmp_path):
+        s, logged = self._timed_out(tmp_path, 0)
+        assert s["success"] is False and logged["success"] is False
+
     def test_sidecar_full_stdout_passed_to_log(self, jobs_dir):
         r = jobs.start_job(["sh", "-c", "echo full-output"], tool="t",
                            timeout=30, output_dir="")
@@ -105,4 +133,4 @@ class TestTcpxtractIsAJob:
             r = tcpxtract_streams("/captures/x.pcap", str(tmp_path / "st"))
         assert r["status"] == "running" and r["job_id"]
         shell = popen.call_args[0][0][2]
-        assert "tcpxtract" in shell and "timeout 1800" in shell and "sudo" in shell
+        assert "tcpxtract" in shell and "timeout 600" in shell and "sudo" in shell

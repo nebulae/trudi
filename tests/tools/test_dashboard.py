@@ -489,6 +489,31 @@ class TestReportViewer:
             assert render_report(root, trace, bad)[0] is None
         assert render_report(root, "/c1/evidence/secret.md", "C1_report.md")[0] is None
 
+    def test_download_sends_the_markdown_as_an_attachment(self, standalone_server):
+        import shutil
+        import urllib.parse
+        src_root, trace = self._case(standalone_server["cases_root"].parent / "src")
+        shutil.copytree(os.path.join(src_root, "c1"), standalone_server["cases_root"] / "c1")
+        conn = http.client.HTTPConnection("127.0.0.1", standalone_server["port"], timeout=2)
+
+        def get(name):
+            q = urllib.parse.urlencode({"trace": trace, "name": name})
+            conn.request("GET", f"/_dashboard/api/report_download?{q}")
+            r = conn.getresponse()
+            return r, r.read()
+
+        resp, body = get("C1_report.md")
+        assert resp.status == 200 and body.startswith(b"# Report") and b"<script>" in body
+        assert resp.getheader("Content-Disposition") == 'attachment; filename="C1_report.md"'
+        assert resp.getheader("Content-Type").startswith("text/markdown")
+        for bad in ("../evidence/secret.md", "C1_report.txt", "missing.md"):
+            assert get(bad)[0].status in (403, 404), bad
+
+    def test_viewer_has_a_download_button(self):
+        page = open(os.path.join(os.path.dirname(__file__), "..", "..", "dashboard",
+                                 "report_view.html"), encoding="utf-8").read()
+        assert 'id="download"' in page and "api('report_download'" in page
+
 
 class TestImagePreview:
     """Image preview endpoints: case-scoped paths, header-byte type check."""

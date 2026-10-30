@@ -77,6 +77,15 @@ def assert_output_safe(path: str) -> None:
 READABLE_OUTPUT_SEGMENTS = ("analysis", "exports", "reports")
 
 
+def assert_case_output_path(path: str) -> None:
+    """assert_output_safe, and the path must sit under analysis/ exports/ or
+    reports/ (so read.output can read what the tool writes there)."""
+    assert_output_safe(path)
+    parts = {seg.lower() for seg in Path(os.path.abspath(path)).parts}
+    if not parts & set(READABLE_OUTPUT_SEGMENTS):
+        raise ValueError(f"Output path '{path}' must be under analysis/, exports/ or reports/.")
+
+
 def assert_readable_output(path: str) -> str:
     """Resolve `path` and assert it is a PRODUCED-OUTPUT file under analysis/,
     exports/, or reports/ — never raw evidence, /mnt, /media, or an arbitrary

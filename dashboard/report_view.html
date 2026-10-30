@@ -17,7 +17,7 @@
            padding: 8px 16px; background: var(--bg-2); border-bottom: 1px solid var(--border); }
   header .title { font-weight: 600; }
   header .case { color: var(--accent); font-family: ui-monospace, Menlo, Consolas, monospace; }
-  header select, header button { background: var(--bg-3); color: var(--fg); border: 1px solid var(--border);
+  header select, header button, header a.btn { background: var(--bg-3); color: var(--fg); border: 1px solid var(--border);
                                  border-radius: 4px; padding: 4px 8px; font: inherit; }
   header .spacer { flex: 1; }
   header a { color: var(--accent); text-decoration: none; }
@@ -60,6 +60,7 @@
   <span class="case" id="case"></span>
   <select id="picker" title="Reports in this case's reports/ folder"></select>
   <button id="reload" title="Reload the report">↻</button>
+  <a id="download" class="btn" title="Download this report (Markdown)" hidden>⤓ Download</a>
   <span class="meta" id="meta"></span>
   <span class="spacer"></span>
   <a id="trace-link" target="trudi-trace" title="Open the trace view">Trace ↗</a>
@@ -104,10 +105,13 @@ function decorate(root) {
 
 async function show(name) {
   const doc = $('#doc');
+  $('#download').hidden = true;
   if (!name) { doc.innerHTML = '<div class="empty">No report in this case\'s reports/ folder yet.</div>'; return; }
   const resp = await fetch(api('report', {trace, name}), {cache: 'no-store'});
   if (!resp.ok) { doc.innerHTML = `<div class="empty">Could not load ${name}: ${resp.status} ${resp.statusText}</div>`; return; }
   doc.innerHTML = await resp.text();      // server-rendered; raw HTML in the Markdown is not rendered
+  const dl = $('#download');
+  dl.href = api('report_download', {trace, name}); dl.setAttribute('download', name); dl.hidden = false;
   decorate(doc);
   const url = new URL(location.href); url.searchParams.set('name', name); history.replaceState(null, '', url);
 }

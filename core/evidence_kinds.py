@@ -175,7 +175,7 @@ def is_live_monitoring_trace(entries) -> bool:
 # A successful call in one of these namespaces proves its kind is in hand.
 _NS_KIND = {"vol": "memory", "net": "pcap", "tsk": "disk_image", "ewf": "disk_image",
             "img": "disk_image", "ez": "triage", "af": "triage", "live": "live",
-            "velo": "live"}
+            "velo": "live", "mobile": "mobile"}
 _LIVE_CTX = re.compile(r"\blive\s*=\s*true\b|\bendpoint_host\b", re.IGNORECASE)
 
 

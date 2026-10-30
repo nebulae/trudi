@@ -115,6 +115,49 @@ def is_placeholder(name) -> bool:
             or n.startswith(("unknown", "unidentified", "unnamed")))
 
 
+# Words a reviewer uses to DESCRIBE a principal's role instead of naming one
+# ("iPhone owner (Apple ID holder)", "examiner/lab", "candidate insider",
+# "Windows laptop user account"). Generic role nouns, qualifiers and
+# platform/product words — never part of an identifier on their own.
+_ROLE_WORDS = frozenset("""
+    owner owners user users account accounts holder holders operator operators
+    analyst analysts examiner examiners lab labs host hosts device devices
+    custodian custodians insider insiders candidate candidates recipient
+    recipients clerk clerks principal principals person people individual
+    suspect suspects member members group gang team crew co conspirator
+    conspirators coconspirator coconspirators accomplice accomplices associate
+    associates contact contacts tenant tenants responder responders actor
+    actors party parties admin administrator builder staging producer
+    production designer author sender receiver buyer seller courier mule
+    victim
+    primary secondary second third other another alternative alternate remote
+    local external internal offshore onsite physical shared same different
+    candidate suspected possible potential authorized unauthorized recruited
+    receiving sending registered real actual legitimate forensic counterfeit
+    printing print corner shop paycheck money flow design image cloud bank
+    pentest loader lab
+    iphone ios android apple id telegram whatsapp signal skype element matrix
+    windows win10 win11 mac macos linux laptop desktop workstation server
+    profile handle email mail phone mobile web browser
+    the a an of and or for with on in at by from to its their his her
+    unknown unidentified unnamed
+""".split())
+_ROLE_SPLIT_RE = re.compile(r"[\s/,'\"`()&+-]+")
+
+
+def is_role_label(name) -> bool:
+    """True when `name` describes a role rather than naming an identity: after
+    dropping parentheticals, every word is a generic role/qualifier/product word
+    and nothing identifier-shaped (email, digits, SID, handle) is present.
+    'Chase (insider)', 'amy789smith', 'phorger' and 'Drew Linesworth' are
+    identities; 'examiner/lab' and 'iPhone owner (Apple ID holder)' are not."""
+    s = re.sub(r"\([^)]*\)", " ", str(name or "")).strip()
+    if not s or "@" in s or re.search(r"\d", s):
+        return False
+    words = [w.lower() for w in _ROLE_SPLIT_RE.split(s) if w]
+    return bool(words) and all(w in _ROLE_WORDS for w in words)
+
+
 def claim_key(claim: dict | None) -> str:
     """Structural identity of a typed claim: kind|category|act."""
     c = claim or {}

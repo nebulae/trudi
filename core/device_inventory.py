@@ -71,6 +71,93 @@ def _identity_key(vid: str, pid: str, vendor: str, product: str, path: str) -> s
     return f"path:{path.lower()}"
 
 
+def parse_device_install_logs(paths: list[str]) -> dict:
+    """parse_device_install_log over several logs (setupapi.dev.log plus its
+    archived setupapi.dev.YYYYMMDD_hhmmss.log rotations) as one inventory.
+    Unreadable logs are listed in `logs_unreadable`; success needs one readable."""
+    lines: list[str] = []
+    read, bad = [], []
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                lines.extend(fh.read().splitlines())
+            read.append(p)
+        except OSError as exc:
+            bad.append(f"{p}: {exc}")
+    if not read:
+        return {"success": False, "error": "; ".join(bad) or "no log given"}
+    inv = _inventory_from_lines(lines)
+    inv["logs_parsed"] = read
+    if bad:
+        inv["logs_unreadable"] = bad
+    return inv
+
+
+# RegRipper `usb` / `usbstor` plugin output (SYSTEM hive Enum\USB, Enum\USBSTOR).
+# The registry keeps a key for every device ever enumerated even when the
+# device-install log has rotated, been cleared, or never logged the device.
+_RR_USB_RE = re.compile(r"^(VID_([0-9A-Fa-f]{4})&PID_([0-9A-Fa-f]{4}))(&MI_([0-9A-Fa-f]{2}))?\s+\[([^\]]+)\]")
+_RR_STOR_RE = re.compile(r"^((?:Disk|CdRom|Other)&Ven_([^&]*)&Prod_([^&\s]*)\S*)\s+\[([^\]]+)\]",
+                         re.IGNORECASE)
+
+
+def parse_registry_usb(text: str) -> list[dict]:
+    """Devices from RegRipper usb/usbstor output: one row per VID:PID (Enum\\USB)
+    or Ven/Prod (Enum\\USBSTOR) with its interfaces and newest key LastWrite (UTC)."""
+    devices: dict[str, dict] = {}
+    for ln in (text or "").splitlines():
+        m = _RR_USB_RE.match(ln.strip())
+        if m:
+            vid, pid = m.group(2).lower(), m.group(3).lower()
+            key = _identity_key(vid, pid, "", "", m.group(1))
+            d = devices.setdefault(key, {"identity": key, "vid": vid, "pid": pid, "vendor": "",
+                                         "product": "", "device_class": "USB", "interfaces": set(),
+                                         "registry_last_write": ""})
+            if m.group(5):
+                d["interfaces"].add(m.group(5))
+            d["registry_last_write"] = max(d["registry_last_write"], m.group(6).strip())
+            continue
+        m = _RR_STOR_RE.match(ln.strip())
+        if m:
+            vendor, product = m.group(2), m.group(3)
+            key = _identity_key("", "", vendor, product, m.group(1))
+            d = devices.setdefault(key, {"identity": key, "vid": "", "pid": "", "vendor": vendor,
+                                         "product": product, "device_class": "USBSTOR",
+                                         "interfaces": set(), "registry_last_write": ""})
+            d["registry_last_write"] = max(d["registry_last_write"], m.group(4).strip())
+    for d in devices.values():
+        d["interfaces"] = sorted(d["interfaces"])
+    return list(devices.values())
+
+
+def merge_registry_devices(inv: dict, reg_devices: list[dict]) -> dict:
+    """Fold registry devices into a setupapi inventory. A device the registry
+    holds but no install log mentions is added with source 'registry' and listed
+    in `registry_only` — proof the install log is not a complete device history."""
+    by_id = {d["identity"]: d for d in inv.get("devices", [])}
+    registry_only = []
+    for r in reg_devices:
+        d = by_id.get(r["identity"])
+        if d is not None:
+            d["sources"] = sorted(set(d.get("sources", ["setupapi"])) | {"registry"})
+            d["registry_last_write"] = r.get("registry_last_write", "")
+            d["interfaces"] = sorted(set(d.get("interfaces", [])) | set(r["interfaces"]))
+            continue
+        row = {**r, "first_seen": None, "last_seen": None, "actions": [],
+               "sources": ["registry"]}
+        reasons = _flag_reasons({row["device_class"]}, row)
+        if reasons:
+            row["flag_reasons"] = reasons
+            inv.setdefault("flagged", []).append(row)
+        inv.setdefault("devices", []).append(row)
+        registry_only.append(row)
+    for d in inv.get("devices", []):
+        d.setdefault("sources", ["setupapi"])
+    inv["registry_only"] = registry_only
+    inv["device_count"] = len(inv.get("devices", []))
+    return inv
+
+
 def parse_device_install_log(path: str) -> dict:
     """Parse setupapi.dev.log into a COMPLETE, de-duplicated device inventory.
 
@@ -90,7 +177,10 @@ def parse_device_install_log(path: str) -> dict:
             lines = fh.read().splitlines()
     except OSError as exc:
         return {"success": False, "error": str(exc)}
+    return _inventory_from_lines(lines)
 
+
+def _inventory_from_lines(lines: list[str]) -> dict:
     events: list[dict] = []
     i = 0
     n = len(lines)

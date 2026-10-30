@@ -55,6 +55,8 @@ _CHAT_HANDLE_RE = re.compile(r"^[a-z0-9][a-z0-9._:#@+\-]{1,127}$")
 CHAT_SYSTEM_HANDLES = frozenset({
     "echo123", "echo", "concierge", "skype", "skypebot", "live:echo123",
     "28:concierge", "status@broadcast", "0@s.whatsapp.net",
+    # Telegram service notifications (777000) and platform service bots
+    "tg:777000", "botfather", "groupanonymousbot",
 })
 
 _SENT_FOLDER_RE = re.compile(r"(^|[\\/\[\]\s_-])(sent|outbox)([\\/\[\]\s_.-]|$)",

@@ -15,7 +15,7 @@ from tools.tool_capabilities import (
 from tools._llm_parse import (parse_result_block, strip_result_block,
                               result_instruction, str_list, RESULT_JSON,
                               LEGACY_BLOCK, PROSE_REGEX, NONE as PARSE_NONE,
-                              _balanced_object)
+                              _balanced_object, evidence_call_id, evidence_query_text)
 from tools._output_reader import (
     COMPAT_CITED_FILE_BYTES, _OUTPUT_FLAGS, _OUTPUT_FILE_EXTS, _CITED_TOPK,
     _cited_query_terms, _cmd_output_paths, _read_relevant_from_file,
@@ -309,26 +309,7 @@ def _parse_evidence_request(text: str) -> list[dict]:
     call_id or a non-empty query are dropped; capped at
     COMPAT_EVIDENCE_MAX_REQUESTS."""
     span = _find_evidence_request_span(text)
-    if span is None:
-        return []
-    items = span[2]
-    out: list[dict] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        try:
-            cid = int(it.get("call_id"))
-        except (TypeError, ValueError):
-            continue
-        query = str(it.get("query") or "").strip()
-        if not query:
-            continue
-        cols = it.get("columns") or []
-        cols = [str(c).strip() for c in cols if str(c).strip()][:8] if isinstance(cols, list) else []
-        out.append({"call_id": cid, "query": query[:200], "columns": cols})
-        if len(out) >= COMPAT_EVIDENCE_MAX_REQUESTS:
-            break
-    return out
+    return _parse_evidence_request_items(span[2]) if span else []
 
 
 def _strip_evidence_request(text: str) -> str:
@@ -728,7 +709,12 @@ def _compat_chat(url: str, api_key: str, model: str, system: str, user: str,
                 headers=headers,
                 timeout=timeout,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as he:
+                # The server's own reason ("the request exceeds the available
+                # context size") — a bare "400 Bad Request" left the agent guessing.
+                raise RuntimeError(f"{he} — server said: {he.response.text[:500]}") from he
             body = resp.json()
             choice = body["choices"][0]
             message = choice.get("message") or {}
@@ -889,19 +875,19 @@ _DIRECTIVES_PRESENT_RE = re.compile(r"\*{0,2}DIRECTIVES\*{0,2}\s*:?", re.IGNOREC
 
 
 def _parse_evidence_request_items(items) -> list[dict]:
-    """Validate a RESULT.evidence_request list into the resolver's shape."""
+    """Normalize an evidence-request list into the resolver's shape
+    [{call_id:int, query:str, columns:[str]}]. A query sent as a list of terms
+    is joined; items without a usable call_id or query are dropped."""
     out = []
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        try:
-            cid = int(it.get("call_id"))
-        except (TypeError, ValueError):
+        cid = evidence_call_id(it.get("call_id"))
+        q = evidence_query_text(it.get("query"))
+        if cid is None or not q:
             continue
-        q = str(it.get("query") or "").strip()
-        if not q:
-            continue
-        cols = [str(c).strip() for c in (it.get("columns") or []) if str(c).strip()][:8]
+        cols = it.get("columns") or []
+        cols = [str(c).strip() for c in cols if str(c).strip()][:8] if isinstance(cols, list) else []
         out.append({"call_id": cid, "query": q[:200], "columns": cols})
         if len(out) >= COMPAT_EVIDENCE_MAX_REQUESTS:
             break
@@ -2002,7 +1988,12 @@ _EVALUATE_SYS = (
     "different account, source address, time, path or count). Quote the row. "
     "A time that differs from the stated UTC time by a whole-hour offset matching "
     "the host's time zone (local-time rendering by a tool) is the same moment, "
-    "not a contradiction.\n"
+    "not a contradiction. "
+    "An address is not a machine: behind NAT, a gateway or a shared/private "
+    "address several devices share one IP. A finding that tells devices apart by "
+    "a device discriminator (TCP timestamp clock, window/scale, TTL, User-Agent, "
+    "MAC, cookie jar) is not contradicted by those devices sharing an address — "
+    "check the discriminator, not the address.\n"
     "3. HALLUCINATION CHECK — flag any fact stated as evidence but not "
     "derivable from the cited rows: invented specificity (precise numbers or "
     "offsets without a cited source), fabricated mechanism ('VAD tag X proves "
@@ -2042,7 +2033,12 @@ _SYNTHESIZE_SYS = (
     "or lower tier. Judge only whether the attack CHAIN holds together.\n\n"
     "Identify:\n"
     "1. LOGICAL GAPS — steps in the attack chain that aren't evidenced\n"
-    "2. CONTRADICTIONS — findings that conflict with each other\n"
+    "2. CONTRADICTIONS — findings that conflict with each other. "
+    "An address is not a machine: behind NAT, a gateway or a shared/private "
+    "address several devices share one IP. A finding that tells devices apart by "
+    "a device discriminator (TCP timestamp clock, window/scale, TTL, User-Agent, "
+    "MAC, cookie jar) is not contradicted by those devices sharing an address — "
+    "check the discriminator, not the address.\n"
     "5. OVERCLAIMED MECHANISMS — technical explanations that aren't supported "
     "by cited evidence (e.g. YARA hit stated as 'confirmed execution')\n\n"
     "Collection completeness is NOT yours to police: DAIR's Scan phase and the "

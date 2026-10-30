@@ -55,8 +55,10 @@ class TestSlimPass:
                 assert schema == before[t.name], f"schema mutated: {t.name}"
             # budget regression bar: measured post-slim mass is ~8.1k tokens
             # (down from ~18.7k). Bar at 8.5k so docstring growth can't
-            # silently re-bloat schema-eager clients.
-            assert total / 4 < 8500, f"description mass regressed: ~{total//4} tokens"
+            # silently re-bloat schema-eager clients. 8.5k -> 8.6k (2026-09-24):
+            # the four mobile.* tools add ~64 tokens of one-line descriptions;
+            # the pre-existing tools measured ~8,495, 5 tokens under the old bar.
+            assert total / 4 < 8600, f"description mass regressed: ~{total//4} tokens"
         asyncio.run(run())
 
     def test_overrides_target_existing_tools(self, server_mcp):

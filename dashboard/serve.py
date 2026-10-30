@@ -183,6 +183,24 @@ def _build_handler(cases_root: str) -> type:
                                                    q.get("dir", [""])[0]))
             if endpoint == "reports":
                 return self._send_json(list_reports(cases_root, (qs or {}).get("trace", [""])[0]))
+            if endpoint == "report_download":
+                q = qs or {}
+                full, err = report_path(cases_root, q.get("trace", [""])[0], q.get("name", [""])[0])
+                if not full:
+                    self.send_error(404 if err == "not found" else 403, err)
+                    return
+                with open(full, "rb") as fh:
+                    body = fh.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{os.path.basename(full)}"')
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if endpoint == "report":
                 q = qs or {}
                 html, err = render_report(cases_root, q.get("trace", [""])[0], q.get("name", [""])[0])
@@ -350,9 +368,9 @@ def _link_calls(html: str) -> str:
     return "".join(parts)
 
 
-def render_report(cases_root: str, trace: str, name: str) -> tuple[str | None, str]:
-    """HTML for one Markdown report of the trace's case. Raw HTML inside the
-    Markdown is not rendered (reports are model-written text)."""
+def report_path(cases_root: str, trace: str, name: str) -> tuple[str | None, str]:
+    """(absolute path, '') of one Markdown report in the trace's case reports/
+    dir, or (None, error). Only a plain *.md name directly inside reports/."""
     case_dir, err = case_dir_for_trace(cases_root, trace)
     if not case_dir:
         return None, err
@@ -364,6 +382,15 @@ def render_report(cases_root: str, trace: str, name: str) -> tuple[str | None, s
         return None, "bad report name"
     if not os.path.isfile(full):
         return None, "not found"
+    return full, ""
+
+
+def render_report(cases_root: str, trace: str, name: str) -> tuple[str | None, str]:
+    """HTML for one Markdown report of the trace's case. Raw HTML inside the
+    Markdown is not rendered (reports are model-written text)."""
+    full, err = report_path(cases_root, trace, name)
+    if not full:
+        return None, err
     try:
         from markdown_it import MarkdownIt
         md = MarkdownIt("commonmark", {"html": False, "linkify": False}).enable("table")

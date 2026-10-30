@@ -309,6 +309,48 @@ def _candidate_output_files(tgt: str) -> list[str]:
 
 # ── Relevance scan ────────────────────────────────────────────────────────────
 
+# A JSON ARRAY (MVT writes one pretty-printed array per module) is read one
+# RECORD per row: a pretty-printed record spans ~10 lines, so a term hit on one
+# line would otherwise show the matching field without its record (the
+# timestamp, the database it came from). Arrays up to this size are parsed;
+# larger files, non-arrays and invalid JSON keep the plain line scan.
+_JSON_RECORD_MAX_BYTES = int(os.environ.get("TRUDI_JSON_RECORD_MAX_BYTES") or str(64 * 1024 * 1024))
+_JSON_CACHE: dict = {}
+
+
+def _json_record_lines(path: str) -> list[str] | None:
+    """One compact JSON line per element when `path` is a .json file holding a
+    top-level array; None otherwise (caller line-scans)."""
+    if not path.lower().endswith(".json"):
+        return None
+    try:
+        st = os.stat(path)
+        if st.st_size > _JSON_RECORD_MAX_BYTES or st.st_size == 0:
+            return None
+        key = (path, st.st_size, int(st.st_mtime))
+        hit = _JSON_CACHE.get(key)
+        if hit is not None:
+            return hit
+        with open(path, "r", errors="replace") as fh:
+            head = fh.read(4096).lstrip()
+            if not head.startswith("["):
+                return None
+            fh.seek(0)
+            import json
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    import json
+    lines = [json.dumps(r, ensure_ascii=False, default=str, separators=(", ", ": "))
+             for r in data]
+    if len(_JSON_CACHE) >= 4:
+        _JSON_CACHE.clear()
+    _JSON_CACHE[key] = lines
+    return lines
+
+
 def _scan_lines(path: str, terms: list[str], budget: int) -> ScanResult:
     """Line-oriented scan. The WHOLE file is streamed (a match can sit anywhere
     in a large chronological CSV) with a bounded top-K by DISTINCT-term score so
@@ -323,15 +365,22 @@ def _scan_lines(path: str, terms: list[str], budget: int) -> ScanResult:
     heap = []            # min-heap of (score, -index, (line, clipped)); size ≤ _CITED_TOPK
     head, head_len = [], 0
     scanned = 0
+    records = _json_record_lines(path)
+    # Only a delimited FILE has a header line. A stdout sidecar (.txt) whose
+    # first line holds a comma is data: a one-line JSON result (every enrich.*
+    # lookup) was taken as a header and scanned as 0 rows, so the reviewer
+    # judged a correct finding unsupported.
+    has_header = records is None and path.lower().endswith(_DELIMITED_EXTS)
     try:
-        with open(path, "r", errors="replace") as fh:
+        with (open(path, "r", errors="replace") if records is None
+              else _nullctx(records)) as fh:
             for i, ln in enumerate(fh):
                 scanned += len(ln)
                 if scanned > COMPAT_CITED_FILE_BYTES:
                     res._note_trunc("scan_cap")
                     break
                 s = ln.rstrip("\n")
-                if i == 0 and ("," in s or "\t" in s):
+                if i == 0 and has_header and ("," in s or "\t" in s):
                     header = s
                     delim = "\t" if ("\t" in s and s.count("\t") >= s.count(",")) else ","
                     continue
@@ -374,6 +423,18 @@ def _scan_lines(path: str, terms: list[str], budget: int) -> ScanResult:
         res._note_trunc("budget")
     res.body = body
     return res
+
+
+class _nullctx:
+    """`with` wrapper around an in-memory line list (JSON record lines)."""
+    def __init__(self, lines):
+        self._lines = lines
+
+    def __enter__(self):
+        return iter(self._lines)
+
+    def __exit__(self, *exc):
+        return False
 
 
 def _scan_csv_columns(path: str, terms: list[str], budget: int,
@@ -674,6 +735,11 @@ def _file_inventory(path: str) -> dict:
     hit = _INVENTORY_CACHE.get(key)
     if hit is not None:
         return hit
+    records = _json_record_lines(path)
+    if records is not None:
+        inv = {"bytes": st.st_size, "total_rows": len(records), "columns": []}
+        _INVENTORY_CACHE[key] = inv
+        return inv
     total, columns, scanned = 0, [], 0
     low = path.lower()
     is_table = low.endswith((".csv", ".tsv"))
@@ -702,6 +768,9 @@ def _term_hits(path: str, terms: list[str], size: int) -> int | None:
     if not lo or size > _TERM_HITS_MAX_BYTES:
         return None
     n = 0
+    records = _json_record_lines(path)
+    if records is not None:
+        return sum(1 for r in records if any(t in r.lower() for t in lo))
     try:
         with open(path, "r", errors="replace") as fh:
             for i, ln in enumerate(fh):

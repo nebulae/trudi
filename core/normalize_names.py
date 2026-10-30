@@ -50,6 +50,7 @@ async def normalize_tool_names(namespaces) -> int:
     onto an existing sibling name.
     """
     renamed = 0
+    registered: set[str] = set()
     for ns, child in namespaces:
         prefix = ns + "_"
         tools = await child.list_tools()
@@ -67,4 +68,7 @@ async def normalize_tool_names(namespaces) -> int:
             names.discard(t.name)
             names.add(new)
             renamed += 1
+        registered.update(f"{ns}.{n}" for n in names)
+    from tools.tool_capabilities import set_registered_tools
+    set_registered_tools(registered)
     return renamed

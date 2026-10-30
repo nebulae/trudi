@@ -759,12 +759,17 @@ def _evidence_line(kinds) -> str:
 
 
 def _filter_tools(tools, kinds) -> tuple[list, list]:
-    """(kept, dropped) — dropped items {tool, needs} need an evidence kind the
-    case lacks. Nothing is dropped when `kinds` is empty (undetermined)."""
-    from tools.tool_capabilities import tool_fits_evidence, tool_evidence_needs, canonical_tool_id
+    """(kept, dropped) — dropped items are {tool, needs} for a tool that needs
+    an evidence kind the case lacks (nothing when `kinds` is empty =
+    undetermined), or {tool, reason: "not_a_tool"} for a name the server does
+    not register (a backend-invented tool no one can run)."""
+    from tools.tool_capabilities import (tool_fits_evidence, tool_evidence_needs,
+                                         canonical_tool_id, tool_exists)
     kept, dropped = [], []
     for t in tools or []:
-        if kinds and not tool_fits_evidence(t, kinds):
+        if not tool_exists(t):
+            dropped.append({"tool": canonical_tool_id(t), "reason": "not_a_tool"})
+        elif kinds and not tool_fits_evidence(t, kinds):
             dropped.append({"tool": canonical_tool_id(t),
                             "needs": sorted(tool_evidence_needs(t) or [])})
         else:
@@ -778,21 +783,20 @@ def _filter_challenges(challenges, kinds) -> tuple[list, list]:
     become an open challenge that blocks Report. A multi-tool method keeps
     only its runnable tools."""
     from tools.tool_capabilities import (tool_fits_evidence, tool_evidence_needs,
-                                         challenge_method_tools)
-    if not kinds:
-        return list(challenges or []), []
+                                         challenge_method_tools, tool_exists)
     kept, dropped = [], []
     for c in challenges or []:
         if not isinstance(c, dict):
             kept.append(c)
             continue
         methods = challenge_method_tools(c.get("challenge_method"))
-        fit = [m for m in methods if tool_fits_evidence(m, kinds)]
+        fit = [m for m in methods if tool_exists(m) and tool_fits_evidence(m, kinds)]
         if methods and not fit:
             dropped.append({"claim": str(c.get("claim") or "")[:200],
                             "challenge_method": str(c.get("challenge_method") or ""),
                             "needs": sorted({k for m in methods
-                                             for k in (tool_evidence_needs(m) or [])})})
+                                             for k in (tool_evidence_needs(m) or [])}),
+                            "not_a_tool": [m for m in methods if not tool_exists(m)]})
             continue
         if methods and len(fit) < len(methods):
             dropped.append({"claim": str(c.get("claim") or "")[:200],
@@ -989,6 +993,16 @@ def dair_assess(
     ioc_leads = _ioc_coverage_block(current)
     if ioc_leads:
         user_parts.append(ioc_leads)
+    try:
+        from core.execution_log import log as _plog
+        from tools._parsed_outputs import dair_block as _unread_block, unread as _unread
+        _plog_entries = getattr(_plog, "_entries", None) or []
+        unread_leads = _unread_block(_plog_entries, current)
+        unread_items = _unread(_plog_entries) if unread_leads else []
+    except Exception:
+        unread_leads, unread_items = "", []
+    if unread_leads:
+        user_parts.append(unread_leads)
     user = "\n".join(user_parts)
 
     # Capture exactly what was sent to the DAIR model so the trace can be
@@ -1077,7 +1091,7 @@ def dair_assess(
     # evidence kind the case lacks can never be run — drop it before anything
     # (prior-run verification, auto-satisfy, the open-challenge gates) sees it.
     _filtered_challenges: list = []
-    if _kinds and assessment.get("verification_challenges"):
+    if assessment.get("verification_challenges"):
         _kc, _filtered_challenges = _filter_challenges(
             assessment.get("verification_challenges"), _kinds)
         assessment["verification_challenges"] = _kc
@@ -1387,7 +1401,7 @@ def dair_assess(
     try:
         _d0 = assessment.get("directives") or {}
         _pt0 = list(_d0.get("priority_tools") or [])
-        if _kinds and _pt0:
+        if _pt0:
             _kept0, _filtered_tools = _filter_tools(_pt0, _kinds)
             if _filtered_tools:
                 _d0["priority_tools"] = _kept0
@@ -1487,6 +1501,8 @@ def dair_assess(
         result["server_filtered_challenges"] = _filtered_challenges
     if candidate_pivots:
         result["candidate_pivots"] = candidate_pivots
+    if unread_items:
+        result["unread_outputs"] = unread_items[:40]
     if ioc_leads:
         # The same leads the director saw, so the agent can act on them.
         try:

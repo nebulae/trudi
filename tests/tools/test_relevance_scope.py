@@ -77,6 +77,19 @@ class TestContestedPrincipalRelevance:
         inv = _pre_entry(base_log)["registry_inventory"]
         assert {"value": "svcbackup", "how": "reviewer-listed (hypothesis H1)", "status": "inventory"} in inv["principals"]
 
+    def test_reviewer_role_labels_are_not_principals(self, base_log):
+        # Bogus Bill / demo reports listed 'examiner/lab', 'iphoneowner',
+        # 'paycheckrecipient' … as surfaced principals: the reviewer described
+        # roles, it named no one. A named identity in the same list stays.
+        _hyp_reviewer_listed(base_log, "H0004", [
+            "examiner/lab", "iPhone owner (Apple ID holder)", "paycheck recipient",
+            "Windows laptop user account", "Chase (insider)"])
+        r = _pre(base_log)
+        inv = _pre_entry(base_log)["registry_inventory"]
+        vals = {p["value"] for p in inv["principals"]}
+        assert vals == {"chase"}
+        assert not any("examiner" in w or "paycheck" in w for w in r["warnings"])
+
     def test_reviewer_listed_principal_on_the_roster_blocks(self, base_log):
         _roster(base_log, ["svc_backup", "jdoe"])
         _hyp_reviewer_listed(base_log, "H0004", ["svc_backup"])

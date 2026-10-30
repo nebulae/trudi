@@ -16,6 +16,7 @@ from typing import Optional
 
 from ._device_install import flagged_count, inventory_for
 from ._dispositions import disposition_call, find_disposition
+from ._entities import norm_entity
 from ._manifests import MANIFESTS, SOURCE_WAIVER_REASONS, manifest_for_claim
 
 
@@ -31,6 +32,21 @@ def _claim_window_days(claim: dict) -> list:
 
 def _waived(ctx, source_id: str) -> bool:
     return find_disposition(ctx.idx, "source", source_id, reasons=SOURCE_WAIVER_REASONS) is not None
+
+
+def _device_addressed(ctx, dev: str) -> bool:
+    """A registry-only device ('vid:pid') is addressed by any device disposition
+    or by an active finding naming it in its typed entities."""
+    if find_disposition(ctx.idx, "device", dev) is not None:
+        return True
+    vid, _, pid = dev.partition(":")
+    want = {norm_entity(dev), norm_entity(f"vid_{vid}&pid_{pid}")}
+    by_type = getattr(ctx.idx, "by_type", {}) or {}
+    for f in by_type.get("finding", []):
+        ents = ((f.get("claim") or {}).get("entities") or [])
+        if want & {norm_entity(str(x)) for x in ents}:
+            return True
+    return False
 
 
 def check(ctx) -> Optional[dict]:
@@ -94,6 +110,45 @@ def check(ctx) -> Optional[dict]:
                 "description": ctx.description,
                 "confidence": ctx.confidence,
                 "gate": "negative_completeness",
+            }
+        # setupapi.dev.log rotates and can be cleared: a device negative also needs
+        # the SYSTEM hive's USB history, and every device the registry holds that
+        # the install log lacks must be addressed (finding or device disposition).
+        if not inv.get("registry_checked") and not _waived(ctx, "usb_registry"):
+            return {
+                "success": False,
+                "error": (
+                    f"Refusing UNCONFIRMED {category} finding: the device inventory covers "
+                    f"setupapi.dev.log only — the SYSTEM hive's Enum\\USB / Enum\\USBSTOR "
+                    f"history was not merged, and the install log is not a complete device "
+                    f"history (it rotates and can be cleared). Re-run "
+                    f"misc.device_install_inventory with system_hive_path=<SYSTEM hive>, or "
+                    f"record {disposition_call('source', 'usb_registry', 'absent_from_evidence')} "
+                    f"if no SYSTEM hive is in evidence."
+                ),
+                "description": ctx.description,
+                "confidence": ctx.confidence,
+                "gate": "negative_completeness",
+                "missing_sources": ["usb_registry"],
+            }
+        open_devs = [d for d in (inv.get("registry_only") or [])
+                     if not _device_addressed(ctx, d)]
+        if open_devs:
+            return {
+                "success": False,
+                "error": (
+                    f"Refusing UNCONFIRMED {category} finding: the SYSTEM hive's USB "
+                    f"history holds {len(open_devs)} device(s) absent from setupapi.dev.log "
+                    f"({', '.join(open_devs[:6])}) — the install log is incomplete, so a "
+                    f"device negative drawn from it does not hold. Identify each device "
+                    f"(it may be exactly what the negative denies) and record a finding "
+                    f"naming it in entities, or "
+                    f"{disposition_call('device', '<VID:PID>', 'ruled_out', evidence=True)}."
+                ),
+                "description": ctx.description,
+                "confidence": ctx.confidence,
+                "gate": "negative_completeness",
+                "registry_only_devices": open_devs,
             }
         return None
 

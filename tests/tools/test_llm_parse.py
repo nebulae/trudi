@@ -124,3 +124,29 @@ class TestSalvageMissingClosers:
     def test_a_well_formed_answer_is_never_marked_repaired(self):
         obj, _ = LP.parse_result_block('RESULT:\n{"schema_version": 1, "verdict": "SUPPORTED"}')
         assert "_repaired" not in obj
+
+
+class TestTitusDairAnswer:
+    """2026-09-24 BELKA/Titus: a bare DAIR object with a verbatim Windows
+    registry path (invalid \\S escapes) and its root brace missing was read as
+    'Empty DAIR assessment'."""
+
+    def test_verbatim_windows_path_parses_as_literal_backslashes(self):
+        raw = ('RESULT:\n{"schema_version": 1, "notes": '
+               '"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"}')
+        obj, _ = LP.parse_result_block(raw)
+        assert obj["notes"] == "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"
+
+    def test_valid_escapes_are_left_alone(self):
+        obj, _ = LP.parse_result_block('RESULT:\n{"schema_version": 1, "n": "a\\"b\\u00e9\\\\c"}')
+        assert obj["n"] == 'a"bé\\c'
+
+    def test_bare_object_missing_its_root_brace_is_salvaged(self):
+        raw = ('{"schema_version": 1, "assessment": {"current_phase": "Triage", '
+               '"notes": "HKLM\\SOFTWARE\\X", "directives": {"priority_tools": ["ez.pecmd"]}}')
+        obj, _ = LP.parse_result_block(raw)
+        assert obj["assessment"]["directives"]["priority_tools"] == ["ez.pecmd"]
+        assert obj["_repaired"] == "appended 1 missing closing bracket(s)"
+
+    def test_bare_object_cut_mid_string_is_not_salvaged(self):
+        assert LP.parse_result_block('{"schema_version": 1, "rationale": "the log sho') == (None, "")
