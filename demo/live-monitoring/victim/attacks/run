@@ -86,6 +86,42 @@ run_one() {
         return $?
     fi
 
+    # `decoy-touch` touches the emulated ShadowPlex decoy on the LAN with a
+    # harvested honey credential (run ON victim-a), not an Atomic test — the
+    # decoy emits the external CEF detection. See decoy-touch.sh.
+    if [[ "${raw}" == "decoy-touch" || "${raw}" == "decoy" ]]; then
+        if [[ "${cleanup}" == "1" ]]; then
+            bash "$(dirname "$0")/decoy-touch.sh" --cleanup
+        else
+            bash "$(dirname "$0")/decoy-touch.sh"
+        fi
+        return $?
+    fi
+
+    # `win-rdp` opens a REAL RDP session from victim-a to the Windows victim
+    # (victim-win) as the admin account, not an Atomic test — it produces a
+    # genuine Windows type-10 logon for TRUDI's own Windows host detectors
+    # (WINRDP-DEMO). See win-rdp.sh.
+    if [[ "${raw}" == "win-rdp" || "${raw}" == "windows" ]]; then
+        if [[ "${cleanup}" == "1" ]]; then
+            bash "$(dirname "$0")/win-rdp.sh" --cleanup
+        else
+            bash "$(dirname "$0")/win-rdp.sh"
+        fi
+        return $?
+    fi
+
+    # `win-decoy` drives real actions through the honey account's RDP desktop.
+    # Every Windows command uses the standard user's token. See win-decoy.sh.
+    if [[ "${raw}" == "win-decoy" ]]; then
+        if [[ "${cleanup}" == "1" ]]; then
+            bash "$(dirname "$0")/win-decoy.sh" --cleanup
+        else
+            bash "$(dirname "$0")/win-decoy.sh"
+        fi
+        return $?
+    fi
+
     resolved="$(resolve_alias "${raw}")"
     if [[ -z "${resolved}" ]]; then
         echo "[run] '${raw}' is not a known alias or T-number" >&2

@@ -23,6 +23,18 @@
 #   sudo ./bring-up.sh            # same, when docker needs root
 #   ./bring-up.sh --no-up         # skip compose up (stack already running)
 #   ./bring-up.sh --no-build      # compose up without --build
+#   ./bring-up.sh --profiles lateral,decoy   # bring up profiled hosts too;
+#                                 # use this instead of COMPOSE_PROFILES=...,
+#                                 # which sudo strips from the environment.
+#   sudo ./bring-up.sh --profiles lateral,decoy   # the full lateral + decoy demo
+#   sudo ./bring-up.sh --profiles lateral,winrdp  # lateral + the real Windows RDP victim
+#                                 # (first Windows boot: ~6 GB pull + ~10-20 min
+#                                 # install; the Velociraptor Windows client
+#                                 # auto-enrolls — no SSH wiring needed)
+#   sudo ./bring-up.sh --profiles lateral,winrdp,windecoy  # the real-Windows
+#                                 # DECOY demo: adds the CEF relay; the Windows box
+#                                 # is a honeypot touched with the honey credential
+#                                 # 'linda' (drive with the WINDECOY-DEMO case)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,13 +77,19 @@ API_CONFIG="$REAL_HOME/.config/trudi/velociraptor/api.config.yaml"
 
 DO_UP=1
 BUILD_FLAG="--build"
-for arg in "$@"; do
-    case "$arg" in
-        --no-up)    DO_UP=0 ;;
-        --no-build) BUILD_FLAG="" ;;
-        -h|--help)  grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown arg: $arg" >&2; exit 2 ;;
+# --profiles survives sudo, which strips COMPOSE_PROFILES from the environment
+# (the usual reason `sudo COMPOSE_PROFILES=... ./bring-up.sh` brings up nothing
+# profiled). When given, it sets COMPOSE_PROFILES for the compose calls below.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-up)       DO_UP=0 ;;
+        --no-build)    BUILD_FLAG="" ;;
+        --profiles)    shift; export COMPOSE_PROFILES="${1:?--profiles needs a value, e.g. lateral,decoy}" ;;
+        --profiles=*)  export COMPOSE_PROFILES="${1#*=}" ;;
+        -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
@@ -88,6 +106,13 @@ echo "  wiring files into ${REAL_HOME} (user ${REAL_USER})"
 # ── 1. Start the stack ────────────────────────────────────────────────────────
 if [ "$DO_UP" -eq 1 ]; then
     step "Starting compose stack"
+    # Profiles are read from COMPOSE_PROFILES (docker compose honors it natively):
+    #   COMPOSE_PROFILES=lateral        ./bring-up.sh   # two-host lateral demo
+    #   COMPOSE_PROFILES=lateral,decoy  ./bring-up.sh   # + the ShadowPlex decoy
+    # The decoy needs no SIFT-side wiring (it only emits CEF/syslog); start the
+    # ingest with monitor.start_cef_ingest / the DECOY-DEMO case.
+    [ -n "${COMPOSE_PROFILES:-}" ] && echo "  compose profiles: ${COMPOSE_PROFILES}"
+    as_user python3 "$SCRIPT_DIR/scripts/prepare-cef-keys.py"
     # shellcheck disable=SC2086
     docker compose up -d $BUILD_FLAG
     ok "compose up issued"
@@ -227,15 +252,79 @@ else:
     print(f"  wrote {alias}")
 PYEOF
     own "$HOSTS_CONFIG"
-    if as_user ssh -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-           -o ConnectTimeout=10 -p "$port" "$SSH_USER@$SSH_HOST" 'hostname' >/dev/null 2>&1; then
+    # The key was pulled from the running container's /shared and that container
+    # authorized its matching pubkey, so auth should succeed once sshd is up.
+    # A PERSISTENT publickey failure here means a stale/mismatched key — the
+    # exact fault that silently broke victim-b in the INV-002 run — so retry a
+    # few times (sshd may still be starting) and escalate rather than warn.
+    local authed=0
+    for i in $(seq 1 6); do
+        if as_user ssh -i "$key" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+               -o ConnectTimeout=10 -p "$port" "$SSH_USER@$SSH_HOST" 'hostname' >/dev/null 2>&1; then
+            authed=1; break
+        fi
+        sleep 3
+    done
+    if [ "$authed" -eq 1 ]; then
         ok "live.* SSH path up ($SSH_USER@$SSH_HOST:$port)"
     else
-        warn "$alias SSH smoke test failed — sshd may still be starting"
+        LATERAL_FAIL=1
+        warn "$alias SSH auth FAILED after key pull ($SSH_USER@$SSH_HOST:$port) —"
+        echo    "      live.* cannot reach $alias. Verify by hand:"
+        echo    "        ssh -i $key -p $port $SSH_USER@$SSH_HOST id"
+        echo    "      If it says 'Permission denied (publickey)', the container key"
+        echo    "      rotated; re-run this script, or 'docker compose --profile lateral"
+        echo    "      down -v && ./bring-up.sh' for a clean keypair."
     fi
 }
+LATERAL_FAIL=0
 wire_lateral_host "trudi-victim-a" "trudi-victim-a" "2223"
 wire_lateral_host "trudi-victim-b" "trudi-victim-b" "2224"
+if [ "$LATERAL_FAIL" -ne 0 ]; then
+    fail "one or more lateral hosts failed SSH auth — fix before recording a run (see above)"
+fi
+
+# ── 7. Windows victim (compose profile "winrdp", if running) ──────────────────
+# The Windows host is investigated over its Velociraptor client, NOT live.* SSH,
+# so there is no key to pull. It also takes ~10-20 min to install on first boot.
+# Just surface where to watch it and how to confirm enrollment — non-fatal, so a
+# slow install never fails the bring-up of the rest of the stack.
+if docker inspect -f '{{.State.Running}}' "trudi-victim-win" >/dev/null 2>&1; then
+    step "Windows victim (victim-win)"
+    ok "console: http://localhost:8006  (watch the unattended install / desktop)"
+    echo "  First boot pulls ~6 GB of Server 2022 eval media and installs for"
+    echo "  ~10-20 min. The OEM payload (win-oem-init) then auto-installs the"
+    echo "  Velociraptor client, enables RDP, and creates the RDP account."
+    echo "  Confirm the Windows client enrolled (may take a few min after install):"
+    echo "    velociraptor --api_config $API_CONFIG \\"
+    echo "        query --format=json \"SELECT client_id, os_info.hostname, os_info.system"
+    echo "                              FROM clients() WHERE os_info.system =~ 'windows'\""
+    echo "  Then: /trudi-start-watcher WINRDP-DEMO   (captures the Windows baseline,"
+    echo "        pushes the Custom.TRUDI.Win.* detectors), and stage the attack with"
+    echo "        docker exec trudi-victim-a /attacks/run win-rdp"
+    if ! docker inspect -f '{{.State.Status}}' "trudi-win-oem-init" 2>/dev/null | grep -q exited; then
+        warn "win-oem-init has not completed yet — enrollment payload may not be ready."
+    fi
+fi
+
+# ── Windows deception decoy (compose profile "windecoy", if running) ──────────
+# The CEF relay carries the on-decoy sensor's ShadowPlex incidents to the SIFT-
+# host ingest. The decoy is the real Windows box (winrdp), touched with the honey
+# credential 'linda'. Drive it with the WINDECOY-DEMO case.
+if docker inspect -f '{{.State.Running}}' "trudi-windecoy-relay" >/dev/null 2>&1; then
+    step "Windows deception decoy (windecoy)"
+    ok "CEF relay up (lan-net 10.73.0.55:5514 → host ingest host.docker.internal:5514)"
+    echo "  The on-decoy ShadowPlex sensor reports honey-account logons as CEF."
+    echo "  Drive with the WINDECOY-DEMO case:"
+    echo "    /trudi-start-watcher WINDECOY-DEMO   # starts the CEF ingest (cef_ingest in config)"
+    echo "    /trudi-watch-alerts  WINDECOY-DEMO"
+    echo "    docker exec trudi-victim-a /attacks/run win-decoy   # honey-credential RDP to the decoy"
+    echo "  Start the ingest BEFORE the attack so the first touch is captured."
+    echo "  The attacker attempts discovery, synthetic-file staging and HKCU persistence"
+    echo "  as the standard-user honey account. Fast containment may interrupt it."
+    echo "  See windecoy-demo-script.md for the explicit full-activity exercise mode."
+    echo "  Relay traffic: docker logs trudi-windecoy-relay"
+fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""

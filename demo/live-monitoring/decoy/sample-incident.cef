@@ -1,0 +1,12 @@
+# Sample Acalvio ShadowPlex incident — the two CEF records for one decoy touch,
+# verbatim field layout from the published Incident Mapping Guide (release
+# 2026.8.2.0). Feed to the ingest for a container-free replay:
+#
+#   python3 bin/trudi-cef-ingest.py --case-id DECOY-DEMO \
+#       --alerts-dir ~/cases/DECOY-DEMO/monitoring/alerts --no-resolve \
+#       --replay demo/live-monitoring/decoy/sample-incident.cef
+#
+# Lines beginning with '#' are ignored. The two records share one incidentID
+# and are merged into a single Custom.TRUDI.DecoyTouch alert.
+<114>2026-07-10T11:37:57.010Z us-west CEF:0|Acalvio|ShadowPlex|2026.8.2.0|DETECT_AND_RESPOND|ENDPOINT_COMPROMISE|9|cat="Endpoint Compromise" cs2Label=incidentID cs2=9f1ffe81-1bb1-4018-bfec-349ddde4270a start="July 10 2026 11:36:57.130 UTC" end="July 10 2026 11:37:56.930 UTC" cs3Label=incidentStatus cs3=Active cs8Label=tacticName cs8="Lateral Movement,Discovery" cs10Label=techniqueName cs10="Remote Services.Remote Desktop Protocol,Network Service Discovery" cs15Label=srcIP cs15="192.0.2.97" cs25Label=dstIP cs25="192.0.2.59" cs26Label=dstEndpointName cs26="DESKTOP-GN-806" cs35Label=dstPort cs35=3389 cs52Label=userIdAttempted cs52="linda" cs67Label=callbackURL cs67="https://233.252.0.91/#/incidents?incidentID=9f1ffe81-1bb1-4018-bfec-349ddde4270a"
+<114>2026-07-10T11:37:57.020Z us-west CEF:0|Acalvio|ShadowPlex|2026.8.2.0|DETECT_AND_RESPOND|SERVICE_INTERACTION|9|cs2Label=incidentID cs2=9f1ffe81-1bb1-4018-bfec-349ddde4270a cs78Label=event_data cs78={"user_name":"jsmith","service_details":{"host_mac":"98:90:96:a7:58:45","remote_port":16817,"service_name":"MS-WBT-SERVER","service_port":3389,"auth_attempted":true,"client_host_ip":"172.16.0.2","remote_address":"192.0.2.215","client_host_name":"WIN10-JSM","service_host_name":"DESKTOP-OU-060","service_host_address":"198.51.100.102"}}

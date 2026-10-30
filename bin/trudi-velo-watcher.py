@@ -81,6 +81,24 @@ SUGGESTED_PIVOT_TOOLS = {
         "velo.collect_artifact(Generic.Forensic.LocalHashes.Glob)",
         "yara.scan_strings",
     ],
+    # ── Windows victim (Custom.TRUDI.Win.*) ──────────────────────────────────
+    "Custom.TRUDI.Win.NewProcess": [
+        "velo.collect_artifact(Windows.System.Pslist)",
+        "velo.collect_artifact(Windows.System.DNSCache)",
+        "velo.collect_artifact(Windows.Network.Netstat)",
+    ],
+    "Custom.TRUDI.Win.NewLogon": [
+        # RDP / lateral logon: pull the Security + TerminalServices events to
+        # bind account + source + session, then the process list keyed by logon.
+        "velo.collect_artifact(Windows.EventLogs.RDPAuth)",
+        "velo.collect_artifact(Windows.EventLogs.Evtx, Channel=Security)",
+        "velo.collect_artifact(Windows.Network.Netstat)",
+    ],
+    "Custom.TRUDI.Win.NewPersistence": [
+        "velo.collect_artifact(Windows.Sysinternals.Autoruns)",
+        "velo.collect_artifact(Windows.System.TaskScheduler)",
+        "velo.query(SELECT * FROM glob(globs=<key>, accessor='registry'))",
+    ],
 }
 
 
@@ -96,48 +114,61 @@ SUGGESTED_PIVOT_TOOLS = {
 # stop_watcher/start_watcher, every still-present anomaly will refire once.
 # This is intentional — operators kicking the watcher get a fresh view.
 
+def _detector_leaf(detector: str) -> str:
+    """Behavioural leaf of a detector name, so the Linux and Windows variants
+    share logic: both `Custom.TRUDI.NewProcess` and `Custom.TRUDI.Win.NewProcess`
+    → `NewProcess`."""
+    return detector.rsplit(".", 1)[-1]
+
+
 def _row_signature(detector: str, row: dict) -> str:
-    """Stable key for dedup. Empty string means 'no signature — never dedup'."""
-    if detector == "Custom.TRUDI.NewProcess":
-        # A process is identified by image+pid. PID can be reused across
-        # exit/respawn, so we also fold in started_utc when present.
+    """Stable key for dedup. Empty string means 'no signature — never dedup'.
+
+    Keyed on the detector leaf, and field-tolerant so the Windows detectors
+    (source_ip/account for logon, identity for persistence) share the logic
+    with their Linux counterparts."""
+    leaf = _detector_leaf(detector)
+    if leaf in ("NewProcess", "PrivilegeEscalation", "YaraProcess"):
+        # A process is identified by image+pid (+ started_utc, since a reused
+        # pid on a respawn is a genuinely new event). YaraProcess folds in rule.
         return "|".join([
-            str(row.get("image_path") or ""),
-            str(row.get("pid") or ""),
+            str(row.get("image_path") or row.get("Exe") or ""),
+            str(row.get("pid") or row.get("Pid") or ""),
             str(row.get("started_utc") or ""),
+            str(row.get("rule") or ""),
         ])
-    if detector == "Custom.TRUDI.NewPersistence":
-        # Mtime in the signature so a *changed* persistence file refires.
-        return "|".join([
+    if leaf == "NewPersistence":
+        # Windows: identity ("<key>\<value>|<data>") so a CHANGED Run key
+        # refires. Linux: path + mtime so a changed file refires.
+        return str(row.get("identity") or "|".join([
             str(row.get("path") or ""),
             str(row.get("mtime_utc") or ""),
-        ])
-    if detector == "Custom.TRUDI.NewNetwork":
+        ]))
+    if leaf == "NewNetwork":
         return "|".join([
             str(row.get("remote_ip") or ""),
             str(row.get("remote_port") or ""),
             str(row.get("Pid") or row.get("pid") or ""),
         ])
-    if detector == "Custom.TRUDI.YaraProcess":
+    if leaf == "NewLogon":
+        if ".Win." in detector:
+            # Event streams deliver new sessions, unlike Linux's repeated
+            # socket snapshots. Never dedup on account/source alone.
+            record = row.get("event_record_id")
+            if record is not None:
+                return json.dumps([row.get("computer"), row.get("channel"),
+                                   record, row.get("event_id"), row.get("timestamp_utc")], default=str)
+            if not row.get("timestamp_utc"):
+                return ""
+            return json.dumps([row.get("source_ip"), row.get("account"), row.get("domain"),
+                               row.get("event_id"), row.get("logon_type"), row.get("logon_id"),
+                               row.get("timestamp_utc")], default=str)
+        # An inbound session is identified by its source + (Linux) the sshd
+        # session pid / (Windows) the account + logon type.
         return "|".join([
-            str(row.get("pid") or ""),
-            str(row.get("rule") or ""),
-        ])
-    if detector == "Custom.TRUDI.PrivilegeEscalation":
-        # A root process is identified by image+pid (started_utc folded in when
-        # present, since a reused pid on a respawn is a genuinely new event).
-        return "|".join([
-            str(row.get("image_path") or ""),
-            str(row.get("pid") or ""),
-            str(row.get("started_utc") or ""),
-        ])
-    if detector == "Custom.TRUDI.NewLogon":
-        # An inbound session is identified by its source + the sshd session pid;
-        # the held foothold otherwise re-alerts every poll.
-        return "|".join([
-            str(row.get("remote_ip") or ""),
-            str(row.get("remote_port") or ""),
-            str(row.get("pid") or ""),
+            str(row.get("remote_ip") or row.get("source_ip") or ""),
+            str(row.get("remote_port") or row.get("logon_type") or ""),
+            str(row.get("pid") or row.get("account") or ""),
         ])
     return ""
 
@@ -169,6 +200,110 @@ def _should_emit(detector: str, row: dict) -> bool:
             oldest = next(iter(seen))
             del seen[oldest]
         return True
+
+# ── Cross-detector merge ────────────────────────────────────────────────────
+#
+# NewProcess, PrivilegeEscalation and YaraProcess all poll the same process
+# table, so one new process produced one alert PER detector (eight alerts for
+# the four children of a cron.daily run in DECOY-DEMO). When a row arrives for
+# a (client, pid, image) that already has an alert written within the merge
+# window, it is folded into that alert — `detectors` gains the new name,
+# `evidence_by_detector` keeps each detector's row, severity takes the max —
+# instead of consuming a new seq. Velociraptor flushes event batches per
+# artifact tens of seconds apart (77 s observed), hence the generous window.
+#
+# An alert that an investigation has already picked up (listed in
+# monitoring/_open_investigation.json) is never mutated: the second detector's
+# row becomes its own alert so the open investigation is extended with it.
+_MERGE_WINDOW_SECONDS = 180.0
+# Keyed by leaf so the Windows NewProcess merges the same way (see
+# _process_key, which uses the leaf).
+_PROCESS_DETECTOR_LEAVES = {"NewProcess", "PrivilegeEscalation", "YaraProcess"}
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+# (client, pid, image, process start time) -> (alert path, time written)
+_recent_process_alerts: dict[str, tuple[Path, float]] = {}
+_merge_lock = threading.Lock()
+
+
+def _process_key(client_id: str, detector: str, row: dict) -> str:
+    if _detector_leaf(detector) not in _PROCESS_DETECTOR_LEAVES:
+        return ""
+    pid = row.get("pid") or row.get("Pid")
+    if pid in (None, ""):
+        return ""
+    # Without creation time PID reuse cannot be ruled out. Keep the alert
+    # separate rather than merging evidence from unrelated processes.
+    started = row.get("started_utc")
+    if not started:
+        return ""
+    return json.dumps([client_id, str(pid), row.get('image_path') or row.get('Exe') or '',
+                       str(started)])
+
+
+def _in_open_investigation(alerts_dir: Path, alert_id: str) -> bool:
+    tracker = alerts_dir.parent / "_open_investigation.json"
+    try:
+        rec = json.loads(tracker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return alert_id in (rec.get("alert_ids") or [])
+
+
+def _try_merge(alerts_dir: Path, client_id: str, detector: str, row: dict,
+               now_mono: float | None = None) -> Path | None:
+    """Fold `row` into a recent alert about the same process. Returns the
+    merged alert's path, or None when a fresh alert should be written."""
+    key = _process_key(client_id, detector, row)
+    if not key:
+        return None
+    now_mono = time.monotonic() if now_mono is None else now_mono
+    with _merge_lock:
+        hit = _recent_process_alerts.get(key)
+        if not hit:
+            return None
+        path, t0 = hit
+        if now_mono - t0 > _MERGE_WINDOW_SECONDS or not path.exists():
+            _recent_process_alerts.pop(key, None)
+            return None
+        try:
+            alert = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if alert.get("consumed") or _in_open_investigation(alerts_dir, alert.get("alert_id", "")):
+            return None
+        detectors = list(alert.get("detectors") or [alert.get("detector")])
+        if detector in detectors:
+            return None  # distinct rows already passed exact-event dedup
+        detectors.append(detector)
+        alert["detectors"] = detectors
+        by_det = alert.get("evidence_by_detector") or {alert.get("detector"): alert.get("evidence")}
+        by_det[detector] = row
+        alert["evidence_by_detector"] = by_det
+        if _SEVERITY_RANK.get(_severity(detector), 0) > _SEVERITY_RANK.get(alert.get("severity"), 0):
+            alert["severity"] = _severity(detector)
+        alert["summary"] = f"{alert.get('summary', '')} [+{detector.rsplit('.', 1)[-1]}]"
+        alert["merged_at_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        pivots = list(alert.get("suggested_pivot_tools") or [])
+        for p in SUGGESTED_PIVOT_TOOLS.get(detector, []):
+            if p not in pivots:
+                pivots.append(p)
+        alert["suggested_pivot_tools"] = pivots
+        path.write_text(json.dumps(alert, indent=2))
+    print(f"[watcher] merged {detector.rsplit('.', 1)[-1]} row for pid "
+          f"{row.get('pid') or row.get('Pid')} into {path.name}", flush=True)
+    return path
+
+
+def _remember_process_alert(client_id: str, detector: str, row: dict, path: Path,
+                            now_mono: float | None = None) -> None:
+    key = _process_key(client_id, detector, row)
+    if not key:
+        return
+    with _merge_lock:
+        _recent_process_alerts[key] = (path, time.monotonic() if now_mono is None else now_mono)
+        if len(_recent_process_alerts) > _MAX_DEDUP_ENTRIES_PER_DETECTOR:
+            _recent_process_alerts.pop(next(iter(_recent_process_alerts)), None)
+
 
 # Stop flag set by the SIGTERM handler.
 _stop = threading.Event()
@@ -202,24 +337,37 @@ def _next_seq(alerts_dir: Path) -> int:
 
 
 def _summarize_row(detector: str, row: dict) -> str:
-    """One-line human description for the alert's `summary` field."""
-    if detector == "Custom.TRUDI.NewProcess":
-        return (f"New process not in baseline: "
+    """One-line human description for the alert's `summary` field (leaf-keyed, so
+    Windows and Linux variants share wording)."""
+    leaf = _detector_leaf(detector)
+    tag = "Windows " if ".Win." in detector else ""
+    if leaf == "NewProcess":
+        return (f"New {tag}process not in baseline: "
                 f"{row.get('image_path', '?')} (pid={row.get('pid', '?')})")
-    if detector == "Custom.TRUDI.NewPersistence":
-        return f"New persistence entry: {row.get('path', '?')}"
-    if detector == "Custom.TRUDI.NewNetwork":
+    if leaf == "NewPersistence":
+        return f"New {tag}persistence entry: {row.get('path') or row.get('identity', '?')}"
+    if leaf == "NewNetwork":
         return (f"New outbound connection: "
                 f"{row.get('remote_ip', '?')}:{row.get('remote_port', '?')} "
                 f"(pid={row.get('Pid') or row.get('pid', '?')})")
-    if detector == "Custom.TRUDI.YaraProcess":
+    if leaf == "YaraProcess":
         return (f"YARA hit {row.get('rule', '?')!r} on process "
                 f"{row.get('process_name', '?')} (pid={row.get('pid', '?')})")
+    if leaf == "NewLogon":
+        if ".Win." in detector or row.get("source_ip"):
+            return (f"New {tag}logon type {row.get('logon_type', '?')} as "
+                    f"{row.get('account', '?')} from {row.get('source_ip', '?')}")
+        return (f"New inbound session from {row.get('remote_ip', '?')} "
+                f"(pid={row.get('pid', '?')})")
+    if leaf == "PrivilegeEscalation":
+        return (f"Privilege escalation: root {row.get('image_path', '?')} "
+                f"(pid={row.get('pid', '?')})")
     return f"{detector}: " + json.dumps(row)[:160]
 
 
 def _severity(detector: str) -> str:
-    if detector in ("Custom.TRUDI.NewProcess", "Custom.TRUDI.YaraProcess"):
+    leaf = _detector_leaf(detector)
+    if leaf in ("NewProcess", "YaraProcess", "NewLogon", "NewPersistence"):
         return "high"
     return "medium"
 
@@ -241,6 +389,7 @@ def _write_alert(
         "hostname": row.get("Hostname") or row.get("hostname"),
         "timestamp_utc": row.get("timestamp_utc") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "detector": detector,
+        "detectors": [detector],
         "severity": _severity(detector),
         "summary": _summarize_row(detector, row),
         "evidence": row,
@@ -251,6 +400,7 @@ def _write_alert(
     path = alerts_dir / f"{seq:08d}_{safe_detector}.json"
     path.write_text(json.dumps(alert, indent=2))
     print(f"[watcher] wrote alert {path.name}: {alert['summary'][:120]}", flush=True)
+    _remember_process_alert(client_id, detector, row, path)
     return path
 
 
@@ -309,6 +459,8 @@ def _consume_detector(
                     # Already-seen signature for this detector in this
                     # watcher lifetime. Skip silently — logging every
                     # duplicate would blow up the log.
+                    continue
+                if _try_merge(alerts_dir, client_id, detector, row) is not None:
                     continue
                 _write_alert(alerts_dir, case_id, client_id, detector, row)
         finally:

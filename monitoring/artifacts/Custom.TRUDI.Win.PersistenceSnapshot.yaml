@@ -1,0 +1,31 @@
+name: Custom.TRUDI.Win.PersistenceSnapshot
+description: |
+  TRUDI baseline helper (Windows): a ONE-SHOT enumeration of the autostart
+  surface, using the SAME globs as the Custom.TRUDI.Win.NewPersistence detector.
+  monitor.baseline_capture collects this and records every returned identity
+  ("<path>|<value>" for Run keys, the task file path for scheduled tasks) as the
+  known-good allowlist, so the detector (which flags entries NOT in that
+  allowlist) does not fire on the host's pre-existing autostart entries.
+
+  RunKeyGlobs / TaskGlob are passed in by baseline_capture so the snapshot and
+  the detector glob the identical surface and cannot drift.
+
+type: CLIENT
+
+parameters:
+  - name: RunKeyGlobs
+    default: |
+      ["HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*", "HKEY_USERS\\*\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_USERS\\*\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*"]
+  - name: TaskGlob
+    default: 'C:/Windows/System32/Tasks/**'
+
+sources:
+  - query: |
+      LET run_globs <= parse_json_array(data=RunKeyGlobs)
+      LET run_rows = SELECT FullPath AS path,
+                            format(format="%v|%v", args=[FullPath, Data.value]) AS identity
+                     FROM glob(globs=run_globs, accessor="registry")
+      LET task_rows = SELECT FullPath AS path, FullPath AS identity
+                      FROM glob(globs=[TaskGlob], accessor="file")
+                      WHERE NOT IsDir
+      SELECT path, identity FROM chain(a=run_rows, b=task_rows)

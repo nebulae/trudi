@@ -35,10 +35,22 @@ investigating* still queue as later events. This is the robust mechanism.
 ### 1. Cold start (operator invoked this command)
 1. Resolve `CASE` (argument or `cat ~/cases/.common/active_case`); `N` = second
    argument or `2`.
-2. `monitor.list_watchers(CASE)` — confirm a sidecar is alive. If none, STOP and
+2. **Pre-warm the response tool schemas — do this NOW, while nothing is on fire.**
+   `monitor_*`/`respond_*`/`velo_*` are deferred tools; loading their schemas
+   mid-alert cost a real run **~30 s of ToolSearch latency before it could even
+   contain**. Load the whole live-response set in ONE batched call up front so
+   every tick is warm:
+   ```
+   ToolSearch("select:monitor_list_watchers,monitor_open_investigation_state,monitor_check_alerts,monitor_get_response_state,monitor_next_investigation_id,monitor_start_investigation,monitor_extend_investigation,monitor_set_awaiting_approval,monitor_clear_awaiting_approval,monitor_end_investigation,monitor_ack_alert,monitor_baseline_extend,respond_snapshot_evidence,respond_suggest_containment,respond_execute_action,respond_revert_action,respond_approve_action,velo_collect_artifact,velo_wait_for_flow,velo_get_collection_results,velo_query")
+   ```
+   The forensic tools (`reason_*`, `dair_assess`, `misc_record_finding`, …) are not
+   on the latency-critical path — let them load when step 6 begins. Once loaded,
+   a schema stays callable for the rest of the session: **do NOT re-`ToolSearch`
+   per tick.**
+3. `monitor.list_watchers(CASE)` — confirm a sidecar is alive. If none, STOP and
    tell the operator to run `/trudi-start-watcher` first (without the sidecar the
    alerts directory never fills).
-3. **Start the persistent watcher** with the `Monitor` tool:
+4. **Start the persistent watcher** with the `Monitor` tool:
    - `command`: `python3 ~/trudi/bin/trudi-alert-waiter.py --follow --case-id <CASE> --interval <N>`
    - `description`: `new TRUDI alerts for <CASE>`
    - `persistent`: `true`
@@ -49,12 +61,17 @@ investigating* still queue as later events. This is the robust mechanism.
 
 ### 2. On each Monitor event
 Each event is one JSON line, e.g. `{"status":"ALERTS","new_seqs":[10,11]}`.
-Run the **full `/trudi-check-alerts` flow** (its steps 1–8: open/extend the
-investigation, contain off the alert (fast path) + record findings for the
-report, then the auto-protect stage — auto-execute the reversible+low tier,
-queue/pause destructive actions behind a popup approval (`AskUserQuestion`,
-approve option labelled with the `ACT-N`), print rollbacks — then
-`end_investigation` + ack + update `_last_check_seq.txt`).
+Run the **full `/trudi-check-alerts` flow** (its steps 1–9, in order): open/extend
+the investigation, then **contain → eradicate → investigate-for-record** —
+(4) snapshot + auto-execute the **reversible/low-risk** containment straight off
+the alert, before any reasoning; (5) for a confirmed-positive alert, resolve the
+kill target with ONE fast pivot and immediately **queue the destructive
+eradication for approval** via a popup (`AskUserQuestion`, approve option labelled
+with the `ACT-N`) — seconds after containment, NOT after the finding ceremony;
+(6) run the full hypothesize → DAIR → findings → report investigation for the
+court-record (it never blocks the response, and reverts containment / drops a
+still-queued kill if it clears the alerts as benign); then (7–9) handle approvals,
+`end_investigation` + ack + update `_last_check_seq.txt`.
 
 **Do NOT re-start the Monitor** — it is still running and will deliver the next
 batch on its own. Just finish the investigation and stop; the next event wakes

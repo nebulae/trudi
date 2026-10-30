@@ -1,0 +1,47 @@
+# Recipe: containment actions for Custom.TRUDI.DecoyTouch alerts
+# (an external deception platform — Acalvio ShadowPlex CEF via
+# bin/trudi-cef-ingest.py — reported that a host touched a decoy).
+#
+# The actions run on the SOURCE host (the one that touched the decoy; the
+# alert's client_id is resolved to it), never on the decoy, which belongs to
+# the deception platform. From that host's point of view the decoy is the
+# REMOTE endpoint, so the evidence keys line up with the egress template:
+#
+#   remote_ip / remote_port   the decoy address:port   (CEF dstIP / dstPort)
+#   source_ip / source_port   the touching host        (CEF srcIP / fingerprint)
+#   honey_credential          userIdAttempted — an IOC, not an action target
+#   pid / image_path          NOT on the alert: the investigation pivot
+#                             (netstat → pslist) fills them, then the agent
+#                             re-calls suggest_containment with the enriched
+#                             evidence. Until then those actions are offered
+#                             non-executable (unresolved placeholders).
+
+actions:
+  - action_template: block_egress_to_endpoint
+    artifact: Custom.TRUDI.Respond.BlockEgressToEndpoint
+    description: "Cut the channel to the decoy — iptables REJECT outbound to <remote_ip>:<remote_port> from the touching host"
+    manual_command: "iptables -I OUTPUT -d <remote_ip> -p tcp --dport <remote_port> -m comment --comment TRUDI_RESPOND -j REJECT"
+    risk: low
+    reversible: true
+    revert_artifact: Custom.TRUDI.Respond.UnblockEgress
+    parameters:
+      RemoteIp: evidence.remote_ip
+      RemotePort: evidence.remote_port
+
+  - action_template: kill_owning_pid
+    artifact: Custom.TRUDI.Respond.KillPid
+    description: "Terminate the process that opened the connection to the decoy (pid <pid>)"
+    manual_command: "kill -9 <pid>"
+    risk: medium
+    reversible: false
+    parameters:
+      Pid: evidence.pid
+
+  - action_template: kill_by_image
+    artifact: Custom.TRUDI.Respond.KillByImage
+    description: "Kill every process running the touching tool by image path <image_path>"
+    manual_command: "pkill -9 -f <image_path>"
+    risk: medium
+    reversible: false
+    parameters:
+      ImagePath: evidence.image_path

@@ -1,8 +1,7 @@
 name: Custom.TRUDI.NewPersistence
 description: |
-  TRUDI-managed: watch the cron and systemd persistence surface for new
-  files. Emits a row whenever a file appears in a watched dir that is
-  not in the baseline allowlist.
+  TRUDI-managed: watch cron and systemd persistence files for new or changed
+  content. Compare path|SHA256 identities, including existing crontabs.
 
 type: CLIENT_EVENT
 
@@ -13,13 +12,16 @@ parameters:
       ${baseline_persistence_paths}
   - name: WatchDirs
     description: |
-      JSON array of glob patterns to walk every poll cycle. Each entry must
-      end in `/*` (or `/**` for recursion) to enumerate files inside the
-      directory — a bare `/etc/cron.d` would only match the dir itself.
+      JSON array of files and glob patterns to walk every poll cycle. Directory
+      entries end in `/*` (or `/**` for recursion); crontab files are explicit.
       Substituted from monitoring/render.py:PERSISTENCE_WATCH_GLOBS so the
       baseline snapshot globs the identical set.
     default: |
       ${watch_dirs}
+  - name: BaselinePersistenceFingerprints
+    description: JSON array of path|SHA256 identities. Old path-only baselines alert conservatively.
+    default: |
+      ${baseline_persistence_fingerprints}
   - name: PollSeconds
     description: How often to re-walk the watched dirs.
     type: int
@@ -27,19 +29,20 @@ parameters:
 
 sources:
   - query: |
-      LET baseline <= parse_json_array(data=BaselinePersistencePaths)
+      LET baseline <= parse_json_array(data=BaselinePersistenceFingerprints)
       LET watch <= parse_json_array(data=WatchDirs)
       LET tick = SELECT * FROM clock(period=PollSeconds)
       SELECT
         timestamp(epoch=now()) AS timestamp_utc,
         FullPath AS path,
         Size,
-        Mtime AS mtime_utc
+        mtime_utc,
+        sha256,
+        identity
       FROM foreach(
         row=tick,
         query={
-          SELECT FullPath, Size, Mtime
-          FROM glob(globs=watch, accessor="auto")
-          WHERE Mode.IsDir = FALSE
-            AND NOT FullPath IN baseline
+          SELECT path AS FullPath, Size, mtime_utc, sha256, identity
+          FROM Artifact.Custom.TRUDI.PersistenceSnapshot(WatchDirs=WatchDirs)
+          WHERE NOT sha256 OR NOT identity IN baseline
         })

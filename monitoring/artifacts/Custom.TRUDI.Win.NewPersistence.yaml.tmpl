@@ -1,0 +1,51 @@
+name: Custom.TRUDI.Win.NewPersistence
+description: |
+  TRUDI-managed (Windows): poll the autostart surface and emit a row for any
+  entry not in the operator-provided baseline. Covers the two mechanisms the
+  demo attack and common real-world persistence use:
+    - Run / RunOnce keys under HKLM and every HKU hive (T1547.001) — the Run
+      key the victim-a RDP session drops is caught here;
+    - scheduled-task definition files under \Windows\System32\Tasks (T1053.005).
+
+  Poll-based against the canonical autostart locations, diffed against the
+  baseline autoruns allowlist (captured by monitor.baseline_capture via
+  Custom.TRUDI.Win.PersistenceSnapshot, which globs the identical surface). A
+  value's data is folded into the identity so a CHANGED Run key refires.
+
+type: CLIENT_EVENT
+
+parameters:
+  - name: BaselineAutoruns
+    description: JSON array of autostart identities (`<path>|<value>`) known-good.
+    default: |
+      ${baseline_autoruns}
+  - name: RunKeyGlobs
+    description: Registry globs for the Run/RunOnce autostart keys.
+    default: |
+      ["HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*", "HKEY_USERS\\*\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\*", "HKEY_USERS\\*\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\*"]
+  - name: TaskGlob
+    default: 'C:/Windows/System32/Tasks/**'
+  - name: PollSeconds
+    type: int
+    default: 10
+
+sources:
+  - query: |
+      LET baseline <= parse_json_array(data=BaselineAutoruns)
+      LET run_globs <= parse_json_array(data=RunKeyGlobs)
+      LET tick = SELECT * FROM clock(period=PollSeconds)
+      -- Run/RunOnce values: identity is "<key path>\<value name>|<value data>".
+      LET run_rows = SELECT FullPath AS path,
+                            format(format="%v|%v", args=[FullPath, Data.value]) AS identity,
+                            Data.value AS value
+                     FROM glob(globs=run_globs, accessor="registry")
+      -- Scheduled-task files: identity is the task file path (content change not
+      -- tracked here; a new task file is the signal).
+      LET task_rows = SELECT FullPath AS path, FullPath AS identity, "" AS value
+                      FROM glob(globs=[TaskGlob], accessor="file")
+                      WHERE NOT IsDir
+      SELECT * FROM foreach(row=tick, query={
+        SELECT timestamp(epoch=now()) AS timestamp_utc, path, value, identity
+        FROM chain(a=run_rows, b=task_rows)
+        WHERE NOT identity IN baseline
+      })

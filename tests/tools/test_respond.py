@@ -1,10 +1,12 @@
-"""Tests for the containment-recommendation path.
+"""Tests for the containment path.
 
-TRUDI does NOT execute remediation (Velociraptor's client build ships without
-`execve()`, and keeping execution out of the agent's hands is the safer
-posture). `respond.suggest_containment` renders operator-runnable commands from
-the detector recipe; `monitor.end_investigation` writes them into the report.
-These tests cover the rendering + the report fallback section.
+`respond.suggest_containment` renders operator-runnable commands from the
+detector recipe (stamped with the open investigation, superseding its own
+earlier placeholder drafts); `respond.execute_action` is the gated write path
+(AUTO tier runs under auto-protect, everything else needs an operator token);
+`monitor.end_investigation` writes the investigation's own suggestions and
+executions into its report. These tests cover rendering, gating, scoping and
+the report sections.
 """
 import json
 import pytest
@@ -447,3 +449,288 @@ class TestResponseReportAndPause:
         r = m.end_investigation(case_id, "INV-001")
         assert r.get("closed") is False and r.get("paused") is True
         assert (mon / "_open_investigation.json").exists()  # tracker preserved
+
+    def test_end_investigation_report_is_findings_not_trace(self, tmp_path, monkeypatch):
+        """The live report must be a findings report, distinct from the raw
+        execution trace (which lands in the `_trace` files). Regression for the
+        INV-002 bug where report == trace."""
+        m = self._monitor(tmp_path, monkeypatch)
+        case_id = "DEMO-TEST"
+        mon = tmp_path / case_id / "monitoring"
+        (mon / "baselines").mkdir(parents=True)
+        (mon / "_open_investigation.json").write_text(json.dumps(
+            {"investigation_id": "INV-001", "alert_ids": ["a1", "a2"]}))
+        analysis = tmp_path / case_id / "analysis"
+        analysis.mkdir(parents=True)
+        inv_trace = analysis / f"{case_id}_INV-001_trace.json"
+        inv_trace.write_text(json.dumps({
+            "schema_version": "2.0", "case_id": case_id, "entry_count": 2,
+            "entries": [
+                {"call_id": 10, "type": "finding", "confidence": "CONFIRMED",
+                 "finding_id": "F0001", "linked_call_id": 7, "input_call_ids": [5, 6],
+                 "description": "Lateral movement victim-a to victim-b over SSH.",
+                 "validated_techniques": ["T1021.004"],
+                 "claim": {"kind": "positive", "category": "logon_auth",
+                           "act": "lateral_movement", "answers_case_question": True}},
+                {"call_id": 11, "type": "finding", "confidence": "LIKELY",
+                 "finding_id": "F0002", "linked_call_id": 9, "input_call_ids": [],
+                 "description": "Root cron persistence installed on victim-b.",
+                 "validated_techniques": ["T1053.003"],
+                 "claim": {"kind": "positive", "category": "persistence",
+                           "act": "persistence_install"}},
+            ],
+        }))
+        from core.execution_log import log
+        log.configure(case_id, str(inv_trace), save_session=False)
+
+        r = m.end_investigation(case_id, "INV-001")
+        assert r["success"] is True and r["closed"] is True
+        assert r["findings_written"] == 2
+
+        reports = tmp_path / case_id / "reports"
+        report_md = (reports / f"{case_id}_INV-001.md").read_text()
+        trace_md = (reports / f"{case_id}_INV-001_trace.md").read_text()
+
+        # Report is a findings report; trace is the execution trace. Distinct.
+        assert report_md.startswith("# Investigation Report")
+        assert trace_md.startswith("# Execution Trace")
+        assert report_md != trace_md
+        assert "Lateral movement" in report_md and "T1021.004" in report_md
+        assert "## Verdict" in report_md
+
+        doc = json.loads((reports / f"{case_id}_INV-001.json").read_text())
+        assert doc["report_kind"] == "investigation_findings"
+        assert len(doc["findings"]) == 2
+        assert doc["verdict"]["confidence"] == "CONFIRMED"
+        assert "T1053.003" in doc["attack_chain"]
+        # Trace files exist and are returned.
+        assert (reports / f"{case_id}_INV-001_trace.json").exists()
+        assert r["trace_md_path"].endswith("_INV-001_trace.md")
+        # Nothing was suggested or executed: the report says so explicitly
+        # instead of silently omitting the containment sections.
+        assert "No containment actions were suggested or executed" in report_md
+        assert doc["containment_note"] == "none suggested or executed"
+
+
+# ── Per-investigation scoping + supersession of containment actions ──────────
+#
+# Regression for the DECOY-DEMO reports: the response store is per case, so
+# every investigation's report reprinted every ACT the case ever suggested —
+# stale dry-run leftovers aimed at a TEST-NET address included — and each
+# re-suggestion after evidence enrichment minted a twin ACT.
+
+def _open_inv(root, case_id, inv, opened_at="2026-10-08T17:36:14Z"):
+    mon = root / case_id / "monitoring"
+    mon.mkdir(parents=True, exist_ok=True)
+    (mon / "_open_investigation.json").write_text(json.dumps(
+        {"investigation_id": inv, "alert_ids": ["a"], "opened_at_utc": opened_at}))
+
+
+def _suggest_decoy(case_id, evidence, **kw):
+    return respond_mod.suggest_containment(
+        case_id, finding_id=0, detector="Custom.TRUDI.DecoyTouch", evidence=evidence, **kw)
+
+
+class TestInvestigationScoping:
+    def test_suggestion_stamped_with_open_investigation(self, live_case):
+        case_id, root = live_case
+        _open_inv(root, case_id, "INV-004")
+        r = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389})
+        assert r["investigation_id"] == "INV-004"
+        assert all(s["investigation_id"] == "INV-004" for s in r["suggestions"])
+        on_disk = json.loads((root / case_id / "monitoring" / "response" / "suggestions"
+                              / f"{r['suggestions'][0]['action_id']}.json").read_text())
+        assert on_disk["investigation_id"] == "INV-004"
+
+    def test_explicit_investigation_id_wins(self, live_case):
+        case_id, root = live_case
+        _open_inv(root, case_id, "INV-004")
+        r = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389},
+                           investigation_id="INV-009")
+        assert r["investigation_id"] == "INV-009"
+
+    def test_no_open_investigation_leaves_stamp_empty(self, live_case):
+        case_id, _root = live_case
+        r = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389})
+        assert r["investigation_id"] is None
+        assert all(s["investigation_id"] is None for s in r["suggestions"])
+
+    def test_enriched_resuggest_supersedes_placeholder_draft(self, live_case):
+        case_id, root = live_case
+        _open_inv(root, case_id, "INV-001")
+        first = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389})
+        by_tpl = {s["action_template"]: s for s in first["suggestions"]}
+        assert by_tpl["kill_owning_pid"]["unresolved_placeholders"] == ["pid"]
+        block_id = by_tpl["block_egress_to_endpoint"]["action_id"]
+
+        second = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389,
+                                          "pid": "120", "image_path": "/tmp/.rdp-probe"})
+        by_tpl2 = {s["action_template"]: s for s in second["suggestions"]}
+        # Identical block command: reused, not re-minted.
+        assert by_tpl2["block_egress_to_endpoint"]["action_id"] == block_id
+        assert block_id in second["reused_action_ids"]
+        # Filled kill/pkill: new ids that supersede the placeholder drafts.
+        new_kill = by_tpl2["kill_owning_pid"]
+        assert new_kill["manual_command"] == "kill -9 120"
+        assert new_kill["supersedes"] == by_tpl["kill_owning_pid"]["action_id"]
+        old_kill = json.loads((root / case_id / "monitoring" / "response" / "suggestions"
+                               / f"{by_tpl['kill_owning_pid']['action_id']}.json").read_text())
+        assert old_kill["superseded_by"] == new_kill["action_id"]
+        assert {d["action_id"] for d in second["superseded"]} == {
+            by_tpl["kill_owning_pid"]["action_id"], by_tpl["kill_by_image"]["action_id"]}
+        # Only three ACT ids were ever minted for a fresh action: 3 drafts + 2 refills.
+        files = list((root / case_id / "monitoring" / "response" / "suggestions").glob("ACT-*.json"))
+        assert len(files) == 5
+
+    def test_list_actions_hides_superseded_by_default(self, live_case):
+        case_id, root = live_case
+        _open_inv(root, case_id, "INV-001")
+        _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389})
+        _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389, "pid": "120",
+                                 "image_path": "/tmp/.rdp-probe"})
+        live = respond_mod.list_actions(case_id, investigation_id="INV-001")["actions"]
+        assert len(live) == 3 and not any(a.get("superseded_by") for a in live)
+        everything = respond_mod.list_actions(case_id, include_superseded=True)["actions"]
+        assert len(everything) == 5
+        assert respond_mod.list_actions(case_id, investigation_id="INV-002")["actions"] == []
+
+    def test_different_target_is_not_superseded(self, live_case):
+        """Two NewProcess alerts (two pids) in one investigation are two kills."""
+        case_id, root = live_case
+        _open_inv(root, case_id, "INV-001")
+        a = respond_mod.suggest_containment(case_id, detector="Custom.TRUDI.NewProcess",
+                                            evidence={"pid": 111, "image_path": "/tmp/a"})
+        b = respond_mod.suggest_containment(case_id, detector="Custom.TRUDI.NewProcess",
+                                            evidence={"pid": 222, "image_path": "/tmp/b"})
+        ids_a = {s["action_id"] for s in a["suggestions"]}
+        ids_b = {s["action_id"] for s in b["suggestions"]}
+        assert ids_a.isdisjoint(ids_b)
+        assert b["superseded"] == [] and b["reused_action_ids"] == []
+
+    def test_execute_refuses_superseded_draft(self, exec_case):
+        case_id, root, _calls = exec_case
+        _open_inv(root, case_id, "INV-001")
+        first = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389,
+                                         "pid": "<pid>"})
+        # Force a draft with an unresolved pid, then refill it.
+        draft = next(s for s in first["suggestions"] if s["action_template"] == "kill_owning_pid")
+        second = _suggest_decoy(case_id, {"remote_ip": "10.73.0.50", "remote_port": 3389,
+                                          "pid": "120"})
+        refill = next(s for s in second["suggestions"] if s["action_template"] == "kill_owning_pid")
+        assert refill["supersedes"] == draft["action_id"]
+        r = respond_mod.execute_action(case_id, draft["action_id"], mode="operator")
+        assert r["success"] is False and "superseded by" in r["error"]
+
+    def test_execution_record_carries_investigation_id(self, exec_case):
+        case_id, root, _calls = exec_case
+        _open_inv(root, case_id, "INV-003")
+        r = respond_mod.suggest_containment(case_id, detector="Custom.TRUDI.NewNetwork",
+            evidence={"remote_ip": "10.73.0.50", "remote_port": 3389})
+        block = next(s for s in r["suggestions"] if s["action_template"] == "block_egress_to_endpoint")
+        ex = respond_mod.execute_action(case_id, block["action_id"], mode="auto")
+        assert ex["success"] is True
+        rec = json.loads((root / case_id / "monitoring" / "response" / "executions"
+                          / f"{block['action_id']}.json").read_text())
+        assert rec["investigation_id"] == "INV-003"
+
+
+class TestReportScoping:
+    """The report sections list only the closing investigation's actions."""
+
+    def _monitor(self, tmp_path, monkeypatch):
+        from tools import monitor as monitor_mod
+        monkeypatch.setattr(monitor_mod, "CASES_ROOT", tmp_path)
+        return monitor_mod
+
+    def _store(self, tmp_path, case_id):
+        resp = tmp_path / case_id / "monitoring" / "response"
+        (resp / "suggestions").mkdir(parents=True)
+        (resp / "executions").mkdir(parents=True)
+
+        def sug(n, inv, created, cmd, **extra):
+            rec = {"action_id": f"ACT-{n}", "detector": "Custom.TRUDI.DecoyTouch",
+                   "description": f"act {n}", "manual_command": cmd, "risk": "low",
+                   "reversible": True, "unresolved_placeholders": [],
+                   "created_at_utc": created, "investigation_id": inv, **extra}
+            (resp / "suggestions" / f"ACT-{n}.json").write_text(json.dumps(rec))
+
+        def ex(n, inv, when):
+            rec = {"action_id": f"ACT-{n}", "classification": "AUTO", "mode": "auto",
+                   "success": True, "exit_code": 0, "command_str": f"/sbin/iptables run {n}",
+                   "rollback_command": f"/sbin/iptables undo {n}", "executed_at_utc": when,
+                   "investigation_id": inv}
+            (resp / "executions" / f"ACT-{n}.json").write_text(json.dumps(rec))
+
+        # Stale dry-run leftovers: unstamped, created BEFORE INV-001 opened.
+        sug(1, None, "2026-10-08T16:17:16Z", "iptables -I OUTPUT -d 192.0.2.59 -j REJECT")
+        sug(2, None, "2026-10-08T16:17:16Z", "kill -9 4242")
+        # INV-001: unstamped legacy record written after it opened (time fallback)
+        # plus a stamped superseded draft and its refill.
+        sug(7, None, "2026-10-08T17:36:28Z", "iptables -I OUTPUT -d 10.73.0.50 -j REJECT")
+        sug(8, "INV-001", "2026-10-08T17:36:28Z", "kill -9 <pid>",
+            unresolved_placeholders=["pid"], superseded_by="ACT-11")
+        sug(11, "INV-001", "2026-10-08T17:38:22Z", "kill -9 120", supersedes="ACT-8")
+        ex(7, None, "2026-10-08T17:37:16Z")
+        # INV-002: stamped, its own.
+        sug(13, "INV-002", "2026-10-09T06:27:00Z", "kill -9 746")
+        return resp
+
+    def _report(self, tmp_path, case_id, inv):
+        reports = tmp_path / case_id / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        base = reports / f"{case_id}_{inv}"
+        (reports / f"{case_id}_{inv}.md").write_text("# Report\n")
+        (reports / f"{case_id}_{inv}.json").write_text(json.dumps({"entries": []}))
+        return base
+
+    def test_inv001_report_lists_only_its_live_actions(self, tmp_path, monkeypatch):
+        m = self._monitor(tmp_path, monkeypatch)
+        case_id = "DEMO-TEST"
+        self._store(tmp_path, case_id)
+        base = self._report(tmp_path, case_id, "INV-001")
+        n = m._append_containment_section(case_id, base, "INV-001", "2026-10-08T17:36:14Z")
+        md = (tmp_path / case_id / "reports" / f"{case_id}_INV-001.md").read_text()
+        assert n == 2                       # ACT-7 (legacy, in window) + ACT-11
+        assert "ACT-7" in md and "ACT-11" in md
+        assert "192.0.2.59" not in md and "4242" not in md   # stale dry-run leftovers
+        assert "ACT-8" not in md            # superseded draft
+        assert "ACT-13" not in md           # another investigation's
+        assert "does **not** execute" not in md
+        doc = json.loads((tmp_path / case_id / "reports" / f"{case_id}_INV-001.json").read_text())
+        assert [s["action_id"] for s in doc["recommended_containment_commands"]] == ["ACT-7", "ACT-11"]
+
+    def test_inv002_report_has_no_inv001_actions(self, tmp_path, monkeypatch):
+        m = self._monitor(tmp_path, monkeypatch)
+        case_id = "DEMO-TEST"
+        self._store(tmp_path, case_id)
+        base = self._report(tmp_path, case_id, "INV-002")
+        n = m._append_containment_section(case_id, base, "INV-002", "2026-10-09T06:26:58Z")
+        assert n == 1
+        md = (tmp_path / case_id / "reports" / f"{case_id}_INV-002.md").read_text()
+        assert "ACT-13" in md and "kill -9 746" in md
+        for stale in ("ACT-1 ", "ACT-2 ", "ACT-7", "ACT-8", "ACT-11", "192.0.2.59", "10.73.0.50"):
+            assert stale not in md
+        # And the executed-actions ledger does not credit INV-002 with INV-001's block.
+        n2 = m._append_response_section(case_id, base, "INV-002", "2026-10-09T06:26:58Z")
+        assert n2 == 0
+        assert "## Autonomous Response Actions" not in \
+            (tmp_path / case_id / "reports" / f"{case_id}_INV-002.md").read_text()
+
+    def test_inv001_ledger_keeps_its_execution(self, tmp_path, monkeypatch):
+        m = self._monitor(tmp_path, monkeypatch)
+        case_id = "DEMO-TEST"
+        self._store(tmp_path, case_id)
+        base = self._report(tmp_path, case_id, "INV-001")
+        n = m._append_response_section(case_id, base, "INV-001", "2026-10-08T17:36:14Z")
+        assert n == 1
+        md = (tmp_path / case_id / "reports" / f"{case_id}_INV-001.md").read_text()
+        assert "ACT-7" in md and "/sbin/iptables undo 7" in md
+
+    def test_unscoped_call_keeps_case_wide_behaviour(self, tmp_path, monkeypatch):
+        """Back-compat: with no investigation_id the loaders list everything live."""
+        m = self._monitor(tmp_path, monkeypatch)
+        case_id = "DEMO-TEST"
+        self._store(tmp_path, case_id)
+        ids = [s["action_id"] for s in m._load_suggestions(case_id)]
+        assert ids == ["ACT-1", "ACT-2", "ACT-7", "ACT-11", "ACT-13"]   # numeric order, no superseded
+        assert len(m._load_suggestions(case_id, include_superseded=True)) == 6

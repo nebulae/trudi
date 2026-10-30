@@ -10,6 +10,29 @@ description: |
   short-lived processes; for the demo this is fine — Atomic Red Team
   tests leave their processes around long enough to be observed.
 
+  Scheduled work is exempt: a process whose ancestry (up to six hops) runs
+  through the cron daemon, whose image lives under a trusted-execution prefix
+  (system bin dirs, /usr/local, /opt), and whose command line names no
+  world-writable staging location (/tmp, /var/tmp, /dev/shm) is the periodic
+  cron chain (sh → run-parts → script → sleep), not an intrusion. A single
+  process snapshot at baseline time can never contain those periodic children,
+  so without this rule every daily cron run alerts. A cron job launching a
+  binary from an untrusted path, or a system interpreter on a payload under a
+  staging location, still alerts.
+
+  Requires matching content fingerprints for the complete persistence snapshot
+  on every tick. Missing fingerprints, changed files, new files, or removed
+  files disable the exemption. Old path-only baselines remain conservative.
+
+  DEPENDS ON Custom.TRUDI.NewPersistence. This exemption quiets only the
+  PROCESS alerts for the cron chain; the INTRODUCTION of a new cron job is
+  caught file-side by NewPersistence (a new file under the watched cron/systemd
+  surface). The two detectors cover each other — an attacker's own cron job
+  running a stock system tool is caught as a new FILE even though its child
+  process is exempt. Run this detector WITHOUT NewPersistence only if you
+  accept that persistence blind spot; monitor.start_watcher warns when the
+  pair is split.
+
 type: CLIENT_EVENT
 
 parameters:
@@ -21,28 +44,94 @@ parameters:
     description: JSON array of process basenames considered known-good.
     default: |
       ${baseline_proc_names}
+  - name: CronDaemonImages
+    description: JSON array of cron daemon image paths (from the baseline).
+    default: |
+      ${baseline_cron_images}
+  - name: ScheduledWorkBinRegex
+    description: >
+      Trusted-execution prefixes a cron-descended process may run from without
+      alerting (system bin dirs plus /usr/local and /opt). Override per host if
+      scheduled jobs legitimately run binaries from elsewhere.
+    default: ${scheduled_work_bin_regex}
+  - name: DropPathRegex
+    description: >
+      World-writable/transient command-line locations that void the
+      scheduled-work exemption (cron launching a payload from /tmp et al.).
+    default: ${drop_path_regex}
   - name: PollSeconds
     description: How often to walk the process list.
     type: int
     default: 5
+  - name: BaselinePersistenceFingerprints
+    description: Known-good schedule file identities; missing fingerprints disable the exemption.
+    default: |
+      ${baseline_persistence_fingerprints}
+  - name: WatchDirs
+    default: |
+      ${watch_dirs}
+  - name: ScheduledWorkEnabled
+    type: bool
+    default: false
 
 sources:
   - query: |
       LET baseline_paths <= parse_json_array(data=BaselineImagePaths)
       LET baseline_names <= parse_json_array(data=BaselineProcessNames)
+      LET cron_images <= parse_json_array(data=CronDaemonImages)
+      LET baseline_fingerprints <= parse_json_array(data=BaselinePersistenceFingerprints)
+      LET persistence_snapshot = SELECT * FROM Artifact.Custom.TRUDI.PersistenceSnapshot(WatchDirs=WatchDirs)
+      LET changed(rows) = SELECT identity FROM foreach(row=rows)
+                          WHERE NOT sha256 OR NOT identity IN baseline_fingerprints
+      LET schedule_ok(rows) = ScheduledWorkEnabled AND len(list=baseline_fingerprints) > 0
+                               AND len(list=rows.identity) = len(list=baseline_fingerprints)
+                               AND len(list=changed(rows=rows).identity) = 0
       LET tick = SELECT * FROM clock(period=PollSeconds)
+      LET snapshot = SELECT Pid, Ppid, Exe, Username, Name, CommandLine, CreatedTime
+                     FROM Artifact.Linux.Sys.Pslist()
+      -- Index the snapshot by pid and walk up to six ancestors per row.
+      LET pm(rows) = to_dict(item={
+          SELECT str(str=Pid) AS _key,
+                 dict(Pid=Pid, Ppid=Ppid, Exe=Exe, Username=Username) AS _value
+          FROM foreach(row=rows) })
+      LET a1(m, p) = get(item=m, member=str(str=p))
+      LET a2(m, p) = a1(m=m, p=a1(m=m, p=p).Ppid)
+      LET a3(m, p) = a1(m=m, p=a2(m=m, p=p).Ppid)
+      LET a4(m, p) = a1(m=m, p=a3(m=m, p=p).Ppid)
+      LET a5(m, p) = a1(m=m, p=a4(m=m, p=p).Ppid)
+      LET a6(m, p) = a1(m=m, p=a5(m=m, p=p).Ppid)
+      LET cr(x) = if(condition=x AND x.Exe IN cron_images, then=1, else=0)
+      LET cron_hops(m, p) = cr(x=a1(m=m,p=p)) + cr(x=a2(m=m,p=p)) + cr(x=a3(m=m,p=p))
+                          + cr(x=a4(m=m,p=p)) + cr(x=a5(m=m,p=p)) + cr(x=a6(m=m,p=p))
+      LET ex(x) = if(condition=x, then=x.Exe, else="")
+      LET ancestry(m, p) = join(array=filter(list=[ex(x=a1(m=m,p=p)), ex(x=a2(m=m,p=p)),
+                                                   ex(x=a3(m=m,p=p)), ex(x=a4(m=m,p=p)),
+                                                   ex(x=a5(m=m,p=p)), ex(x=a6(m=m,p=p))],
+                                             regex="."), sep=" <- ")
+      LET scheduled_work(m, p, exe, cmd) = cron_hops(m=m, p=p) > 0
+                                           AND exe =~ ScheduledWorkBinRegex
+                                           AND NOT cmd =~ DropPathRegex
       SELECT * FROM foreach(row=tick, query={
-        SELECT
-          timestamp(epoch=now()) AS timestamp_utc,
-          Exe AS image_path,
-          Name AS process_name,
-          Pid AS pid,
-          Ppid AS ppid,
-          CommandLine AS commandline,
-          Username AS username,
-          CreatedTime AS started_utc
-        FROM Artifact.Linux.Sys.Pslist()
-        WHERE NOT Exe IN baseline_paths
-          AND NOT Name IN baseline_names
-          AND Exe != ""
+        SELECT * FROM foreach(row={ SELECT snapshot AS procs, persistence_snapshot AS persistence FROM scope() }, query={
+          SELECT * FROM foreach(row={ SELECT procs, pm(rows=procs) AS m FROM scope() }, query={
+            SELECT
+              timestamp(epoch=now()) AS timestamp_utc,
+              Exe AS image_path,
+              Name AS process_name,
+              Pid AS pid,
+              Ppid AS ppid,
+              CommandLine AS commandline,
+              Username AS username,
+              CreatedTime AS started_utc,
+              a1(m=m, p=Ppid).Exe AS parent_exe,
+              a1(m=m, p=Ppid).Username AS parent_user,
+              ancestry(m=m, p=Ppid) AS ancestry,
+              cron_hops(m=m, p=Ppid) > 0 AS cron_descendant
+            FROM foreach(row=procs)
+            WHERE NOT Exe IN baseline_paths
+              AND NOT Name IN baseline_names
+              AND Exe != ""
+              AND NOT (schedule_ok(rows=persistence) AND scheduled_work(m=m, p=Ppid, exe=Exe, cmd=CommandLine))
+          })
+        })
       })
