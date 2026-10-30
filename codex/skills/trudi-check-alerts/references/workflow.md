@@ -1,0 +1,1 @@
+../../../../claude/commands/trudi-check-alerts.md
