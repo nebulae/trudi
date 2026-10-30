@@ -45,22 +45,37 @@ def register(case_dir: Path, python: str, *, repo: Path = REPO,
     hooks_path = codex_dir / 'hooks.json'
     document = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
     before = json.dumps(document, sort_keys=True)
-    groups = document.setdefault('hooks', {}).setdefault('UserPromptSubmit', [])
-    command = shlex.join([python, str(repo / 'codex/hooks/log_user_message.py'),
-                          '--case-dir', str(case_dir), '--cache-dir', str(cache_dir)])
-    handler = {'type': 'command', 'command': command, 'timeout': 15}
-    # Remove this adapter's old registration, preserving all other handlers.
-    kept = []
-    for group in groups:
-        others = [h for h in group.get('hooks', [])
-                  if 'codex/hooks/log_user_message.py' not in h.get('command', '')]
-        if others:
-            kept.append({**group, 'hooks': others})
-    document['hooks']['UserPromptSubmit'] = kept + [{'hooks': [handler]}]
+    hooks = document.setdefault('hooks', {})
+    for event, script, group_fields, label in HOOKS:
+        command = shlex.join([python, str(repo / script),
+                              '--case-dir', str(case_dir), '--cache-dir', str(cache_dir)])
+        handler = {'type': 'command', 'command': command, 'timeout': 15}
+        if event == 'PreToolUse':
+            handler['statusMessage'] = 'TRUDI evidence guard'
+        # Remove this adapter's old registration, preserving all other handlers.
+        kept = []
+        for group in hooks.get(event, []):
+            others = [h for h in group.get('hooks', []) if script not in h.get('command', '')]
+            if others:
+                kept.append({**group, 'hooks': others})
+        groups = kept + [{**group_fields, 'hooks': [handler]}]
+        if json.dumps(groups, sort_keys=True) != json.dumps(hooks.get(event), sort_keys=True):
+            messages.append(f'Registered the Codex {label}')
+        hooks[event] = groups
     if json.dumps(document, sort_keys=True) != before:
         hooks_path.write_text(json.dumps(document, indent=2) + '\n')
-        messages.append('Registered the Codex UserPromptSubmit trace hook')
-    return messages or ['Codex skills and input hook already installed']
+    return messages or ['Codex skills and hooks already installed']
+
+
+# (event, script under the repo, extra group fields, human label). The PreToolUse
+# guard matches Codex's shell tool (Bash) and its file editor (apply_patch, whose
+# matcher aliases are Edit/Write) — the two paths that can read produced output
+# or write into the case's tool-only directories outside MCP.
+HOOKS = (
+    ('UserPromptSubmit', 'codex/hooks/log_user_message.py', {}, 'UserPromptSubmit trace hook'),
+    ('PreToolUse', 'codex/hooks/guard_pretooluse.py', {'matcher': 'Bash|apply_patch'},
+     'PreToolUse evidence guard'),
+)
 
 
 if __name__ == '__main__':
@@ -71,4 +86,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     for message in register(args.case_dir, args.python, cache_dir=args.cache_dir):
         print(message)
-    print('Restart/resume Codex in the case directory; review and trust the input hook with /hooks.')
+    print('Restart/resume Codex in the case directory; review and trust both TRUDI hooks with /hooks.')

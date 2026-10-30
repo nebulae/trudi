@@ -72,8 +72,11 @@ case-local live-monitoring skills and native operator-input hook:
 
 (`$VENV` is the TRUDI virtualenv, e.g. `~/.venv`.)
 
-In Codex, review and trust the case's UserPromptSubmit hook through `/hooks`.
-Codex requires this review before local hooks execute. Check `/skills` for
+In Codex, review and trust the case's two TRUDI hooks through `/hooks`: the
+UserPromptSubmit trace hook and the PreToolUse evidence guard (matcher
+`Bash|apply_patch`, refuses untraced reads of produced output, forensic binaries
+outside MCP, and raw writes into `reports/`/`exports/`/`analysis/`). Codex
+requires this review before local hooks execute. Check `/skills` for
 `trudi-start-watcher` (`trudi-load-watcher` is an alias), `trudi-watch-alerts`,
 `trudi-check-alerts`, and `trudi-stop-watcher`. Invoke them with `$`, for example
 `$trudi-check-alerts WINDECOY-DEMO`. If a custom TRUDI_CACHE_DIR is configured

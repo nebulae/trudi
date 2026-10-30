@@ -153,11 +153,16 @@ def test_registration_preserves_config_hooks_and_is_idempotent(case):
     module.register(case.root, sys.executable, cache_dir=case.cache)
     before = hooks.read_text()
     assert config.read_text() == 'model = "existing-model"\n'
-    assert json.loads(before)['hooks']['Stop'][0]['hooks'][0]['command'] == 'my-existing-hook'
+    document = json.loads(before)
+    assert document['hooks']['Stop'][0]['hooks'][0]['command'] == 'my-existing-hook'
+    assert 'codex/hooks/log_user_message.py' in document['hooks']['UserPromptSubmit'][-1]['hooks'][0]['command']
+    guard_group = document['hooks']['PreToolUse'][-1]
+    assert guard_group['matcher'] == 'Bash|apply_patch'
+    assert 'codex/hooks/guard_pretooluse.py' in guard_group['hooks'][0]['command']
     assert (case.root / '.agents/skills/trudi-watch-alerts/SKILL.md').is_file()
     reference = case.root / '.agents/skills/trudi-check-alerts/references/workflow.md'
     assert reference.resolve() == REPO / 'claude/commands/trudi-check-alerts.md'
-    assert module.register(case.root, sys.executable, cache_dir=case.cache) == ['Codex skills and input hook already installed']
+    assert module.register(case.root, sys.executable, cache_dir=case.cache) == ['Codex skills and hooks already installed']
     assert hooks.read_text() == before
 
 
