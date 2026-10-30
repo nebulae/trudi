@@ -26,6 +26,7 @@ artifact ACLs — operators should issue an API config with the
 from __future__ import annotations
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -83,6 +84,7 @@ def _velo_run(
     *,
     timeout: int = DEFAULT_TIMEOUT,
     line_cap: int | None = MAX_TOOL_OUTPUT_LINES,
+    output_cap: int | None = OUTPUT_CAP,
 ) -> dict[str, Any]:
     """Run velociraptor CLI with fixed argv; capture + trace + return.
 
@@ -131,8 +133,8 @@ def _velo_run(
         result["success"] = proc.returncode == 0
         stdout = proc.stdout.decode("utf-8", errors="replace")
         stderr = proc.stderr.decode("utf-8", errors="replace")
-        if len(stdout) > OUTPUT_CAP:
-            stdout = stdout[:OUTPUT_CAP]
+        if output_cap is not None and len(stdout) > output_cap:
+            stdout = stdout[:output_cap]
             result["truncated"] = True
         if line_cap is not None:
             lines = stdout.splitlines(keepends=True)
@@ -166,8 +168,15 @@ def _velo_query(
     *,
     fmt: str = "jsonl",
     timeout: int = DEFAULT_TIMEOUT,
+    full_output: bool = False,
 ) -> dict[str, Any]:
     """Run a single VQL statement via `velociraptor query`."""
+    if full_output:
+        # Configuration reads are parsed internally. Truncating their JSON can
+        # prevent updates once baselines or compiled queries grow past the
+        # normal user-facing output limits.
+        return _velo_run(["query", "--format", fmt, vql], timeout=timeout,
+                         line_cap=None, output_cap=None)
     return _velo_run(["query", "--format", fmt, vql], timeout=timeout)
 
 
@@ -321,11 +330,13 @@ def get_collection_results(
     client_id: str,
     flow_id: str,
     artifact: str,
+    full_output: bool = False,
 ) -> dict:
     """Fetch rows produced by a completed flow's artifact source.
 
     Call after `wait_for_flow` returns FINISHED. The artifact name must
     match what was collected (e.g. "Linux.Sys.Pslist").
+    full_output retains every row for baseline and verification consumers.
     """
     if not flow_id.startswith("F."):
         return {"success": False, "error": f"flow_id must look like 'F.xxx', got {flow_id!r}"}
@@ -335,6 +346,7 @@ def get_collection_results(
         f"flow_id={json.dumps(flow_id)}, "
         f"artifact={json.dumps(artifact)}"
         f")",
+        full_output=full_output,
     )
     if res["success"]:
         res["rows"] = _parse_jsonl(res["stdout"])
@@ -375,89 +387,81 @@ def update_client_event_table(
     artifacts: list[str],
     parameters: Optional[dict] = None,
 ) -> dict:
-    """Replace the global client monitoring table with the given artifact set.
+    """Set a client's TRUDI detectors.
 
-    Keeps the existing baseline artifact (`Generic.Client.Stats`) plus the
-    `artifacts` you pass — this matters because the table is global, and
-    blowing away Generic.Client.Stats would break the rest of the demo.
-
-    `client_id` is informational (the change is global) but recorded so
-    the trace clearly shows which run pushed the change.
-
-    Implementation note: `set_client_monitoring(value=dict(...))` is
-    silently rejected in Velociraptor 0.74+ — the function wants a value
-    derived from `patch(item=get_client_monitoring(), patch=[...])` so
-    the proto type is preserved. We compute a JSON-Patch (RFC 6902)
-    against the current state and apply.
+    Parameter values are per-artifact dictionaries. Empty artifacts disables
+    this client's TRUDI monitoring only. Definitions must have neutral defaults;
+    the client baseline belongs in the label's parameter specs.
     """
-    if not client_id.startswith("C."):
-        return {"success": False, "error": f"client_id must look like 'C.xxx', got {client_id!r}"}
-    if not artifacts:
-        return {"success": False, "error": "artifacts list cannot be empty"}
+    import fcntl
+    from pathlib import Path
+    from core.paths import trudi_cache_dir
+    from monitoring.client_config import client_label, table_patch
 
-    keep = ["Generic.Client.Stats"]
-    desired = list(dict.fromkeys(keep + list(artifacts)))  # de-dup, preserve order
-
-    # Read current artifact list to compute the diff.
-    cur_res = _velo_query(
-        "SELECT get_client_monitoring().artifacts.artifacts AS a FROM scope()"
-    )
-    if not cur_res.get("success"):
-        return cur_res
-    cur_rows = _parse_jsonl(cur_res["stdout"])
-    current_list: list[str] = (cur_rows[0].get("a") if cur_rows else None) or []
-
-    # Compute removes (by index, reversed to keep earlier indices stable
-    # as items shift) and adds (appended via the "-" sentinel).
-    ops: list[dict] = []
-    for i in range(len(current_list) - 1, -1, -1):
-        if current_list[i] not in desired:
-            ops.append({"op": "remove", "path": f"/artifacts/artifacts/{i}"})
-    existing_set = set(current_list)
-    for name in desired:
-        if name not in existing_set:
-            ops.append({"op": "add", "path": "/artifacts/artifacts/-", "value": name})
-
-    if not ops:
-        return {
-            "success": True,
-            "artifacts": current_list,
-            "noop": True,
-            "_trudi_call_id": cur_res.get("_trudi_call_id"),
-        }
-
-    # Render the ops as a VQL list of dict() literals.
-    def _render_op(op: dict) -> str:
-        if "value" in op:
-            return (
-                f'dict(op={json.dumps(op["op"])}, '
-                f'path={json.dumps(op["path"])}, '
-                f'value={json.dumps(op["value"])})'
-            )
-        return (
-            f'dict(op={json.dumps(op["op"])}, '
-            f'path={json.dumps(op["path"])})'
-        )
-
-    ops_vql = "[" + ", ".join(_render_op(op) for op in ops) + "]"
-
-    vql = (
-        "SELECT set_client_monitoring(value=patch("
-        "item=get_client_monitoring(), "
-        f"patch={ops_vql}"
-        ")) AS r FROM scope()"
-    )
-    res = _velo_query(vql)
-    if res["success"]:
-        res["rows"] = _parse_jsonl(res["stdout"])
-        res["applied_ops"] = ops
-        # Read-back to confirm.
-        verify = _velo_query(
-            "SELECT get_client_monitoring().artifacts.artifacts AS a FROM scope()"
-        )
-        verify_rows = _parse_jsonl(verify.get("stdout", "")) if verify.get("success") else []
-        res["artifacts"] = (verify_rows[0].get("a") if verify_rows else None) or []
-    return res
+    if not re.fullmatch(r"C\.[A-Za-z0-9_-]+", client_id):
+        return {"success": False, "error": "invalid client_id"}
+    if any(not a.startswith("Custom.TRUDI.") for a in artifacts):
+        return {"success": False, "error": "only Custom.TRUDI detectors belong in a TRUDI label"}
+    lock_path = Path(trudi_cache_dir()) / "client-monitoring.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for attempt in range(5):
+            current = _velo_query("SELECT get_client_monitoring() AS state FROM scope()",
+                                  full_output=True)
+            rows = _parse_jsonl(current.get("stdout", ""))
+            if not current.get("success") or not rows or not isinstance(rows[0].get("state"), dict):
+                return {**current, "success": False, "error": "could not read monitoring state"}
+            state = rows[0]["state"]
+            try:
+                ops = table_patch(state, client_id, artifacts, parameters)
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
+            if not ops:
+                result = current
+                break
+            # patch() retains the proto type required by set_client_monitoring.
+            # Artifact uploads can asynchronously recompile this table. Retry
+            # against a fresh snapshot instead of replaying stale patch indices.
+            # The version check also protects edits by other API clients.
+            payload = json.dumps(json.dumps(ops))
+            version = json.dumps(state.get("version", 0))
+            result = _velo_query(
+                "LET current <= get_client_monitoring() "
+                f"SELECT if(condition=(current.version || 0) = {version}, "
+                "then=set_client_monitoring(value=patch(item=current, "
+                f"patch=parse_json_array(data={payload}))), else=NULL) AS state FROM scope()",
+                full_output=True)
+            applied = _parse_jsonl(result.get("stdout", ""))
+            if not result.get("success") or not applied:
+                return {**result, "success": False,
+                        "error": "monitoring update failed"}
+            if applied[0].get("state"):
+                break
+            time.sleep(0.1 * (attempt + 1))
+        else:
+            return {"success": False, "error": "monitoring state kept changing; retry"}
+        label_name = client_label(client_id)
+        labelled = _velo_query(
+            f"SELECT label(client_id={json.dumps(client_id)}, "
+            f"labels=[{json.dumps(label_name)}], op={json.dumps('set' if artifacts else 'remove')}) AS r FROM scope()")
+        if not labelled.get("success"):
+            return {**labelled, "success": False, "error": "could not update client label"}
+        verified = _velo_query("SELECT get_client_monitoring() AS state FROM scope()",
+                               full_output=True)
+        checked = _parse_jsonl(verified.get("stdout", ""))
+        if not verified.get("success") or not checked or not isinstance(checked[0].get("state"), dict):
+            return {**verified, "success": False, "error": "monitoring read-back failed"}
+        if table_patch(checked[0]["state"], client_id, artifacts, parameters):
+            return {"success": False, "error": "monitoring read-back did not match requested configuration"}
+        legacy = [a for a in (state.get("artifacts") or {}).get("artifacts", [])
+                  if a.startswith("Custom.TRUDI.")]
+        # Keep the complete table internal, including on the no-op path.
+        return {"success": True, "_trudi_call_id": result.get("_trudi_call_id", 0),
+                "artifacts": list(artifacts),
+                "label": label_name, "applied_ops": ops, "noop": not ops,
+                "warnings": (["Legacy global TRUDI detectors remain; migrate them to client labels: "
+                               + ", ".join(legacy)] if legacy else [])}
 
 
 @mcp.tool()

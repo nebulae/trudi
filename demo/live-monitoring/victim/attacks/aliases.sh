@@ -33,6 +33,22 @@ declare -A alias_map=(
     # "lateral"). Run ON victim-a. Special-cased in `run` → lateral.sh; this
     # entry is for --list visibility only.
     [lateral]="T1021.004+T1548.003+T1053.003"
+
+    # Touch the emulated ShadowPlex RDP decoy with a harvested honey credential
+    # (profile "decoy"). Run ON victim-a. Special-cased in `run` →
+    # decoy-touch.sh; the external CEF detection, not a host detector. For
+    # --list visibility only.
+    [decoy-touch]="T1021.001+T1046"
+    # Open a REAL RDP session to the Windows victim victim-win (profile
+    # "winrdp"). Run ON victim-a. Special-cased in `run` → win-rdp.sh; produces
+    # a genuine Windows type-10 (RemoteInteractive) logon. --list only.
+    [win-rdp]="T1021.001"
+
+    # Same real RDP session but as the HONEY account (linda) — the WINDECOY-DEMO
+    # deception path (profiles "winrdp"+"windecoy"). Run ON victim-a. Special-
+    # cased in `run` → win-decoy.sh with honey creds; the on-decoy ShadowPlex
+    # sensor reports the honey-account logon as a CEF decoy touch. --list only.
+    [win-decoy]="T1021.001+T1059.001+T1005+T1560.001+T1547.001"
 )
 
 list_aliases() {

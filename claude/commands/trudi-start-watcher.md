@@ -67,12 +67,40 @@ monitor.start_watcher(client_id, case_id)            # all four detectors
 `start_watcher` refuses if no baseline exists, or if a watcher is
 already alive for this `(case, client)` pair — surface either refusal
 verbatim rather than retrying. On success it returns the sidecar `pid`,
-the `pid_file`/`log_file`, and the uploaded detector artifacts.
+the `pid_file`/`log_file`, the uploaded detector artifacts, and a
+`warnings` list. **Surface every `warnings` entry to the operator
+verbatim.** In particular, restricting `detectors=` to `NewProcess`
+without `NewPersistence` warns of a persistence blind spot: the
+NewProcess scheduled-work exemption suppresses process alerts for
+cron-launched system binaries, and NewPersistence is the file-side
+detector that catches a newly-planted cron job. Keep them enabled
+together unless an operator has explicitly accepted the gap for an
+ephemeral host.
+
+### 5b. Start the external-detection ingest (only if the case uses one)
+If `<case_dir>/monitoring/config.json` has a `cef_ingest` block, the case is
+fed by an external deception/SIEM platform (Acalvio ShadowPlex CEF) in
+addition to — or instead of — the host detectors. Start the ingest sidecar:
+```
+monitor.start_cef_ingest(case_id, listen=<cef_ingest.listen or "0.0.0.0:5514">)
+```
+It receives ShadowPlex CEF over UDP syslog and writes
+`Custom.TRUDI.DecoyTouch` alerts into the same queue, so the
+`/trudi-check-alerts` / `/trudi-watch-alerts` loop consumes them unchanged.
+It registers under `watchers/` as the `cef-ingest` pseudo-client, so
+`monitor.list_watchers` shows it alive. Skip this step for cases with no
+`cef_ingest` block. If the case has NO Velociraptor baseline/watcher (a
+pure external-detection case), steps 3–5 may be skipped — the ingest is the
+only producer — but a baseline on the touching host is still needed before
+`respond.*` will act (the `live_monitoring_scope` gate).
 
 ### 6. Confirm + report
 - Confirm the sidecar pid is alive (`ps -p <pid>`).
-- Report: client_id, the four detectors registered, the watcher pid, and
-  the dashboard URL.
+- Report: client_id, the detectors registered, the watcher pid, the
+  `cef-ingest` pid if started, and the dashboard URL.
+- For CEF cases, report whether authenticated senders and source/decoy bindings
+  are configured. Raw UDP remains collection-only. Demo key setup and the case
+  `cef_ingest.senders` configuration are documented in `docs/live-monitoring.md`.
 - Remind the operator they can now stage activity on the victim and run
   `/loop 15s /trudi-check-alerts` to investigate alerts as they fire.
 

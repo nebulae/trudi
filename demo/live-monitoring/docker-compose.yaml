@@ -30,7 +30,14 @@ services:
     container_name: trudi-velo-server
     hostname: velo-server
     networks:
-      - velo-net
+      velo-net:
+      # Also reachable on the LAN at a FIXED address so the Windows victim VM
+      # (NAT'd behind the dockur container, which cannot resolve the docker DNS
+      # name "velo-server") can enroll by dialing https://10.73.0.2:8000/. The
+      # client cert is CA-pinned, not hostname-matched, so dialing by IP is
+      # fine. Only used by the `winrdp` profile; harmless otherwise.
+      lan-net:
+        ipv4_address: 10.73.0.2
     ports:
       # 8000: client frontend (clients connect here)
       # 8001: API (TRUDI talks here via velociraptor --api_config ... query)
@@ -69,6 +76,12 @@ services:
       - "2222:22"
     volumes:
       - velo-config:/config:ro
+      # Persist the live.* SSH keypair (/shared/trudi_live) across restart AND
+      # recreate. Without this the key lives in the container's ephemeral layer
+      # and rotates on every recreate, silently invalidating the key bring-up.sh
+      # pulled to ~/.ssh — only `down -v` wipes the volume (which forces a
+      # bring-up re-pull anyway).
+      - victim-shared:/shared
     depends_on:
       velo-server:
         condition: service_healthy
@@ -104,14 +117,19 @@ services:
     environment:
       VICTIM_ROLE: beachhead
     networks:
-      - velo-net
-      - lan-net
-      - c2-net
+      velo-net:
+      lan-net:
+        # Stable source address for signed CEF bindings; also keeps a restart
+        # from claiming the server's reserved 10.73.0.2 while it is stopped.
+        ipv4_address: 10.73.0.3
+      c2-net:
     ports:
       - "2223:22"
     volumes:
       - velo-config:/config:ro
       - lateral-cred:/lateral
+      # Persist the live.* SSH keypair across recreate (see `victim` above).
+      - victim-a-shared:/shared
     depends_on:
       velo-server:
         condition: service_healthy
@@ -129,13 +147,17 @@ services:
     environment:
       VICTIM_ROLE: target
     networks:
-      - velo-net
-      - lan-net
+      velo-net:
+      lan-net:
+        ipv4_address: 10.73.0.4
     ports:
       - "2224:22"
     volumes:
       - velo-config:/config:ro
       - lateral-cred:/lateral
+      # Persist the live.* SSH keypair across recreate (see `victim` above).
+      # This is the key whose rotation broke victim-b auth in the INV-002 run.
+      - victim-b-shared:/shared
     depends_on:
       velo-server:
         condition: service_healthy
@@ -162,6 +184,158 @@ services:
         ipv4_address: 203.0.113.10
     restart: unless-stopped
 
+  # ── Deception decoy scenario (compose profile "decoy") ─────────────────────
+  # An emulated Acalvio ShadowPlex RDP decoy on the LAN. The beachhead (victim-a)
+  # touches it with a harvested honey credential; the decoy emits ShadowPlex-
+  # format CEF over UDP syslog to the TRUDI ingest sidecar (bin/trudi-cef-ingest
+  # .py) running on the SIFT host. Needs the `lateral` profile's victim-a to do
+  # the touching:  docker compose --profile lateral --profile decoy up -d
+  #
+  # Format emulation of the published CEF spec — NOT Acalvio software.
+  decoy:
+    build:
+      context: ../..
+      dockerfile: demo/live-monitoring/Dockerfile.decoy
+    container_name: trudi-decoy
+    hostname: decoy
+    profiles: ["decoy"]
+    environment:
+      DECOY_NAME: DESKTOP-GN-806
+      DECOY_PORT: "3389"
+      DECOY_SITE: lab
+      # CEF goes to the ingest sidecar on the SIFT host (where TRUDI runs).
+      # host.docker.internal resolves to the host via the host-gateway mapping.
+      SYSLOG_HOST: host.docker.internal
+      SYSLOG_PORT: "5514"
+      HOLD_SECONDS: "600"
+      CEF_VERSION: 2026.8.2.0
+      SYSLOG_SENDER: decoy-emulator
+      SYSLOG_HMAC_KEY_FILE: /run/secrets/decoy-cef-key
+    secrets:
+      - decoy-cef-key
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      lan-net:
+        ipv4_address: 10.73.0.50
+    restart: unless-stopped
+
+  # ── Real Windows RDP victim scenario (compose profile "winrdp") ────────────
+  # A TRUE Windows Server 2022 machine (a KVM guest inside a container, via
+  # dockur/windows — NOT a Windows container, which Linux can't run). It is an
+  # investigable lateral-movement TARGET: victim-a opens a real RDP session to
+  # it, so TRUDI sees genuine Windows artifacts (Security 4624 type-10 logons,
+  # TerminalServices channels, registry, MFT) over its Velociraptor Windows
+  # client. Needs the `lateral` profile's victim-a to do the touching:
+  #   docker compose --profile lateral --profile winrdp up -d
+  #
+  # First boot downloads ~6 GB of Server 2022 eval media and runs an unattended
+  # install (~10–20 min); watch the console at http://localhost:8006. The OEM
+  # payload (built by win-oem-init) auto-installs the Velociraptor client,
+  # enables RDP, and creates the target account on first logon.
+  #
+  # win-oem-init builds that payload AFTER velo-server is healthy: it rewrites
+  # the shared client config to dial velo-server on the LAN (10.73.0.2:8000),
+  # fetches the Windows velociraptor.exe, and drops install.bat into the
+  # win-oem volume that victim-win mounts at /oem.
+  win-oem-init:
+    image: debian:stable-slim
+    container_name: trudi-win-oem-init
+    profiles: ["winrdp"]
+    secrets:
+      - windecoy-cef-key
+    volumes:
+      - velo-config:/config:ro
+      - win-oem:/oem
+      - ./scripts/win-oem-init.sh:/win-oem-init.sh:ro
+      - ./windecoy:/windecoy:ro
+    environment:
+      # The LAN address velo-server is pinned to above; baked into the Windows
+      # client config so the NAT'd guest can reach the frontend.
+      VELO_SERVER_LAN_URL: "https://10.73.0.2:8000/"
+      VELOCIRAPTOR_WINDOWS_URL: "https://github.com/Velocidex/velociraptor/releases/download/v0.76/velociraptor-v0.76.1-windows-amd64.exe"
+      # The local Windows account victim-a's RDP attack authenticates as. Demo
+      # creds; created by install.bat. Keep in step with attacks/win-rdp.sh.
+      WIN_RDP_USER: "rdpadmin"
+      WIN_RDP_PASS: "Sup3rS3cret!"
+      # Honey account + on-decoy ShadowPlex sensor (WINDECOY-DEMO). The honey
+      # account is a non-admin breadcrumb; the sensor emits CEF to the lan-net
+      # relay (10.73.0.55) which forwards to the SIFT-host ingest. Dormant on a
+      # plain winrdp boot (no relay, no honey logon). Keep WIN_HONEY_* in step
+      # with attacks (run → win-decoy) and the dispatcher defaults.
+      WIN_HONEY_USER: "linda"
+      WIN_HONEY_PASS: "H0neyT0ken!"
+      SHADOWPLEX_RELAY_HOST: "10.73.0.55"
+      SHADOWPLEX_RELAY_PORT: "5514"
+      DECOY_IP: "10.73.0.60"
+    entrypoint: ["/bin/bash", "/win-oem-init.sh"]
+    depends_on:
+      velo-server:
+        condition: service_healthy
+    restart: "no"
+
+  victim-win:
+    image: dockurr/windows:latest
+    container_name: trudi-victim-win
+    hostname: victim-win
+    profiles: ["winrdp"]
+    environment:
+      VERSION: "2022"          # Windows Server 2022 (eval media, ~180 days)
+      RAM_SIZE: "4G"
+      CPU_CORES: "2"
+      DISK_SIZE: "64G"
+      # NOTE: dockur reserves "Administrator" (the built-in account) and aborts
+      # the unattended install if it is used here — use any other name. The RDP
+      # target account (WIN_RDP_USER) is created separately by install.bat.
+      USERNAME: "labadmin"
+      PASSWORD: "Sup3rS3cret!"  # console account; RDP attack uses WIN_RDP_USER
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    stop_grace_period: 2m
+    ports:
+      # 8006: dockur web console (watch the install / view the desktop).
+      - "8006:8006"
+    volumes:
+      - win-storage:/storage      # the Windows VM disk — survives recreate
+      - win-oem:/oem:ro           # client config + velociraptor.exe + install.bat
+    networks:
+      lan-net:
+        ipv4_address: 10.73.0.60
+    depends_on:
+      win-oem-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ── WINDECOY-DEMO CEF relay (compose profile "windecoy") ───────────────────
+  # The on-decoy ShadowPlex sensor runs INSIDE the Windows VM (a KVM guest behind
+  # dockur's NAT) and cannot use Docker's host-gateway shortcut. It sends its
+  # ShadowPlex CEF to this relay — an ordinary lan-net container — which forwards
+  # each datagram to the TRUDI ingest sidecar (bin/trudi-cef-ingest.py) on the
+  # SIFT host via host.docker.internal. Brings the deception trigger of the real-
+  # Windows decoy demo to the ingest. Needs the winrdp box + the lateral victim-a:
+  #   sudo ./bring-up.sh --profiles lateral,winrdp,windecoy
+  windecoy-relay:
+    image: python:3.12-slim
+    container_name: trudi-windecoy-relay
+    hostname: windecoy-relay
+    profiles: ["windecoy"]
+    command: ["python3", "/relay.py"]
+    environment:
+      RELAY_LISTEN: "0.0.0.0:5514"
+      # CEF goes to the ingest sidecar on the SIFT host (where TRUDI runs).
+      RELAY_FORWARD: "host.docker.internal:5514"
+    volumes:
+      - ./windecoy/relay.py:/relay.py:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      lan-net:
+        ipv4_address: 10.73.0.55
+    restart: unless-stopped
+
 networks:
   velo-net:
     driver: bridge
@@ -183,3 +357,20 @@ volumes:
   # Carries the modelled "stolen" devops SSH key from victim-b (which mints it)
   # to victim-a (which pivots with it). Internal to the lateral profile.
   lateral-cred:
+  # Per-victim persistence for the live.* SSH keypair (/shared/trudi_live), so a
+  # container recreate does not rotate the key out from under the copy bring-up
+  # pulled to ~/.ssh. One volume per host keeps each host's key distinct.
+  victim-shared:
+  victim-a-shared:
+  victim-b-shared:
+  # winrdp profile: the OEM payload handed to the Windows installer, and the
+  # Windows VM's own disk (so the install survives a container recreate; only
+  # `down -v` wipes it and forces a fresh ~20-min install).
+  win-oem:
+  win-storage:
+
+secrets:
+  decoy-cef-key:
+    file: ${TRUDI_DECOY_CEF_KEY_FILE:-./secrets/decoy-cef.key}
+  windecoy-cef-key:
+    file: ${TRUDI_WINDECOY_CEF_KEY_FILE:-./secrets/windecoy-cef.key}

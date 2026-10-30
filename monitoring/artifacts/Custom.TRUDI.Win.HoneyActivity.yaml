@@ -1,0 +1,69 @@
+name: Custom.TRUDI.Win.HoneyActivity
+description: |
+  One-shot investigation of the Windows honeytoken demo. Correlate the
+  defender-provisioned account SID with native logon/process/file events,
+  PowerShell script blocks, current-user persistence and staged files.
+  Attacker-written receipts and transcripts are leads, not authoritative proof.
+type: CLIENT
+precondition: SELECT OS FROM info() WHERE OS = 'windows'
+parameters:
+  - name: PolicyPath
+    default: 'C:/ProgramData/TRUDI-Decoy/policy.json'
+  - name: ProfilePath
+    default: 'C:/Users/linda'
+  - name: SinceUTC
+    description: Optional RFC3339 start of the investigated session.
+    default: ''
+export: |
+  LET policy <= parse_json(data=read_file(filename=PolicyPath))
+  LET HoneySID <= policy.honey_sid
+sources:
+  - name: Policy
+    query: |
+      SELECT policy FROM scope()
+  - name: Security
+    query: |
+      SELECT System.EventRecordID AS record_id, System, EventData
+      FROM parse_evtx(filename='C:/Windows/System32/winevt/Logs/Security.evtx')
+      WHERE HoneySID AND System.EventID.Value IN (4624, 4625, 4688, 4656, 4663)
+        AND (EventData.SubjectUserSid = HoneySID OR EventData.TargetUserSid = HoneySID)
+        AND (NOT SinceUTC OR timestamp(epoch=System.TimeCreated.SystemTime) >= timestamp(string=SinceUTC))
+      ORDER BY record_id DESC LIMIT 500
+  - name: ScriptBlocks
+    query: |
+      SELECT System.EventRecordID AS record_id, System, EventData
+      FROM parse_evtx(filename='C:/Windows/System32/winevt/Logs/Microsoft-Windows-PowerShell%4Operational.evtx')
+      WHERE HoneySID AND System.EventID.Value = 4104 AND System.Security.UserID = HoneySID
+        AND (NOT SinceUTC OR timestamp(epoch=System.TimeCreated.SystemTime) >= timestamp(string=SinceUTC))
+      ORDER BY record_id DESC LIMIT 100
+  - name: LogonContext
+    query: |
+      -- A reconnected desktop can retain a logon ID from before SinceUTC.
+      SELECT System.EventRecordID AS record_id, System, EventData
+      FROM parse_evtx(filename='C:/Windows/System32/winevt/Logs/Security.evtx')
+      WHERE HoneySID AND System.EventID.Value = 4624 AND EventData.TargetUserSid = HoneySID
+        AND EventData.LogonType = 10
+      ORDER BY record_id DESC LIMIT 50
+  - name: Reconnects
+    query: |
+      SELECT System.EventRecordID AS record_id, System, EventData
+      FROM parse_evtx(filename='C:/Windows/System32/winevt/Logs/Security.evtx')
+      WHERE HoneySID AND policy.computer AND System.EventID.Value IN (4778, 4779)
+        AND EventData.AccountName = policy.honey_account AND EventData.AccountDomain = policy.computer
+        AND (NOT SinceUTC OR timestamp(epoch=System.TimeCreated.SystemTime) >= timestamp(string=SinceUTC))
+      ORDER BY record_id DESC LIMIT 100
+  - name: Persistence
+    query: |
+      SELECT FullPath AS path, Data.value AS value
+      FROM glob(globs=format(format='HKEY_USERS/%v/Software/Microsoft/Windows/CurrentVersion/Run/NorthstarWorkspace', args=[HoneySID]), accessor='registry')
+      WHERE HoneySID
+  - name: Staging
+    query: |
+      SELECT FullPath AS path, Size, Mtime, hash(path=FullPath).SHA256 AS sha256
+      FROM glob(globs=format(format='%v/AppData/Local/NorthstarCache/**', args=[ProfilePath]))
+      WHERE NOT IsDir
+  - name: Processes
+    query: |
+      SELECT Pid, Ppid, Name, Exe, Username, CommandLine, CreateTime
+      FROM pslist()
+      WHERE CommandLine =~ 'NorthstarCache'
